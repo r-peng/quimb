@@ -990,3 +990,318 @@ def gate_full_update_als(norm,ovlp,tags_plq,steps,tol,max_bond,
                 break
             previous_cost = cost
     return norm
+def ovlp(Hi,Hj):
+    len_ = min(len(Hi),len(Hj))
+    return sum([np.tensordot(Hi[k].dagger,Hj[k],axes=((1,0),(0,1)))  
+                for k in range(len_)])
+def gs(T,Hk,m,tol=1e-6):
+    # assumes T is orthonormal
+    Tk = [h.copy() for h in Hk]
+    Rk = [0.0 for i in range(m)]
+    for j,Tj in enumerate(T):
+        Rk[j] = ovlp(Tj,Hk)
+        for i in range(len(Tj)):
+            Tk[i] = Tk[i]-Rk[-1]*Tj[i]
+    norm = np.sqrt(ovlp(Tk,Tk))
+    Rk[len(T)] = norm
+    T.append([h/norm for h in Tk])
+    assert abs(ovlp(T[-1],T[-1])-1.0)<tol
+    print(Rk)
+    for i in range(len(Hk)):
+        rhs = []
+        for j in range(len(T)):
+            if len(T[j])>i:
+                rhs.append(T[j][i]*Rk[j])
+        rhs = sum(rhs)
+        assert (Hk[i]-rhs).norm()<tol
+    return T,Rk
+def restart(A,x0,b,max_space=10,tol=1e-4):
+    tol = 1e-6
+
+    nvir = len(x0.shape)-1
+    axs1,axs2 = range(nvir,0,-1),range(nvir)
+    r0 = b-A(x0)
+    if r0.norm()<tol:
+        return x0
+    v,r = svd(r0,left_idx=axs2,cutoff=tol)
+    V = [v]
+    H = []
+    for j in range(max_space):
+        u = A(V[-1])
+#        Hj = [np.tensordot(v.dagger,u,axes=(axs1,axs2)) for v in V]
+#        u = u-sum([np.tensordot(V[l],Hj[l],axes=((-1,),(0,))) 
+#                   for l in range(len(V))])
+        Hj = []
+        for l in range(len(V)):
+            Hj.append(np.tensordot(V[l].dagger,u,axes=(axs1,axs2)))
+            u = u-np.tensordot(V[l],Hj[l],axes=((-1,),(0,)))
+            assert np.tensordot(V[l].dagger,u,axes=(axs1,axs2)).norm()<tol
+        print(j,u.norm())
+        if u.norm()<tol:
+            break
+        lhs1 = [np.tensordot(v.dagger,u,axes=(axs1,axs2)).norm() for v in V]
+        if sum(lhs1)>tol:
+            lhs2 = [(np.tensordot(v.dagger,v,axes=(axs1,axs2))
+                     -get_physical_identity(v)).norm() for v in V]
+            print('u',u.norm())
+            print('check V',lhs1)
+            print('check V',lhs2)
+            for k in range(len(V)):
+                for l in range(k):
+                    print('Vk',k)
+                    print(V[k])
+                    print('Vl',l)
+                    print(V[l])
+                    print('k,l',k,l,np.tensordot(V[l].dagger,V[k],
+                                                 axes=(axs1,axs2)).norm())
+            exit()
+        v,h = svd(u,left_idx=axs2,cutoff=tol)
+        lhs = [np.tensordot(v_.dagger,v,axes=(axs1,axs2)).norm() for v_ in V]
+        if sum(lhs)>tol:
+            print('v',v.norm())
+            print('check V',lhs)
+            exit()
+        V.append(v)
+        Hj.append(h)
+        H.append(Hj)
+
+#    for i in range(len(H)):
+#        lhs = A(V[i])
+#        assert len(H[i])==i+2
+#        rhs = sum([np.tensordot(V[j],H[i][j],axes=((-1,),(0,))) for j in range(i+2)])
+#        print(lhs.norm(),(lhs-rhs).norm())
+#        assert (lhs-rhs).norm()<tol
+
+    # QR on H
+    m = len(H)
+    print(m)
+    T = []
+    R = [[] for i in range(m)]
+    for j,Hj in enumerate(H): 
+        print(j)
+        T,R[j] = gs(T,Hj,m)
+    R = np.array(R)
+    exit()
+    num = np.array([np.tensordot(Hj[0].dagger,r,axes=((1,0),(0,1))) for Hj in H])
+    denom = np.zeros((m,m),dtype=num.dtype)
+    for i in range(m):
+        for j in range(i+1):
+            val = sum([np.tensordot(H[i][k].dagger,H[j][k],axes=((1,0),(0,1))) 
+                       for k in range(len(H[j]))])
+            denom[i,j] = denom[j,i] = val
+    denom_ = np.zeros((m,m),dtype=num.dtype)
+    for i in range(m):
+        for j in range(m):
+            denom_[i,j] = col_ovlp(H[i],H[j])
+    assert np.linalg.norm(denom-denom_)<tol
+    if abs(np.linalg.det(denom))<tol:
+        return x0
+    y = np.dot(np.linalg.inv(denom),num)
+    x = x0+sum([V[i]*y[i] for i in range(m)])
+    r = b-A(x)
+    
+    perturb = np.random.rand(m)*1e-3
+    y_ = y+perturb
+    x_ = x0+sum(V[i]*y_[i] for i in range(m))
+    r_ = b-A(x_)
+    assert r.norm()-r_.norm()<1e-6
+    return x,r
+def gate_full_update_als(norm_plq,overlap,tags_plq,steps,tol,max_bond,
+    optimize='auto-hq',solver='lsqr',pos_smudge=1e-6):
+    cost_fid = overlap.contract(output_inds=[])
+    cost_norm = norm_plq.contract(output_inds=[])
+    cost = -cost_fid+cost_norm
+    print('init cost={},norm_plq={}'.format(cost,cost_norm))
+    def contract(ftn,site,output_inds):
+        bra_pop = ftn[site,'BRA']
+        original_phase = bra_pop.phase
+        tid = bra_pop.get_fermion_info()[0]
+    
+        ctr = ftn.select((site,'BRA'), which='!all')
+        ctr.add_tag('contract')
+        ftn.contract_tags('contract',inplace=True,output_inds=output_inds)
+        assert ftn.num_tensors==2
+        ftn._refactor_phase_from_tids((tid,))
+        global_flip = bra_pop.phase.get('global_flip',False)
+        local_inds = bra_pop.phase.get('local_inds',[])
+        assert global_flip == False 
+        assert len(local_inds) == 0
+        return ftn, ftn['contract'].data
+        
+    xs = dict()
+    x_previous = dict()
+    previous_cost = None
+    with contract_strategy(optimize), shared_intermediates():
+        for i in range(steps):
+            for site in tags_plq:
+                ket_tid = norm_plq[site,'KET'].get_fermion_info()[0] 
+                bra_tid = norm_plq[site,'BRA'].get_fermion_info()[0]
+                norm_plq.fermion_space.move(ket_tid,0)
+                norm_plq.fermion_space.move(bra_tid,norm_plq.num_tensors-1)
+                norm_plq._refactor_phase_from_tids((ket_tid,bra_tid))
+                bra1 = norm_plq[site,'BRA']
+                ket1 = norm_plq[site,'KET']
+                global_flip = bra1.phase.get('global_flip',False)
+                local_inds = bra1.phase.get('local_inds',[])
+                assert global_flip == False 
+                assert len(local_inds) == 0
+                global_flip = ket1.phase.get('global_flip',False)
+                local_inds = ket1.phase.get('local_inds',[])
+                assert global_flip == False 
+                assert len(local_inds) == 0
+
+                bra_tid = overlap[site,'BRA'].get_fermion_info()[0]
+                overlap.fermion_space.move(bra_tid,overlap.num_tensors-1)
+                overlap._refactor_phase_from_tids((bra_tid,))
+                bra2 = overlap[site,'BRA']
+                global_flip = bra2.phase.get('global_flip',False)
+                local_inds = bra2.phase.get('local_inds',[])
+                assert global_flip == False 
+                assert len(local_inds) == 0
+                assert (bra2.data-bra1.data).norm()<1e-6
+
+                # forming b
+                ovlp = overlap.copy()
+                pop = ovlp[site,'BRA']
+                pop.add_tag('pop')
+                ctr = ovlp.select((site,'BRA'), which='!all')
+                ctr.add_tag('ctr')
+                ovlp.contract_tags('ctr',inplace=True,output_inds=pop.inds[::-1])
+                assert ovlp.num_tensors==2
+                tid = ovlp['pop'].get_fermion_info()[0]
+                ovlp._refactor_phase_from_tids((tid,))
+                global_flip = ovlp['pop'].phase.get('global_flip',False)
+                local_inds  = ovlp['pop'].phase.get('local_inds',[])
+                assert global_flip == False 
+                assert len(local_inds) == 0
+                b = ovlp['ctr']
+
+                # forming A
+                norm = norm_plq.copy()
+                if dense:
+                    output_inds = norm[site,'BRA'].inds[1:][::-1]
+                    ctr = norm.select(site,which='!any')
+                    ctr.add_tag('ctr')
+                    norm.contrac_tags('ctr',inplace=True,output_inds=output_inds,
+                                      optimtize=optimize)
+                    assert norm.num_tensors==3
+                    tid_bra = norm[site,'BRA'].get_fermion_info()[0]
+                    tid_ket = norm[site,'KET'].get_fermion_info()[0]
+                    norm._refactor_phase_from_tids((tid_bra,tid_ket))
+                    global_flip = norm[site,'BRA'].phase.get('global_flip',False)
+                    local_inds  = norm[site,'BRA'].phase.get('local_inds',[])
+                    assert global_flip == False 
+                    assert len(local_inds) == 0
+                    assert (norm[site,'BRA'].data-norm_plq[site,'BRA'].data).norm()<1e-6
+                    global_flip = norm[site,'KET'].phase.get('global_flip',False)
+                    local_inds  = norm[site,'KET'].phase.get('local_inds',[])
+                    assert global_flip == False 
+                    assert len(local_inds) == 0
+                    assert (norm[site,'KET'].data-norm_plq[site,'KET'].data).norm()<1e-6
+                solver_opts = dict(atol=tol,btol=tol)
+                data = slice_solve(norm_plq.copy(),b,x0,site,solver,
+                                   optimize=optimize,**solver_opts)
+
+                norm_plq[site,'KET'].modify(data=data)
+#                data = norm_plq[site,'KET'].data.dagger
+#                norm_plq[site,'BRA'].modify(data=data)
+#                overlap[site,'BRA'].modify(data=data)
+          
+            cost_fid = overlap.contract(output_inds=[])
+            cost_norm = norm_plq.contract(output_inds=[])
+            cost = -cost_fid+cost_norm
+            print('iteration={},cost={},norm={}'.format(i,cost,cost_norm))
+#            print('')
+            converged = (previous_cost is not None)and(abs(cost-previous_cost)<tol)
+            if converged:
+                break
+            previous_cost = cost
+    return norm_plq
+def flat2slice(tsr):
+#    print(tsr)
+    tsr = tsr.to_sparse()
+    blk_map = dict()
+    for blk in tsr.blocks:
+        q_lab = blk.q_labels[-1]
+        if q_lab in blk_map.keys():
+            blk_map[q_lab].append(blk)
+        else:
+            blk_map[q_lab] = [blk]
+#    for q_lab in blk_map:
+#        print(q_lab)
+#        for blk in blk_map[q_lab]:
+#            print(blk)
+    tsr_map = {q_lab:[] for q_lab in blk_map.keys()}
+    pattern = tsr.pattern[:-1]
+    for q_lab,blks in blk_map.items():
+        dim = blks[0].shape[-1]
+        for i in range(dim):
+            blks_i = []
+            for blk in blks:
+                q_labels = blk.q_labels[:-1]
+                data = np.asarray(blk)[...,i]
+                blks_i.append(blk.__class__(reduced=data,q_labels=q_labels))
+            tsr_i = tsr.__class__(blocks=blks_i,pattern=pattern)
+            tsr_map[q_lab].append(tsr_i.to_flat())
+#    for q_lab in tsr_map:
+#        print(q_lab)
+#        for i,tsr in enumerate(tsr_map[q_lab]):
+#            print(i,tsr)
+#    exit() 
+    return tsr_map 
+def slice2flat(tsr_map):
+    tsr = list(tsr_map.values())[0]
+    pattern = tsr.pattern
+    sparse = tsr.__class__
+    sub = tsr.blocks[0].__class__
+
+    for q_lab in tsr_map:
+        print(q_lab)
+        for i,tsr in enumerate(tsr_map[q_lab]):
+            print(i,tsr)
+#    exit() 
+    BLKS = []
+    for q_lab,tsrs in tsr_map.items():
+        dim = len(tsrs)
+        blks = dict()
+        for i,tsr in enumerate(tsrs):
+            for blk in tsr.blocks:
+                q_labels = blk.q_labels
+                data = np.asarray(blk)
+                if i==0:
+                    blks[q_labels] = [data]
+                else:
+                    blks[q_labels].append(data)
+        for q_labels in blks.keys():
+            data = np.stack(blks[q_labels],axis=-1)
+            BLKS.append(sub(reduced=data,q_labels=q_labels+(q_lab,)))
+    tsr = sparse(blocks=blks,pattern=pattern+'+')
+    print(tsr)
+    exit() 
+    return tsr.to_flat()
+def slice_solve(norm,b,x0,site,solver,optimize='auto',**solver_opts):
+    lix = norm[site,'BRA'].inds[1:][::-1]
+    rix = norm[site,'KET'].inds[:-1]
+    x0_map = flat2slice(norm[site,'KET'].data)
+    b_map  = flat2slice(b.data)
+    assert set(x0_map.keys())==set(b_map.keys())
+    tns = norm.select(site,which='!any')
+    const = 
+    solver = getattr(spla,solver)
+    x_map = dict()
+    for q_lab in b_map.keys():
+        x_map[q_lab] = []
+        symm = x0_map[q_lab][0].dq
+        x_cons = _tensors_to_constructors(tns,rix,inv=True) 
+        b_cons = _tensors_to_constructors(tns,lix,inv=False)
+        A = FTNLinearOperator(tns,lix,rix,symm,constructor=x_cons,optimize=optimize)
+#        A = FTNLinearOperator(tns,lix,rix,symm,optimize=optimize)
+#        print(A.constructor.pattern)
+        for i in range(len(b_map[q_lab])):
+            print(x_cons.pattern)
+            print(x0_map[q_lab][i].pattern)
+            x0_vec = x_cons.tensor_to_vector(x0_map[q_lab][i])
+            b_vec  = b_cons.tensor_to_vector(b_map[q_lab][i])
+            x,istop,itn,r1norm = solver(A,b_vec,x0=x0_vec,**solver_opts)
+            x_map[q_lab].append(A.vector_to_tensor(x))
+    return slice2flat(x_map)
