@@ -306,18 +306,19 @@ def restart(A,x0,b,max_space=10,tol=1e-6,atol=1e-10):
         q = q/norm_q
         lhs1 = [abs(np.tensordot(q_.dagger,q,axes=axes)) for q_ in Q]
         if sum(lhs1)>atol*len(lhs1):
-            print(sum(lhs1),atol)
-            print('q',norm_q)
-            print('check Q',lhs1)
-            lhs2 = [abs(np.tensordot(q_.dagger,q_,axes=axes)-1.0) for q_ in Q]
-            if sum(lhs2)>atol:
-               print('check Q',lhs2)
-            for k in range(j+1):
-                for l in range(k):
-                    ovlp = np.tensordot(Q[l].dagger,Q[k],axes=axes)
-                    if abs(ovlp)>atol:
-                        print('k,l',k,l,ovlp)
-            exit()
+            break
+#            print(sum(lhs1),atol)
+#            print('q',norm_q)
+#            print('check Q',lhs1)
+#            lhs2 = [abs(np.tensordot(q_.dagger,q_,axes=axes)-1.0) for q_ in Q]
+#            if sum(lhs2)>atol:
+#               print('check Q',lhs2)
+#            for k in range(j+1):
+#                for l in range(k):
+#                    ovlp = np.tensordot(Q[l].dagger,Q[k],axes=axes)
+#                    if abs(ovlp)>atol:
+#                        print('k,l',k,l,ovlp)
+#            exit()
         Q.append(q)
         H[j+1,j] = norm_q
 
@@ -345,31 +346,33 @@ def GMRES(A,x0,b,max_space=10,max_iter=50,tol=1e-6,atol=1e-10):
     for i in range(max_iter):
         x,r_norm = restart(A,x,b,max_space=max_space,tol=tol,atol=atol)
         assert r_norm-r_norm_old<atol
-        print('iter={},r_norm={}'.format(i,r_norm))
+#        print('iter={},r_norm={}'.format(i,r_norm))
         if r_norm<tol:
             break
         r_norm_old = r_norm
     return x
-def maintain_order(ftn,ref,tags_plq,layer_tag='KET',refactor=True):
-    # make sure ftn & ref have the same rel order
-    # always assumes ref to be phaseless
-    ref_order = [ref[site].get_fermion_info()[1] for site in tags_plq]  
-    order = [ftn[site,layer_tag].get_fermion_info()[1] for site in tags_plq] 
-    tids  = [ftn[site,layer_tag].get_fermion_info()[0] for site in tags_plq] 
-    if (ref_order[0]-ref_order[1])*(order[0]-order[1])<0:
-        for i in [0,1]:
-            ftn.fermion_space.move(tids[i],order[1-i])
-    if refactor:
-        ftn._refactor_phase_from_tids(tids)
-    return ftn
 def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e-6,
     optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
     condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
     solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
-    layer_tags = 'KET','BRA' 
+    # assert tags_plq is in the correct order
+    sites = [ket[site].get_fermion_info()[1] for site in tags_plq]
+    if len(sites)==2:
+        assert sites[0]<sites[1]
+    def reorder(ftn,tags_plq):
+        for i,site in enumerate(tags_plq):
+            tid = ftn[site,'KET'].get_fermion_info()[0]
+            ftn.fermion_space.move(tid,i)
+            tid = ftn[site,'BRA'].get_fermion_info()[0]
+            ftn.fermion_space.move(tid,norm_plq.num_tensors-1-i)
+        tids  = [ftn[site,'KET'].get_fermion_info()[0] for site in tags_plq]
+        tids += [ftn[site,'BRA'].get_fermion_info()[0] for site in tags_plq]
+        ftn._refactor_phase_from_tids(tids)
+        return ftn
 
     # make full target
-    overlap = env.copy()
+    overlap  = env.copy()
+    norm_plq = env.copy()
     if is_lone_coo(where):
         _where = (where,)
     else:
@@ -385,10 +388,17 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     tids = overlap._get_tids_from_inds(site_ix, which='any')
     for tid_ in tids:
         tsr = overlap.tensor_map[tid_]
-        if layer_tags[0] in tsr.tags:
+        if 'KET' in tsr.tags:
             tsr.reindex_(reindex_map)
     overlap.add_tensor(TG, virtual=True)
+    overlap  = reorder(overlap,tags_plq)
+    norm_plq = reorder(norm_plq,tags_plq)
+    for site in tags_plq:
+        assert (overlap[site,'BRA'].data-overlap[site,'KET'].data.dagger).norm()<atol 
+        assert (norm_plq[site,'BRA'].data-norm_plq[site,'KET'].data.dagger).norm()<atol 
 
+    for site in tags_plq:
+        overlap[site,'KET'].modify(data=ket[site,'KET'].data.copy())
     # make initial guess
     ket_init = ket.copy()
     if condition_tensors:
@@ -405,7 +415,10 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
             else:
                 conditioner(plq,balance_bonds=condition_balance_bonds)
         # make sure rel order of involved tsr doesn't change
-        ket_init = maintain_order(ket_init,ket,tags_plq,refactor=False)
+        for site in tags_plq:
+            tid = ket_init[site].get_fermion_info()[0]
+            order = ket[site].get_fermion_info()[1]
+            ket_init.fermion_space.move(tid,order)
         for site in tags_plq:
             ket_init[site].phase = {}
         # assert: all tsrs are in the same order
@@ -429,10 +442,11 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
                 assert len(local_inds2) == 0
                 if site not in tags_plq:
                     assert (tsr1.data-tsr2.data).norm()<atol
-    norm_plq = env.copy()
-    norm_plq = maintain_order(norm_plq,ket,tags_plq)
     for site in tags_plq:
         norm_plq[site,'KET'].modify(data=ket_init[site].data.copy())
+        data = ket_init[site].data.dagger
+        norm_plq[site,'BRA'].modify(data=data)
+        overlap[site,'BRA'].modify(data=data)
 
     def contract(ftn,site,output_inds):
         pop = ftn[site,'BRA']
@@ -445,25 +459,22 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         tid = pop.get_fermion_info()[0]
         ftn._refactor_phase_from_tids((tid,))
         return ftn, ftn['contract'].data
-        
+
+    xs = dict()
+    x_previous = dict() 
     previous_cost = None
-    cost_fid = overlap.contract(output_inds=[])
-    cost_norm = norm_plq.contract(output_inds=[])
-    previous_cost = -2.0*cost_fid+cost_norm
-    print('init cost={},norm_plq={}'.format(previous_cost,cost_norm))
     with contract_strategy(optimize), shared_intermediates():
         for i in range(steps):
             for site in tags_plq:
-                ket_tid = norm_plq[site,'KET'].get_fermion_info()[0] 
-                bra_tid = norm_plq[site,'BRA'].get_fermion_info()[0]
-                norm_plq.fermion_space.move(ket_tid,0)
-                norm_plq.fermion_space.move(bra_tid,norm_plq.num_tensors-1)
-                norm_plq._refactor_phase_from_tids((ket_tid,bra_tid))
-
-                bra_tid = overlap[site,'BRA'].get_fermion_info()[0]
-                overlap.fermion_space.move(bra_tid,overlap.num_tensors-1)
-                overlap._refactor_phase_from_tids((bra_tid,))
+                norm_plq = reorder(norm_plq,[site])
+                overlap  = reorder(overlap ,[site])
                 assert (norm_plq[site,'BRA'].data-overlap[site,'BRA'].data).norm()<atol 
+                #print('############ norm_plq #############')
+                #for tid,(tsr,tsite) in norm_plq.fermion_space.tensor_order.items():
+                #    print(tsite,tsr.tags,tsr.phase)
+                #print('############ overlap #############')
+                #for tid,(tsr,tsite) in overlap.fermion_space.tensor_order.items():
+                #    print(tsite,tsr.tags,tsr.phase)
 
                 output_inds = norm_plq[site,'BRA'].inds[::-1]
                 ovlp = overlap.copy()
@@ -473,21 +484,28 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
                     norm[site,'KET'].modify(data=x.copy())
                     norm,Ax = contract(norm,site,output_inds)
                     return Ax
-                data = GMRES(A,norm_plq[site,'KET'].data,b,tol=rtol,atol=atol)
-                norm_plq[site,'KET'].modify(data=data)
-#                data = norm_plq[site,'KET'].data.dagger
-#                norm_plq[site,'BRA'].modify(data=data)
-#                overlap[site,'BRA'].modify(data=data)
+                x0 = x_previous.get(site,b)
+                x = GMRES(A,x0,b,tol=rtol,atol=atol)
+                norm_plq[site,'KET'].modify(data=x)
+                xH = x.dagger
+                norm_plq[site,'BRA'].modify(data=xH)
+                overlap[site,'BRA'].modify(data=xH)
+                xs[site] = x
           
-#            cost_fid = overlap.contract(output_inds=[])
-            cost_norm = norm_plq.contract(output_inds=[])
+            ndim = len(output_inds)
+            axes = range(ndim-1,-1,-1),range(ndim)
+            cost_fid = np.tensordot(xH,b,axes=axes) 
+            cost_norm = np.tensordot(xH,A(x),axes=axes)
             cost = -2.0*cost_fid+cost_norm
-            print('iteration={},cost={},norm={}'.format(i,cost,cost_norm))
-            print('')
+            print('iteration={},cost={},norm={},fid={}'.format(
+                   i,cost,cost_norm,cost_fid))
+#            print('')
             converged = (previous_cost is not None)and(abs(cost-previous_cost)<tol)
             if converged:
                 break
             previous_cost = cost
+            for site in tags_plq:
+                x_previous[site] = xs[site]
 
     if condition_tensors:
         plq = norm_plq.select(tags_plq,which='any')
@@ -496,9 +514,10 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
             conditioner(plq,value=pre_norm,balance_bonds=condition_balance_bonds)
         else:
             conditioner(plq,balance_bonds=condition_balance_bonds)
-    norm_plq = maintain_order(norm_plq,ket,tags_plq)
+    norm_plq = reorder(norm_plq,tags_plq)
     for site in tags_plq:
         ket[site].modify(data=norm_plq[site,'KET'].data.copy())
+        bra[site].modify(data=norm_plq[site,'BRA'].data.copy())
 
 class FullUpdate(FullUpdate):
     def _maybe_compute_plaquette_envs(self, force=False):
@@ -522,10 +541,6 @@ class FullUpdate(FullUpdate):
 
         if self.pre_normalize:
             # get the first plaquette env and use it to compute current norm
-#            p0, env0 = next(iter(envs.items()))
-#            sites = plaquette_to_sites(p0)
-#            tags_plq = tuple(starmap(norm.site_tag, sites))
-#            norm_plq = norm.select_any(tags_plq) | env0
             p0,norm_plq = next(iter(envs.items()))
 
             # contract the local plaquette norm
@@ -539,11 +554,7 @@ class FullUpdate(FullUpdate):
             # scale the envs, taking into account the number of sites missing
             n = self._psi.num_tensors
             for ((_, _), (di, dj)), env in envs.items():
-#                n_missing = di * dj
-#                env.multiply_(nfactor ** (n_missing / n - 1),
-#                              spread_over='all')
                 env.multiply_(nfactor,spread_over='all')
-#                print(env.contract(all,optimize=self.contract_optimize))
 
         self.plaquette_envs = envs
         self.plaquette_mapping = calc_plaquette_map(envs)
@@ -552,76 +563,6 @@ class FullUpdate(FullUpdate):
         self._env_group_count = self._group_count
         self._env_term_count = self._term_count
 
-    def gate_simple(self,G,where,**plaquette_env_options):
-        layer_tags = 'KET','BRA' 
-        canonize = True
-        mode = 'mps'
-        tags_plq = tuple(starmap(self._psi.site_tag, where))
-        steps = 50
-        tol = 1e-6
-
-        inplace = True
-        print(where)
-        print('initial energy:',self.compute_energy())
-        if not inplace:
-            fs = self._psi.fermion_space
-            for tid,(tsr,site) in fs.tensor_order.items():
-                global_flip = tsr.phase.get('global_flip',False)
-                local_inds = tsr.phase.get('local_inds',[])
-                assert global_flip == False 
-                assert len(local_inds) == 0
-        if inplace:
-            ket_init = self._psi
-        else:
-            ket_init = self._psi.copy()
-        condition_tensors = True
-        condition_maintain_norms = True
-        condition_balance_bonds = True
-        if condition_tensors:
-            plq = ket_init.select(tags_plq,which='any')
-            conditioner(plq,balance_bonds=condition_balance_bonds)
-            if condition_maintain_norms:
-                pre_norm = plq[tags_plq[0]].norm()
-        ket_init.gate_(G,where,contract='reduce-split',max_bond=self.D)
-        e1 = self.compute_energy()
-        if condition_tensors:
-            if condition_maintain_norms:
-                conditioner(plq,value=pre_norm,
-                            balance_bonds=condition_balance_bonds)
-            else:
-                conditioner(plq, balance_bonds=condition_balance_bonds)
-        if not inplace:
-            # make sure rel order of involved tsr doesn't change
-            ket_init = maintain_order(ket_init,self._psi,tags_plq,refactor=False)
-            for site in tags_plq:
-                ket_init[site].phase = {}
-            # assert: all tsrs are in the same order
-            #         all tsrs are phaseless
-            #         all uninvolved tsrs data are unchanged 
-            for i in range(self._psi.Lx):
-                for j in range(self._psi.Ly):
-                    site = self._psi.site_tag(i,j)
-                    tsr1 = ket_init[site]
-                    tsr2 = self._psi[site]
-                    order1 = tsr1.get_fermion_info()[1]
-                    order2 = tsr2.get_fermion_info()[1]
-                    global_flip1 = tsr1.phase.get('global_flip',False)
-                    local_inds1 = tsr1.phase.get('local_inds',[])
-                    global_flip2 = tsr2.phase.get('global_flip',False)
-                    local_inds2 = tsr2.phase.get('local_inds',[])
-                    assert order1 == order2
-                    assert global_flip1 == False
-                    assert global_flip2 == False
-                    assert len(local_inds1) == 0 
-                    assert len(local_inds2) == 0
-                    if site not in tags_plq:
-                        assert (tsr1.data-tsr2.data).norm()<1e-6
-            e2 = self.compute_energy()
-            assert abs(e2-e1)<tol
-        if not inplace:
-            for site in tags_plq:
-                self._psi[site].modify(data=ket_init[site].data.copy())
-        print('gated energy:',self.compute_energy())
     def gate(self,G,where):
         """Apply the gate ``G`` at sites where, using a fitting method that
         takes into account the current environment.
@@ -645,12 +586,12 @@ class FullUpdate(FullUpdate):
         tags_plq = tuple(starmap(self._psi.site_tag, plaquette_to_sites(plq)))
 
         print(where)
-        print('initial energy:',self.compute_energy())
+#        print('initial energy:',self.compute_energy())
         gate_full_update_als(ket=self._psi,env=env,bra=self._bra,G=G,
                              where=where,tags_plq=tags_plq,max_bond=self.D,
                              optimize=self.contract_optimize,
                              condition_balance_bonds=self.condition_balance_bonds,
                              **self._gate_opts)
         self._term_count += 1
-        print('gated energy:',self.compute_energy())
+#        print('gated energy:',self.compute_energy())
         

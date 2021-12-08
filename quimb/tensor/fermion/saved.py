@@ -1305,3 +1305,73 @@ def slice_solve(norm,b,x0,site,solver,optimize='auto',**solver_opts):
             x,istop,itn,r1norm = solver(A,b_vec,x0=x0_vec,**solver_opts)
             x_map[q_lab].append(A.vector_to_tensor(x))
     return slice2flat(x_map)
+    def gate_simple(self,G,where,**plaquette_env_options):
+        layer_tags = 'KET','BRA' 
+        canonize = True
+        mode = 'mps'
+        tags_plq = tuple(starmap(self._psi.site_tag, where))
+        steps = 50
+        tol = 1e-6
+
+        inplace = True
+        print(where)
+        print('initial energy:',self.compute_energy())
+        if not inplace:
+            fs = self._psi.fermion_space
+            for tid,(tsr,site) in fs.tensor_order.items():
+                global_flip = tsr.phase.get('global_flip',False)
+                local_inds = tsr.phase.get('local_inds',[])
+                assert global_flip == False 
+                assert len(local_inds) == 0
+        if inplace:
+            ket_init = self._psi
+        else:
+            ket_init = self._psi.copy()
+        condition_tensors = True
+        condition_maintain_norms = True
+        condition_balance_bonds = True
+        if condition_tensors:
+            plq = ket_init.select(tags_plq,which='any')
+            conditioner(plq,balance_bonds=condition_balance_bonds)
+            if condition_maintain_norms:
+                pre_norm = plq[tags_plq[0]].norm()
+        ket_init.gate_(G,where,contract='reduce-split',max_bond=self.D)
+        e1 = self.compute_energy()
+        if condition_tensors:
+            if condition_maintain_norms:
+                conditioner(plq,value=pre_norm,
+                            balance_bonds=condition_balance_bonds)
+            else:
+                conditioner(plq, balance_bonds=condition_balance_bonds)
+        if not inplace:
+            # make sure rel order of involved tsr doesn't change
+            ket_init = maintain_order(ket_init,self._psi,tags_plq,refactor=False)
+            for site in tags_plq:
+                ket_init[site].phase = {}
+            # assert: all tsrs are in the same order
+            #         all tsrs are phaseless
+            #         all uninvolved tsrs data are unchanged 
+            for i in range(self._psi.Lx):
+                for j in range(self._psi.Ly):
+                    site = self._psi.site_tag(i,j)
+                    tsr1 = ket_init[site]
+                    tsr2 = self._psi[site]
+                    order1 = tsr1.get_fermion_info()[1]
+                    order2 = tsr2.get_fermion_info()[1]
+                    global_flip1 = tsr1.phase.get('global_flip',False)
+                    local_inds1 = tsr1.phase.get('local_inds',[])
+                    global_flip2 = tsr2.phase.get('global_flip',False)
+                    local_inds2 = tsr2.phase.get('local_inds',[])
+                    assert order1 == order2
+                    assert global_flip1 == False
+                    assert global_flip2 == False
+                    assert len(local_inds1) == 0 
+                    assert len(local_inds2) == 0
+                    if site not in tags_plq:
+                        assert (tsr1.data-tsr2.data).norm()<1e-6
+            e2 = self.compute_energy()
+            assert abs(e2-e1)<tol
+        if not inplace:
+            for site in tags_plq:
+                self._psi[site].modify(data=ket_init[site].data.copy())
+        print('gated energy:',self.compute_energy())
