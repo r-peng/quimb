@@ -1445,6 +1445,44 @@ class FermionTensorNetwork(BlockTensorNetwork):
         """
         return FermionTensorNetwork((self, other)) ^ ...
 
+#def _tensors_to_constructors(tensors, inds, inv=True):
+#    """
+#    Generate a pyblock3.algebra.fermion.Constructor object
+#    to allow mapping from vector to tensor and inverse.
+#
+#    Parameters
+#    ----------
+#    tensors: a list/tuple of FermionTensors
+#        The tensors to gather symmetry information from
+#    inds: a list/tuple of strings
+#        The indices of the tensor to construct
+#    inv: a string of "+" and "-"
+#        Whether to take the complementary signs
+#        from the tensor input
+#
+#    Returns
+#    -------
+#    constructor: a pyblock3.algebra.fermion.Constructor object
+#    """
+#    string_inv = {"+":"-", "-":"+"}
+#    pattern = ""
+#    bond_infos = []
+#    for T in tensors:
+#        axes = [T.inds.index(ix) for ix in inds if ix in T.inds]
+#        if not axes:
+#            continue
+#        elif len(axes)==len(inds):
+#            return T.data.to_constructor(axes)
+#        else:
+#            for ix in axes:
+#                bond = T.data.get_bond_info(ix, flip=False)
+#                bond_infos.append(bond)
+#                if inv:
+#                    pattern += string_inv[T.data.pattern[ix]]
+#                else:
+#                    pattern += T.data.pattern[ix]
+#    mycon = Constructor.from_bond_infos(bond_infos, pattern)
+#    return mycon
 def _tensors_to_constructors(tensors, inds, inv=True):
     """
     Generate a pyblock3.algebra.fermion.Constructor object
@@ -1465,22 +1503,24 @@ def _tensors_to_constructors(tensors, inds, inv=True):
     constructor: a pyblock3.algebra.fermion.Constructor object
     """
     string_inv = {"+":"-", "-":"+"}
-    pattern = ""
-    bond_infos = []
+    pattern = dict()
+    bond_infos = dict()
     for T in tensors:
-        axes = [T.inds.index(ix) for ix in inds if ix in T.inds]
+        axes = {ix:T.inds.index(ix) for ix in inds if ix in T.inds}
         if not axes:
             continue
-        elif len(axes)==len(inds):
-            return T.data.to_constructor(axes)
         else:
-            for ix in axes:
-                bond = T.data.get_bond_info(ix, flip=False)
-                bond_infos.append(bond)
+            for ix,idx in axes.items():
+                bond = T.data.get_bond_info(idx, flip=False)
+                bond_infos[ix] = bond
                 if inv:
-                    pattern += string_inv[T.data.pattern[ix]]
+                    pattern[ix] = string_inv[T.data.pattern[idx]]
                 else:
-                    pattern += T.data.pattern[ix]
+                    pattern[ix] = T.data.pattern[idx]
+            if len(list(axes.keys()))==len(inds):
+                break
+    pattern = ''.join([pattern[ix] for ix in inds])
+    bond_infos = [bond_infos[ix] for ix in inds]
     mycon = Constructor.from_bond_infos(bond_infos, pattern)
     return mycon
 

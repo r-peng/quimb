@@ -279,123 +279,58 @@ from itertools import starmap,product
 from opt_einsum import shared_intermediates
 import numpy as np
 import scipy.sparse.linalg as spla
+from .gmres import GMRES
 from autoray import do
-#import functools
-def restart(A,x0,b,max_space=10,tol=1e-6,atol=1e-10):
-    ndim = len(x0.shape)
-    axes = range(ndim-1,-1,-1),range(ndim)
-    r0 = b-A(x0)
-    beta = r0.norm()
-    if beta<tol:
-        return x0,beta
-    Q = [r0/beta]
-    H = np.zeros((max_space+1,max_space),dtype=np.float64)
-    for j in range(max_space):
-        q = A(Q[j])
-        norm_q = q.norm()
-        if norm_q<tol:
-            break
-        for l in range(j+1):
-            H[l,j] = np.tensordot(Q[l].dagger,q,axes=axes)
-#        for l in range(j+1):
-            q = q-Q[l]*H[l,j]
-            assert abs(np.tensordot(Q[l].dagger,q,axes=axes))<atol
-        norm_q = q.norm()
-        if norm_q<tol:
-            break
-        q = q/norm_q
-        lhs1 = [abs(np.tensordot(q_.dagger,q,axes=axes)) for q_ in Q]
-        if sum(lhs1)>atol*len(lhs1):
-            break
-#            print(sum(lhs1),atol)
-#            print('q',norm_q)
-#            print('check Q',lhs1)
-#            lhs2 = [abs(np.tensordot(q_.dagger,q_,axes=axes)-1.0) for q_ in Q]
-#            if sum(lhs2)>atol:
-#               print('check Q',lhs2)
-#            for k in range(j+1):
-#                for l in range(k):
-#                    ovlp = np.tensordot(Q[l].dagger,Q[k],axes=axes)
-#                    if abs(ovlp)>atol:
-#                        print('k,l',k,l,ovlp)
-#            exit()
-        Q.append(q)
-        H[j+1,j] = norm_q
-
-    m = len(Q)-1
-    H = H[:m+1,:m]
-    for i in range(m):
-        lhs = A(Q[i])
-        rhs = sum([Q[j]*H[j,i] for j in range(m+1)])
-        assert (lhs-rhs).norm()<atol
-    # QR on H
-    T,R = np.linalg.qr(H)
-    y = np.dot(np.linalg.inv(R),T[0,:]*beta)
-    x = x0+sum([Q[i]*y[i] for i in range(m)])
-    norm_r = (b-A(x)).norm()
-    
-    perturb = np.random.rand(m)*tol
-    y_ = y+perturb
-    x_ = x0+sum(Q[i]*y_[i] for i in range(m))
-    norm_r_ = (b-A(x_)).norm()
-    assert norm_r-norm_r_<atol
-    return x,norm_r
-def GMRES(A,x0,b,max_space=10,max_iter=50,tol=1e-6,atol=1e-10):
-    x = x0.copy()
-    r_norm_old = (b-A(x)).norm()
-    for i in range(max_iter):
-        x,r_norm = restart(A,x,b,max_space=max_space,tol=tol,atol=atol)
-        assert r_norm-r_norm_old<atol
-#        print('iter={},r_norm={}'.format(i,r_norm))
-        if r_norm<tol:
-            break
-        r_norm_old = r_norm
-    return x
+from pyblock3.algebra.fermion import eye,Constructor
 def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e-6,
     optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
     condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
     solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
     # assert tags_plq is in the correct order
-    sites = [ket[site].get_fermion_info()[1] for site in tags_plq]
-    if len(sites)==2:
-        assert sites[0]<sites[1]
+#    sites = [ket[site].get_fermion_info()[1] for site in tags_plq]
+#    if len(sites)==2:
+#        assert sites[0]<sites[1]
+    if is_lone_coo(where):
+        _where = (where,)
+    else:
+        _where = tuple(where)
+    def add(ftn,G,tags_plq,move_past):
+        site_ix = [ftn[site,'KET'].inds[-1] for site in tags_plq]
+        bnds = [bd+'_' for bd in site_ix]
+        TG = ftn[tags_plq[0],'KET'].__class__(G.copy(), 
+             inds=site_ix+bnds, left_inds=site_ix)
+        TG = move_past.fermion_space.move_past(TG)
+        reindex_map = dict(zip(site_ix, bnds))
+        tids = ftn._get_tids_from_inds(site_ix, which='any')
+        for tid_ in tids:
+            tsr = ftn.tensor_map[tid_]
+            if 'KET' in tsr.tags:
+                tsr.reindex_(reindex_map)
+        ftn.add_tensor(TG, virtual=True)
+        return ftn
     def reorder(ftn,tags_plq):
         for i,site in enumerate(tags_plq):
             tid = ftn[site,'KET'].get_fermion_info()[0]
             ftn.fermion_space.move(tid,i)
             tid = ftn[site,'BRA'].get_fermion_info()[0]
-            ftn.fermion_space.move(tid,norm_plq.num_tensors-1-i)
+            ftn.fermion_space.move(tid,ftn.num_tensors-1-i)
         tids  = [ftn[site,'KET'].get_fermion_info()[0] for site in tags_plq]
         tids += [ftn[site,'BRA'].get_fermion_info()[0] for site in tags_plq]
         ftn._refactor_phase_from_tids(tids)
         return ftn
 
-    # make full target
+#    print('############ env #############')
+#    for tid,(tsr,tsite) in env.fermion_space.tensor_order.items():
+#        print(tsite,tsr.tags,tsr.inds)
+#    exit()
     overlap  = env.copy()
     norm_plq = env.copy()
-    if is_lone_coo(where):
-        _where = (where,)
-    else:
-        _where = tuple(where)
-    ng = len(_where)
-    site_ix = [bra.site_ind(i, j) for i, j in _where]
-#    bnds = [rand_uuid() for _ in range(ng)]
-    bnds = [bd+'_' for bd in site_ix]
-    TG = overlap[tags_plq[0],'KET'].__class__(G.copy(), 
-         inds=site_ix+bnds, left_inds=site_ix)
-    TG = bra.fermion_space.move_past(TG)
-    reindex_map = dict(zip(site_ix, bnds))
-    tids = overlap._get_tids_from_inds(site_ix, which='any')
-    for tid_ in tids:
-        tsr = overlap.tensor_map[tid_]
-        if 'KET' in tsr.tags:
-            tsr.reindex_(reindex_map)
-    overlap.add_tensor(TG, virtual=True)
+    overlap = add(overlap,G,tags_plq,move_past=bra)
     overlap  = reorder(overlap,tags_plq)
     norm_plq = reorder(norm_plq,tags_plq)
-    for site in tags_plq:
-        assert (overlap[site,'BRA'].data-overlap[site,'KET'].data.dagger).norm()<atol 
-        assert (norm_plq[site,'BRA'].data-norm_plq[site,'KET'].data.dagger).norm()<atol 
+#    for site in tags_plq:
+#        assert (overlap[site,'BRA'].data-overlap[site,'KET'].data.dagger).norm()<atol 
+#        assert (norm_plq[site,'BRA'].data-norm_plq[site,'KET'].data.dagger).norm()<atol 
 
     for site in tags_plq:
         overlap[site,'KET'].modify(data=ket[site,'KET'].data.copy())
@@ -424,24 +359,24 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         # assert: all tsrs are in the same order
         #         all tsrs are phaseless
         #         all uninvolved tsrs data are unchanged 
-        for i in range(ket.Lx):
-            for j in range(ket.Ly):
-                site = ket.site_tag(i,j)
-                tsr1 = ket_init[site]
-                tsr2 = ket[site]
-                order1 = tsr1.get_fermion_info()[1]
-                order2 = tsr2.get_fermion_info()[1]
-                global_flip1 = tsr1.phase.get('global_flip',False)
-                local_inds1  = tsr1.phase.get('local_inds',[])
-                global_flip2 = tsr2.phase.get('global_flip',False)
-                local_inds2  = tsr2.phase.get('local_inds',[])
-                assert order1 == order2
-                assert global_flip1 == False
-                assert global_flip2 == False
-                assert len(local_inds1) == 0 
-                assert len(local_inds2) == 0
-                if site not in tags_plq:
-                    assert (tsr1.data-tsr2.data).norm()<atol
+#        for i in range(ket.Lx):
+#            for j in range(ket.Ly):
+#                site = ket.site_tag(i,j)
+#                tsr1 = ket_init[site]
+#                tsr2 = ket[site]
+#                order1 = tsr1.get_fermion_info()[1]
+#                order2 = tsr2.get_fermion_info()[1]
+#                global_flip1 = tsr1.phase.get('global_flip',False)
+#                local_inds1  = tsr1.phase.get('local_inds',[])
+#                global_flip2 = tsr2.phase.get('global_flip',False)
+#                local_inds2  = tsr2.phase.get('local_inds',[])
+#                assert order1 == order2
+#                assert global_flip1 == False
+#                assert global_flip2 == False
+#                assert len(local_inds1) == 0 
+#                assert len(local_inds2) == 0
+#                if site not in tags_plq:
+#                    assert (tsr1.data-tsr2.data).norm()<atol
     for site in tags_plq:
         norm_plq[site,'KET'].modify(data=ket_init[site].data.copy())
         data = ket_init[site].data.dagger
@@ -455,7 +390,7 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         ctr.add_tag('contract')
         ftn.contract_tags('contract',inplace=True,output_inds=output_inds,
                           optimize=optimize)
-        assert ftn.num_tensors==2
+#        assert ftn.num_tensors==2
         tid = pop.get_fermion_info()[0]
         ftn._refactor_phase_from_tids((tid,))
         return ftn, ftn['contract'].data
@@ -463,12 +398,21 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     xs = dict()
     x_previous = dict() 
     previous_cost = None
+    my_gmres = False
+    if not my_gmres: # use spla solver
+        bond_info = norm_plq[site,'KET'].data.get_bond_info(ax=-1,flip=False)
+        I = eye(bond_info,flat=True)
+        if solver in ('lsqr','lsmr'):
+            solver_opts = dict(atol=tol,btol=tol)
+        else:
+            solver_opts = dict(tol=tol)
+        solver = getattr(spla,solver)
     with contract_strategy(optimize), shared_intermediates():
         for i in range(steps):
             for site in tags_plq:
                 norm_plq = reorder(norm_plq,[site])
                 overlap  = reorder(overlap ,[site])
-                assert (norm_plq[site,'BRA'].data-overlap[site,'BRA'].data).norm()<atol 
+#                assert (norm_plq[site,'BRA'].data-overlap[site,'BRA'].data).norm()<atol 
                 #print('############ norm_plq #############')
                 #for tid,(tsr,tsite) in norm_plq.fermion_space.tensor_order.items():
                 #    print(tsite,tsr.tags,tsr.phase)
@@ -476,26 +420,49 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
                 #for tid,(tsr,tsite) in overlap.fermion_space.tensor_order.items():
                 #    print(tsite,tsr.tags,tsr.phase)
 
-                output_inds = norm_plq[site,'BRA'].inds[::-1]
                 ovlp = overlap.copy()
-                ovlp,b = contract(ovlp,site,output_inds)
-                def A(x):
-                    norm = norm_plq.copy()
-                    norm[site,'KET'].modify(data=x.copy())
-                    norm,Ax = contract(norm,site,output_inds)
-                    return Ax
-                x0 = x_previous.get(site,b)
-                x = GMRES(A,x0,b,tol=rtol,atol=atol)
+                ovlp,b = contract(ovlp,site,ovlp[site,'BRA'].inds[::-1])
+
+                norm = norm_plq.copy()
+                if not my_gmres:
+                    norm = add(norm,I,[site],move_past=bra)
+                lix = norm[site,'BRA'].inds[::-1]
+                rix = norm[site,'KET'].inds
+                if dense:
+                    tns = norm.select(site,which='!any')
+                    tns.add_tag('contract')
+                    norm.contract_tags('contract',inplace=True,output_inds=lix+rix,
+                                       optimize=optimize) 
+                norm = reorder(norm,[site])
+                if my_gmres:
+                    def A(x):
+                        ftn = norm.copy()
+                        ftn[site,'KET'].modify(data=x.copy())
+                        ftn,Ax = contract(ftn,site,lix)
+                        return Ax
+                    x0 = x_previous.get(site,b)
+                    x = GMRES(A,x0,b,tol=rtol,atol=atol)
+                else:
+                    tns = norm.select(site,which='!any')
+                    dq = norm[site,'KET'].data.dq
+                    A = FTNLinearOperator(tns,lix,rix,dq,optimize=optimize)
+                    con = A.constructor
+                    x0 = x_previous.get(site,b)
+                    x0_vec = con.tensor_to_vector(x0)
+                    b_vec = con.tensor_to_vector(b)
+                    x_vec = solver(A,b_vec,x0=x0_vec,**solver_opts)[0]
+                    x = con.vector_to_tensor(x_vec,dq)
                 norm_plq[site,'KET'].modify(data=x)
                 xH = x.dagger
                 norm_plq[site,'BRA'].modify(data=xH)
                 overlap[site,'BRA'].modify(data=xH)
                 xs[site] = x
           
-            ndim = len(output_inds)
+            ndim = len(norm_plq[site,'KET'].inds)
             axes = range(ndim-1,-1,-1),range(ndim)
             cost_fid = np.tensordot(xH,b,axes=axes) 
-            cost_norm = np.tensordot(xH,A(x),axes=axes)
+            Ax = A(x) if my_gmres else con.vector_to_tensor(A(x_vec),dq)
+            cost_norm = np.tensordot(xH,Ax,axes=axes)
             cost = -2.0*cost_fid+cost_norm
             print('iteration={},cost={},norm={},fid={}'.format(
                    i,cost,cost_norm,cost_fid))

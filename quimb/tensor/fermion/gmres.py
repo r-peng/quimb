@@ -1,52 +1,71 @@
 import numpy as np
-from pyblock3.algebra.fermion import eye
-inv_map = {'+':'-','-':'+'}
-def parse(tsr,ax):
-    q_labels = tsr.q_labels.copy()
-    narr = q_labels[:,ax]
-    narr = [tsr.symmetry.from_flat(q) for q in narr]
-    narr = [-q for q in narr]
-    narr = [tsr.symmetry.to_flat(q) for q in narr]
-    q_labels[:,ax] = np.array(narr)
+def restart(A,x0,b,max_space=10,tol=1e-6,atol=1e-10):
+    ndim = len(x0.shape)
+    axes = range(ndim-1,-1,-1),range(ndim)
+    r0 = b-A(x0)
+    beta = r0.norm()
+    if beta<tol:
+        return x0,beta
+    Q = [r0/beta]
+    H = np.zeros((max_space+1,max_space),dtype=np.float64)
+    for j in range(max_space):
+        q = A(Q[j])
+        norm_q = q.norm()
+        if norm_q<tol:
+            break
+        for l in range(j+1):
+            H[l,j] = np.tensordot(Q[l].dagger,q,axes=axes)
+#        for l in range(j+1):
+            q = q-Q[l]*H[l,j]
+#            assert abs(np.tensordot(Q[l].dagger,q,axes=axes))<atol
+        norm_q = q.norm()
+        if norm_q<tol:
+            break
+        q = q/norm_q
+#        lhs1 = [abs(np.tensordot(q_.dagger,q,axes=axes)) for q_ in Q]
+#        if sum(lhs1)>atol*len(lhs1):
+#            break
+#            print(sum(lhs1),atol)
+#            print('q',norm_q)
+#            print('check Q',lhs1)
+#            lhs2 = [abs(np.tensordot(q_.dagger,q_,axes=axes)-1.0) for q_ in Q]
+#            if sum(lhs2)>atol:
+#               print('check Q',lhs2)
+#            for k in range(j+1):
+#                for l in range(k):
+#                    ovlp = np.tensordot(Q[l].dagger,Q[k],axes=axes)
+#                    if abs(ovlp)>atol:
+#                        print('k,l',k,l,ovlp)
+#            exit()
+        Q.append(q)
+        H[j+1,j] = norm_q
 
-    pattern = [c for c in tsr.pattern]
-    pattern[ax] = inv_map[pattern[ax]]
-    pattern = ''.join(pattern)
-
-    tsr.pattern = pattern
-    tsr.q_labels = q_labels
-    return tsr
-def get_physical_identity(t):
-    n_blocks = set(t.q_labels[:,-1])
-    n_blocks = len(n_blocks)
-    bond_info = t.get_bond_info(-1)
-    I = eye(bond_info,flat=True)
-    I.pattern = '-+'
-    return I
-def svd(t,left_idx,cutoff=1e-6):
-    qpn_partition = (t.dq,t.symmetry(0))
-    u,s,v = t.tensor_svd(left_idx=left_idx,qpn_partition=qpn_partition,absorb=1,
-                         cutoff=cutoff,cutoff_mode=1)
-    assert s is None
-    assert u.dq==t.dq
-    assert v.dq==t.symmetry(0)
-    u,v = parse(u,-1),parse(v,0)
-    assert u.dq==t.dq
-    assert v.dq==t.symmetry(0)
-#    assert (np.tensordot(u,v,axes=((-1,),(0,)))-t).norm()<cutoff
-
-    nvir = len(t.shape)-1
-    axs1,axs2 = range(nvir,0,-1),range(nvir)
-    lhs = np.tensordot(u.dagger,u,axes=(axs1,left_idx))
-    I = get_physical_identity(u)
-    assert (lhs-I).norm()<cutoff
-#    if (lhs-I).norm()>cutoff:
-#        print((lhs-I).norm())
-#        print(lhs)
-#        print(I)
-    return u,v
-def ovlp(D1,D2,c1,c2):
-    out = 0.0
-    for i in range(min(c1,c2)+2):
-        out += np.tensordot(D1[i,c1].dagger,D2[i,c2],axes=((1,0),(0,1)))
-    return out
+    m = len(Q)-1
+    H = H[:m+1,:m]
+#    for i in range(m):
+#        lhs = A(Q[i])
+#        rhs = sum([Q[j]*H[j,i] for j in range(m+1)])
+#        assert (lhs-rhs).norm()<atol
+    # QR on H
+    T,R = np.linalg.qr(H)
+    y = np.dot(np.linalg.inv(R),T[0,:]*beta)
+    x = x0+sum([Q[i]*y[i] for i in range(m)])
+    norm_r = (b-A(x)).norm()
+    
+#    perturb = np.random.rand(m)*tol
+#    y_ = y+perturb
+#    x_ = x0+sum(Q[i]*y_[i] for i in range(m))
+#    norm_r_ = (b-A(x_)).norm()
+#    assert norm_r-norm_r_<atol
+    return x,norm_r
+def GMRES(A,x0,b,max_space=10,max_iter=50,tol=1e-6,atol=1e-10):
+    x = x0.copy()
+    r_norm_old = (b-A(x)).norm()
+    for i in range(max_iter):
+        x,r_norm = restart(A,x,b,max_space=max_space,tol=tol,atol=atol)
+#        assert r_norm-r_norm_old<atol
+#        print('iter={},r_norm={}'.format(i,r_norm))
+        if r_norm<tol:
+            break
+        r_norm_old = r_norm
+    return x
