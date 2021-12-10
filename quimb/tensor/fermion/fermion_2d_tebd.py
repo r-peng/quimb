@@ -520,8 +520,13 @@ class FullUpdate(FullUpdate):
 
             # scale the envs, taking into account the number of sites missing
             n = self._psi.num_tensors
-            for ((_, _), (di, dj)), env in envs.items():
-                env.multiply_(nfactor,spread_over='all')
+            for plq, env in envs.items():
+                (_, _), (di, dj) = plq
+                tags_plq = tuple(starmap(self._psi.site_tag,plaquette_to_sites(plq)))
+                n_missing = di * dj
+                tns = env.select(tags_plq,which='!any')
+                tns.multiply_(nfactor ** (n_missing / n - 1),
+                              spread_over='all')
 
         self.plaquette_envs = envs
         self.plaquette_mapping = calc_plaquette_map(envs)

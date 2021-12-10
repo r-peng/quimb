@@ -1375,3 +1375,43 @@ def slice_solve(norm,b,x0,site,solver,optimize='auto',**solver_opts):
             for site in tags_plq:
                 self._psi[site].modify(data=ket_init[site].data.copy())
         print('gated energy:',self.compute_energy())
+#def _tensors_to_constructors(tensors, inds, inv=True):
+#    """
+#    Generate a pyblock3.algebra.fermion.Constructor object
+#    to allow mapping from vector to tensor and inverse.
+#
+#    Parameters
+#    ----------
+#    tensors: a list/tuple of FermionTensors
+#        The tensors to gather symmetry information from
+#    inds: a list/tuple of strings
+#        The indices of the tensor to construct
+#    inv: a string of "+" and "-"
+#        Whether to take the complementary signs
+#        from the tensor input
+#
+#    Returns
+#    -------
+#    constructor: a pyblock3.algebra.fermion.Constructor object
+#    """
+#    string_inv = {"+":"-", "-":"+"}
+#    pattern = dict()
+#    bond_infos = dict()
+#    for T in tensors:
+#        axes = {ix:T.inds.index(ix) for ix in inds if ix in T.inds}
+#        if not axes:
+#            continue
+#        else:
+#            for ix,idx in axes.items():
+#                bond = T.data.get_bond_info(idx, flip=False)
+#                bond_infos[ix] = bond
+#                if inv:
+#                    pattern[ix] = string_inv[T.data.pattern[idx]]
+#                else:
+#                    pattern[ix] = T.data.pattern[idx]
+#            if len(list(axes.keys()))==len(inds):
+#                break
+#    pattern = ''.join([pattern[ix] for ix in inds])
+#    bond_infos = [bond_infos[ix] for ix in inds]
+#    mycon = Constructor.from_bond_infos(bond_infos, pattern)
+#    return mycon
