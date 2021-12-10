@@ -500,7 +500,7 @@ def _launch_fermion_expression(
         global_phase = (global_phase % 2)==1
         tensors[0].phase = {"global_flip": global_phase,
                             "local_inds": local_inds}
-    
+
     return tensors[0]
 
 def tensor_split(
