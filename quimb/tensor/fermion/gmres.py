@@ -48,23 +48,27 @@ def restart(A,x0,b,max_space=10,tol=1e-6,atol=1e-10):
 #        assert (lhs-rhs).norm()<atol
     # QR on H
     T,R = np.linalg.qr(H)
+#    R,T = np.dot(H.T,H),H.copy()
     y = np.dot(np.linalg.inv(R),T[0,:]*beta)
     x = x0+sum([Q[i]*y[i] for i in range(m)])
     norm_r = (b-A(x)).norm()
-    
-#    perturb = np.random.rand(m)*tol
-#    y_ = y+perturb
-#    x_ = x0+sum(Q[i]*y_[i] for i in range(m))
-#    norm_r_ = (b-A(x_)).norm()
+#    print(y[0]) 
+    perturb = np.random.rand(m)*tol
+    y_ = y+perturb
+    x_ = x0+sum(Q[i]*y_[i] for i in range(m))
+    norm_r_ = (b-A(x_)).norm()
 #    assert norm_r-norm_r_<atol
+    if norm_r>norm_r_:
+        print(np.diag(R))
+        exit()
     return x,norm_r
-def GMRES(A,x0,b,max_space=10,max_iter=50,tol=1e-6,atol=1e-10):
+def GMRES(A,x0,b,max_space=20,max_iter=100,tol=1e-6,atol=1e-10):
     x = x0.copy()
     r_norm_old = (b-A(x)).norm()
     for i in range(max_iter):
         x,r_norm = restart(A,x,b,max_space=max_space,tol=tol,atol=atol)
-#        assert r_norm-r_norm_old<atol
-#        print('iter={},r_norm={}'.format(i,r_norm))
+        print('iter={},r_norm={}'.format(i,r_norm))
+        assert r_norm-r_norm_old<atol
         if r_norm<tol:
             break
         r_norm_old = r_norm

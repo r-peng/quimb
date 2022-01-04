@@ -1415,3 +1415,49 @@ def slice_solve(norm,b,x0,site,solver,optimize='auto',**solver_opts):
 #    bond_infos = [bond_infos[ix] for ix in inds]
 #    mycon = Constructor.from_bond_infos(bond_infos, pattern)
 #    return mycon
+    def update_bottom_boundary_environments(self,norm,envs,x):
+        if x==0:
+            envs['bottom',x] = FermionTensorNetwork([])
+        elif x==1:
+            envs['bottom',x] = norm.copy()
+        else:
+            tn = envs['bottom',x-1].copy()
+            tn.contract_boundary_from_bottom_(xrange=(x-2,x-1),
+                                              yrange=(0,norm.Ly-1),
+                                              max_bond=self.chi)
+            envs['bottom',x] = tn
+        return envs
+    def update_top_boundary_environments(self,norm,envs,x):
+        if x==norm.Lx-1:
+            envs['top',x] = FermionTensorNetwork([])
+        elif x==norm.Lx-2:
+            envs['top',x] = norm.copy()
+        else:
+            tn = envs['top',x+1].copy()
+            tn.contract_boundary_from_top_(xrange=(x+1,x+2),
+                                           yrange=(0,norm.Ly-1),
+                                           max_bond=self.chi)
+            envs['top',x] = tn
+        return envs
+    def initialize_boundary_environments(self):
+        norm, _, self._bra = self._psi.make_norm(return_all=True)
+        envs = dict()
+        norm_col = norm
+        norm_col.reorder('col',layer_tags=('KET','BRA'),inplace=True)
+        for y in range(norm_col.Ly):
+            self.update_left_boundary_environments(norm_col,envs,y)
+        for y in range(norm_col.Ly-1,-1,-1):
+            self.update_right_boundary_environments(norm_col,envs,y)
+        norm_row = copy(norm)
+        norm_row.reorder('row',layer_tags=('KET','BRA'),inplace=True)
+        for x in range(norm_row.Lx):
+            self.update_bottom_boundary_environments(norm_row,envs,x)
+        for x in range(norm_row.Lx-1,-1,-1):
+            self.update_top_boundary_environments(norm_row,envs,x)
+
+        self.plaquette_envs = envs
+        self.plaquette_mapping = calc_plaquette_map(envs)
+
+        self._env_n = self._n
+        self._env_group_count = self._group_count
+        self._env_term_count = self._term_count
