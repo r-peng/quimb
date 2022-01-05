@@ -406,7 +406,7 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     for site in tags_plq:
         norm_plq[site,'KET'].modify(data=ket[site].data.copy())
         norm_plq[site,'BRA'].modify(data=bra[site].data.copy())
-    assert abs(norm_plq.contract()-1.0)<atol
+#    assert abs(norm_plq.contract()-1.0)<atol
     for site in tags_plq:
         norm_plq[site,'KET'].modify(data=ket_plq[site].data.copy())
         data = ket_plq[site].data.dagger
@@ -642,11 +642,11 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         bra[site].modify(data=norm_plq[site,'BRA'].data.copy())
     e3 = ket.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
                                        normalized=True)
-    assert e0<e2<e3<e1
-#    print(e0)
-#    print(e2)
-#    print(e3)
-#    print(e1)
+#    assert e0<e2<e3<e1
+    print(e0)
+    print(e2)
+    print(e3)
+    print(e1)
 
 class FullUpdate(FullUpdate):
     #@profile
@@ -754,6 +754,7 @@ class FullUpdate(FullUpdate):
                              optimize=self.contract_optimize,
                              condition_balance_bonds=self.condition_balance_bonds,
                              **self._gate_opts)
+        print(self.compute_energy())
         self._term_count += 1
 #        print('gated energy:',self.compute_energy())
         
