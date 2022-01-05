@@ -1,5 +1,4 @@
 import numpy as np
-import utils
 import time
 from quimb.tensor.tensor_2d import PEPS
 from quimb.tensor.fermion.fermion_2d_tebd import Hubbard2D,FullUpdate

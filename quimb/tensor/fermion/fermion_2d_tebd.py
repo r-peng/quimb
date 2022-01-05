@@ -315,12 +315,12 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
     condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
     solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
-    e0 = ket.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
-                                       normalized=True)
-    ket1 = copy(ket)
-    ket1.gate_(G,where,contract='reduce-split',max_bond=None)
-    e1 = ket1.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
-                                        normalized=True)
+#    e0 = ket.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
+#                                       normalized=True)
+#    ket1 = copy(ket)
+#    ket1.gate_(G,where,contract='reduce-split',max_bond=None)
+#    e1 = ket1.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
+#                                        normalized=True)
 
     def add(ftn,G,tags_plq,move_past=None,insert=None):
         site_ix = [ftn[site,'KET'].inds[-1] for site in tags_plq]
@@ -347,27 +347,27 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
             ftn._link_inds(TG.inds,tid)
         return ftn
     def reorder(ftn,tags_plq):
-        norm0 = ftn.contract()
+#        norm0 = ftn.contract()
         for i,site in enumerate(tags_plq):
             tid = ftn[site,'KET'].get_fermion_info()[0]
             ftn.fermion_space.move(tid,i)
             tid = ftn[site,'BRA'].get_fermion_info()[0]
             ftn.fermion_space.move(tid,ftn.num_tensors-1-i)
-        norm1 = ftn.contract()
-        if abs(norm1-norm0)>atol:
-            print('0',norm0,ref)
-            print('1',norm1,ref)
-            exit()
+#        norm1 = ftn.contract()
+#        if abs(norm1-norm0)>atol:
+#            print('0',norm0,ref)
+#            print('1',norm1,ref)
+#            exit()
         tids  = [ftn[site,'KET'].get_fermion_info()[0] for site in tags_plq]
         tids += [ftn[site,'BRA'].get_fermion_info()[0] for site in tags_plq]
         ftn._refactor_phase_from_tids(tids)
-        norm1 = ftn.contract()
-        if abs(norm1-norm0)>atol:
-            print('2',norm1,ref)
-            exit()
+#        norm1 = ftn.contract()
+#        if abs(norm1-norm0)>atol:
+#            print('2',norm1,ref)
+#            exit()
         return ftn
 
-    print(tags_plq,G.parity)
+    print(tags_plq)
     #for site in tags_plq: # for compute_envs_every=1
     #    tsr = env[site,'KET']
     #    tsite = tsr.get_fermion_info()[1]
@@ -390,8 +390,8 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
             pre_norm = ket_plq[tags_plq[0]].norm()
     if init_simple_guess:
         ket_plq.gate_(G,where,contract='reduce-split',max_bond=max_bond)
-        e2 = ket_init.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
-                                                 normalized=True)
+#        e2 = ket_init.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
+#                                                 normalized=True)
         if condition_tensors:
             if condition_maintain_norms:
                 conditioner(ket_plq,value=pre_norm,
@@ -403,9 +403,9 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         assert (env[site,'BRA'].data-env[site,'KET'].data.dagger).norm()<atol 
     norm_plq = env
     overlap = copy(env)
-    for site in tags_plq:
-        norm_plq[site,'KET'].modify(data=ket[site].data.copy())
-        norm_plq[site,'BRA'].modify(data=bra[site].data.copy())
+#    for site in tags_plq:
+#        norm_plq[site,'KET'].modify(data=ket[site].data.copy())
+#        norm_plq[site,'BRA'].modify(data=bra[site].data.copy())
 #    assert abs(norm_plq.contract()-1.0)<atol
     for site in tags_plq:
         norm_plq[site,'KET'].modify(data=ket_plq[site].data.copy())
@@ -438,12 +438,12 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         ftn._refactor_phase_from_tids((tid,))
         return ftn, ftn['contract'].data
          
-    cost_norm = norm_plq.contract()
-    cost_fid = overlap.contract()
-    cost = -2.0*cost_fid+cost_norm
-    print('cost={},norm={},fid={}'.format(cost,cost_norm,cost_fid))
-    assert cost_norm>0.0
-    assert cost_fid>0.0
+#    cost_norm = norm_plq.contract()
+#    cost_fid = overlap.contract()
+#    cost = -2.0*cost_fid+cost_norm
+#    print('cost={},norm={},fid={}'.format(cost,cost_norm,cost_fid))
+#    assert cost_norm>0.0
+#    assert cost_fid>0.0
 
 #    xs = dict()
 #    x_previous = dict() 
@@ -466,68 +466,68 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     with contract_strategy(optimize), shared_intermediates():
         for i in range(steps):
             for site in tags_plq:
-                cost_norm = norm_plq.contract()
-                cost_fid = overlap.contract()
-                assert cost_norm>0.0
-                assert cost_fid>0.0
+#                cost_norm = norm_plq.contract()
+#                cost_fid = overlap.contract()
+#                assert cost_norm>0.0
+#                assert cost_fid>0.0
                 norm_plq = reorder(norm_plq,[site])
                 overlap  = reorder(overlap ,[site])
-                norm0 = norm_plq.contract()
-                if abs(norm0-cost_norm)>atol:
-                    print('init norm',cost_norm)
-                    print('after reorder norm',norm0)
-                    exit()
-                ovlp0 = overlap.contract()
-                if abs(ovlp0-cost_fid)>atol:
-                    print('init ovlp',cost_fid)
-                    print('after reorder ovlp',ovlp0)
-                    exit()
-                assert (norm_plq[site,'BRA'].data-overlap[site,'BRA'].data).norm()<atol 
-                assert (norm_plq[site,'KET'].data-norm_plq[site,'BRA'].data.dagger).norm()<atol 
+#                norm0 = norm_plq.contract()
+#                if abs(norm0-cost_norm)>atol:
+#                    print('init norm',cost_norm)
+#                    print('after reorder norm',norm0)
+#                    exit()
+#                ovlp0 = overlap.contract()
+#                if abs(ovlp0-cost_fid)>atol:
+#                    print('init ovlp',cost_fid)
+#                    print('after reorder ovlp',ovlp0)
+#                    exit()
+#                assert (norm_plq[site,'BRA'].data-overlap[site,'BRA'].data).norm()<atol 
+#                assert (norm_plq[site,'KET'].data-norm_plq[site,'BRA'].data.dagger).norm()<atol 
 
                 ovlp = copy(overlap)
 #                for tid,(tsr,tsite) in ovlp.fermion_space.tensor_order.items():
 #                    assert tsr is ovlp.tensor_map[tid]
 #                    assert not(tsr is overlap.tensor_map[tid])
 #                    #print(tid,tsite,tsr.inds)
-                ovlp0 = ovlp.contract()
-                if abs(ovlp0-cost_fid)>atol:
-                    print('init ovlp',cost_fid)
-                    print('copy ovlp0',ovlp0)
-                    exit()
+#                ovlp0 = ovlp.contract()
+#                if abs(ovlp0-cost_fid)>atol:
+#                    print('init ovlp',cost_fid)
+#                    print('copy ovlp0',ovlp0)
+#                    exit()
                 ovlp,b = contract(ovlp,site,ovlp[site,'BRA'].inds[::-1])
-                ovlp0 = ovlp.contract()
-                if abs(ovlp0-cost_fid)>atol:
-                    print('init ovlp',cost_fid)
-                    print('after contract ovlp0',ovlp0)
-                    ndim = len(b.shape)
-                    axes = range(ndim-1,-1,-1),range(ndim)
-                    ovlp0 = np.tensordot(overlap[site,'BRA'].data,b,axes=axes)
-                    print('after contract ovlp0',ovlp0)
-                    for tid,(tsr,tsite) in ovlp.fermion_space.tensor_order.items():
-                        assert tsr is ovlp.tensor_map[tid]
-                        #print(tid,tsite,tsr.inds,tsr.phase)
-                    ovlp_ = copy(overlap)
-                    ctr = ovlp_.select((site,'BRA'),which='!all') 
-                    ctr.add_tag('ctr')
-                    ovlp_.contract_tags('ctr',inplace=True)
-                    ovlp0 = ovlp_.contract()
-                    print('after contract ovlp0',ovlp0)
-                    for tid,(tsr,tsite) in ovlp_.fermion_space.tensor_order.items():
-                        assert tsr is ovlp_.tensor_map[tid]
-                        #print(tid,tsite,tsr.inds,tsr.phase)
-                    exit()
+#                ovlp0 = ovlp.contract()
+#                if abs(ovlp0-cost_fid)>atol:
+#                    print('init ovlp',cost_fid)
+#                    print('after contract ovlp0',ovlp0)
+#                    ndim = len(b.shape)
+#                    axes = range(ndim-1,-1,-1),range(ndim)
+#                    ovlp0 = np.tensordot(overlap[site,'BRA'].data,b,axes=axes)
+#                    print('after contract ovlp0',ovlp0)
+#                    for tid,(tsr,tsite) in ovlp.fermion_space.tensor_order.items():
+#                        assert tsr is ovlp.tensor_map[tid]
+#                        #print(tid,tsite,tsr.inds,tsr.phase)
+#                    ovlp_ = copy(overlap)
+#                    ctr = ovlp_.select((site,'BRA'),which='!all') 
+#                    ctr.add_tag('ctr')
+#                    ovlp_.contract_tags('ctr',inplace=True)
+#                    ovlp0 = ovlp_.contract()
+#                    print('after contract ovlp0',ovlp0)
+#                    for tid,(tsr,tsite) in ovlp_.fermion_space.tensor_order.items():
+#                        assert tsr is ovlp_.tensor_map[tid]
+#                        #print(tid,tsite,tsr.inds,tsr.phase)
+#                    exit()
 
                 norm = copy(norm_plq)
 #                #print('########## norm #############')
 #                for tid,(tsr,tsite) in norm.fermion_space.tensor_order.items():
 #                    assert tsr is norm.tensor_map[tid]
 #                    #print(tid,tsite,tsr.inds)
-                norm0 = norm.contract()
-                if abs(norm0-cost_norm)>atol:
-                    print('init norm',cost_norm)
-                    print('copy norm',norm0)
-                    exit()
+#                norm0 = norm.contract()
+#                if abs(norm0-cost_norm)>atol:
+#                    print('init norm',cost_norm)
+#                    print('copy norm',norm0)
+#                    exit()
                 if dense:
                     tns = norm.select(site,which='!any')
                     tns.add_tag('contract')
@@ -535,24 +535,24 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
 #                    for tid,(tsr,tsite) in norm.fermion_space.tensor_order.items():
 #                        assert tsr is norm.tensor_map[tid]
 #                   #     print(tid,tsite,tsr.inds,tsr.data.pattern)
-                    norm0 = norm.contract()
-                    if abs(norm0-cost_norm)>atol:
-                        print('init norm',cost_norm)
-                        print('after contract norm',norm0)
-                        print(norm[site,'KET'].inds)
-                        print(norm[site,'BRA'].inds)
-                        print(norm['contract'].inds)
-                        for tid,(tsr,tsite) in norm.fermion_space.tensor_order.items():
-                            assert tsr is norm.tensor_map[tid]
-                            #print(tid,tsite,tsr.inds)
-                        exit()
+#                    norm0 = norm.contract()
+#                    if abs(norm0-cost_norm)>atol:
+#                        print('init norm',cost_norm)
+#                        print('after contract norm',norm0)
+#                        print(norm[site,'KET'].inds)
+#                        print(norm[site,'BRA'].inds)
+#                        print(norm['contract'].inds)
+#                        for tid,(tsr,tsite) in norm.fermion_space.tensor_order.items():
+#                            assert tsr is norm.tensor_map[tid]
+#                            #print(tid,tsite,tsr.inds)
+#                        exit()
                 if not my_gmres:
                     norm = add(norm,I,[site],insert=1)
 #                    norm = add(norm,I,[site])
-                    norm0 = norm.contract()
-                    if abs(norm0-cost_norm)>atol:
-                        print('after add norm',norm0)
-                        exit()
+#                    norm0 = norm.contract()
+#                    if abs(norm0-cost_norm)>atol:
+#                        print('after add norm',norm0)
+#                        exit()
                     #print('########## norm #############')
                     #for tid,(tsr,tsite) in norm.fermion_space.tensor_order.items():
                     #    print(tid,tsite,tsr.inds,tsr.data.pattern)
@@ -640,13 +640,13 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     for site in tags_plq:
         ket[site].modify(data=norm_plq[site,'KET'].data.copy())
         bra[site].modify(data=norm_plq[site,'BRA'].data.copy())
-    e3 = ket.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
-                                       normalized=True)
+#    e3 = ket.compute_local_expectation({where:G.copy()},max_bond=2*max_bond**2,
+#                                       normalized=True)
 #    assert e0<e2<e3<e1
-    print(e0)
-    print(e2)
-    print(e3)
-    print(e1)
+#    print(e0)
+#    print(e2)
+#    print(e3)
+#    print(e1)
 
 class FullUpdate(FullUpdate):
     #@profile
@@ -754,7 +754,7 @@ class FullUpdate(FullUpdate):
                              optimize=self.contract_optimize,
                              condition_balance_bonds=self.condition_balance_bonds,
                              **self._gate_opts)
-        print(self.compute_energy())
+#        print(self.compute_energy())
         self._term_count += 1
 #        print('gated energy:',self.compute_energy())
         
