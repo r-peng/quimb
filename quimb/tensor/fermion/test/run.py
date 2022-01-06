@@ -67,7 +67,7 @@ nsteps = 100
 dt = 0.5
 su.evolve(nsteps,dt)
 ftn = su.get_state()
-ftn.normalize_(max_bond=chi)
+#ftn.normalize_(max_bond=chi)
 ftn2 = ftn
 
 fit_opts = {'tol':1e-8,'steps':20,
