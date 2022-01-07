@@ -337,7 +337,7 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
     solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
     print(tags_plq)
 
-    norm_plq = copy(env)
+    norm_plq = env
     # move bra/ket plq to last/first positions and refactor
     original_ket = [norm_plq[site,'KET'] for site in tags_plq]
     original_bra = [norm_plq[site,'BRA'] for site in tags_plq]
@@ -584,8 +584,6 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
 class FullUpdate(FullUpdate):
     #@profile
     def compute_plaquette_environment(self,where):
-        #print(where)
-        #print(self.norm)
         x_bsz, y_bsz = calc_plaquette_sizes([where])[0]
         if x_bsz<y_bsz:
             env = self.compute_plaquette_environment_row_first(where,x_bsz,y_bsz)
@@ -643,18 +641,6 @@ class FullUpdate(FullUpdate):
                row_envs['top',i0+x_bsz-1]),check_collisions=False)
         return env
     def compute_energy(self):
-#        plaquette_envs = dict()
-#        for where in self.ham.terms.keys():
-#            x_bsz, y_bsz = calc_plaquette_sizes([where])[0]
-#            i0 = min([i for (i,j) in where])
-#            j0 = min([j for (i,j) in where])
-#            plaquette_envs[(i0,j0),(x_bsz,y_bsz)] = self.compute_plaquette_environment(where)
-#        print(self._psi.compute_local_expectation(self.ham.terms,max_bond=self.chi,normalized=True,plaquette_envs=plaquette_envs))
-#        print(self.state.compute_local_expectation(
-#            self.ham.terms,
-#            **self.compute_energy_opts,
-#        ))
-        #exit()
         return self.state.compute_local_expectation(
             self.ham.terms,
             **self.compute_energy_opts,
@@ -664,8 +650,6 @@ class FullUpdate(FullUpdate):
         """Apply the gate ``G`` at sites where, using a fitting method that
         takes into account the current environment.
         """
-        # get the plaquette containing ``where`` and the sites it contains -
-        # these will all be fitted
         env = self.compute_plaquette_environment(where)
 
         tags_plq = tuple(starmap(self._psi.site_tag,where))
@@ -673,21 +657,10 @@ class FullUpdate(FullUpdate):
         inds = np.argsort(np.array(sites))
         tags_plq = [tags_plq[ind] for ind in inds]
 
-#        print(tags_plq)
-#        for site in tags_plq: # for compute_envs_every=1
-#            tsr = env[site,'KET']
-#            tsite = tsr.get_fermion_info()[1]
-#            print(tsite,tsr.inds,tsr.phase)
-#        for tid,(tsr,tsite) in self._psi.fermion_space.tensor_order.items():
-#            assert self._psi.tensor_map[tid] is tsr
-#            print(tid,tsr.inds,tsr.phase)
-#        print('initial energy:',self.compute_energy())
         gate_full_update_als(ket=self._psi,env=env,bra=self._bra,G=G,
                              where=where,tags_plq=tags_plq,max_bond=self.D,
                              optimize=self.contract_optimize,
                              condition_balance_bonds=self.condition_balance_bonds,
                              **self._gate_opts)
-#        print(self.compute_energy())
         self._term_count += 1
-#        print('gated energy:',self.compute_energy())
         
