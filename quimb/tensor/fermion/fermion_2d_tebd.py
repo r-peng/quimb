@@ -2,6 +2,7 @@ from itertools import product,starmap
 import numpy as np
 import scipy.sparse.linalg as spla
 from autoray import do
+from opt_einsum import shared_intermediates
 
 from ...utils import pairwise
 from ..tensor_core import contract_strategy,bonds
@@ -9,23 +10,31 @@ from ..tensor_2d_tebd import (
     SimpleUpdate,
     FullUpdate, 
     conditioner, 
-    LocalHam2D)
+    LocalHam2D
+)
 from ..tensor_2d import (
     gen_long_range_path, 
     nearest_neighbors, 
     gen_long_range_swap_path, 
     swap_path_to_long_range_path, 
-    gen_2d_bonds
+    gen_2d_bonds,
+    calc_plaquette_sizes,
+    calc_plaquette_map,
+    Rotator2D,
+    plaquette_to_sites
 )
 
 from .block_interface import eye, Hubbard
 from . import block_tools
-from .fermion_core import (_get_gauge_location,
-                           FermionSpace,
-                           FermionTensor,
-                           FermionTensorNetwork,
-                           FTNLinearOperator)
+from .fermion_core import (
+    _get_gauge_location,
+    FermionSpace,
+    FermionTensor,
+    FermionTensorNetwork,
+    FTNLinearOperator
+)
 from .fermion_arbgeom_tebd import LocalHamGen
+from .fermion_2d import FermionTensorNetwork2D
 
 def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
     """Create a LocalHam2D object for 2D Hubbard Model
@@ -279,12 +288,19 @@ class SimpleUpdate(SimpleUpdate):
             conditioner(psi, balance_bonds=self.condition_balance_bonds)
 
         return psi
-
-from ..tensor_2d import (calc_plaquette_sizes,
-                         calc_plaquette_map,
-                         Rotator2D,
-                         plaquette_to_sites)
-from .fermion_2d import FermionTensorNetwork2D
+def parse_specific_gate_opts(strategy,fit_opts):
+    gate_opts = {
+        'tol': fit_opts['tol'],
+        'steps': fit_opts['steps'],
+        'init_simple_guess': fit_opts['init_simple_guess'],
+        'condition_tensors': fit_opts['condition_tensors'],
+        'condition_maintain_norms': fit_opts['condition_maintain_norms'],
+    }
+    gate_opts['solver'] = fit_opts['als_solver']
+    gate_opts['dense'] = fit_opts['als_dense']
+    gate_opts['enforce_pos'] = fit_opts['als_enforce_pos']
+    gate_opts['pos_smudge'] = fit_opts['als_enforce_pos_smudge']
+    return gate_opts 
 def tensor_copy(tsr):
     new_tsr = FermionTensor(data=tsr.data.copy(),inds=tsr.inds,
                             tags=tsr.tags.copy(),left_inds=tsr.left_inds)
@@ -331,7 +347,7 @@ def replace(ftn,isite,T):
     ftn._link_tags(T.tags,tid)
     ftn._link_inds(T.inds,tid)
     return ftn
-def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e-6,
+def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e-6,
     optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
     condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
     solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
@@ -520,9 +536,9 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
             tid = ovlp[site,'BRA'].get_fermion_info()[0]
             ovlp._pop_tensor(tid,remove_from_fermion_space='end')
             b = N.constructor.tensor_to_vector(ovlp['B'].data)
+            dim = len(b)
 
             if invert:
-                dim = len(b)
                 mat = np.zeros((dim,dim))
                 for j in range(dim):
                     vec = np.zeros(dim)
@@ -581,8 +597,165 @@ def gate_full_update_als(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e
         ket[site].modify(data=saved_ket_plq[site].data) 
         bra[site].modify(data=saved_ket_plq[site].data.dagger)
 
+def reorder(ftn,tags_plq):
+    for i,site in enumerate(tags_plq):
+        tid = ftn[site,'KET'].get_fermion_info()[0]
+        ftn.fermion_space.move(tid,i)
+        tid = ftn[site,'BRA'].get_fermion_info()[0]
+        ftn.fermion_space.move(tid,ftn.num_tensors-1-i)
+    tids  = [ftn[site,'KET'].get_fermion_info()[0] for site in tags_plq]
+    tids += [ftn[site,'BRA'].get_fermion_info()[0] for site in tags_plq]
+    ftn._refactor_phase_from_tids(tids)
+    return ftn
+def add(ftn,G,tags_plq,tags=None):
+    site_ix = [ftn[site,'KET'].inds[-1] for site in tags_plq]
+    bnds = [bd+'_' for bd in site_ix]
+    TG = FermionTensor(G.copy(),inds=site_ix+bnds,left_inds=site_ix,tags=tags)
+    reindex_map = dict(zip(site_ix, bnds))
+    tids = ftn._get_tids_from_inds(site_ix, which='any')
+    for tid_ in tids:
+        tsr = ftn.tensor_map[tid_]
+        if 'KET' in tsr.tags:
+            tsr.reindex_(reindex_map)
+    ftn = insert(ftn,len(tags_plq),TG)
+    return ftn
+def gate_full_update_als_site(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,
+    rtol=1e-6,
+    optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
+    condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
+    solver='solve',dense=True,enforce_pos=False,pos_smudge=1e-6):
+    print(tags_plq)
+    norm_plq = env
+    norm_plq = reorder(norm_plq,tags_plq)
+    ket_plq = norm_plq.select(tags_plq,which='any')
+    ket_plq = ket_plq.select('KET',which='all')
+    if condition_tensors:
+        conditioner(ket_plq,balance_bonds=condition_balance_bonds)
+        if condition_maintain_norms:
+            pre_norm = ket_plq[tags_plq[0]].norm()
+    if init_simple_guess:
+        ket_plq = copy(ket_plq,full=False).view_like_(ket)
+        ket_plq.gate_(G,where,contract='reduce-split',max_bond=max_bond)
+        if condition_tensors:
+            if condition_maintain_norms:
+                conditioner(ket_plq,value=pre_norm,
+                            balance_bonds=condition_balance_bonds)
+            else:
+                conditioner(ket_plq,balance_bonds=condition_balance_bonds)
+        tids = []
+        for i,site in enumerate(tags_plq):
+            tids.append(ket_plq[site].get_fermion_info()[0])
+            ket_plq.fermion_space.move(tids[-1],i)
+        ket_plq._refactor_phase_from_tids(tids)
+    overlap = copy(norm_plq)
+    for site in tags_plq:
+        norm_plq[site,'KET'].modify(data=ket_plq[site].data.copy())
+        data = ket_plq[site].data.dagger
+        norm_plq[site,'BRA'].modify(data=data.copy())
+        overlap[site,'BRA'].modify(data=data.copy())
+    overlap = add(overlap,G,tags_plq)
+    cost_norm = norm_plq.contract()
+    cost_fid = overlap.contract()
+    cost = -2.0*cost_fid+cost_norm
+    print('cost={},norm={},fid={}'.format(cost,cost_norm,cost_fid))
+    assert cost_norm>0.0
+    assert cost_fid>0.0
+     
+    previous_cost = None
+    bond_info = norm_plq[site,'KET'].data.get_bond_info(ax=-1,flip=False)
+    I = eye(bond_info,flat=True)
+    if solver in ('lsqr','lsmr'):
+        solver_opts = dict(atol=tol,btol=tol)
+    elif solver == 'gmres':
+        solver_opts = dict(tol=tol*1e-3,atol=tol*1e-3)
+    else:
+        solver_opts = dict(tol=tol)
+    solver = getattr(spla,solver)
+    with contract_strategy(optimize), shared_intermediates():
+        for i in range(steps):
+            for site in tags_plq:
+                norm_plq = reorder(norm_plq,[site])
+                overlap  = reorder(overlap ,[site])
+
+                norm = copy(norm_plq)
+                norm = add(norm,I,[site],tags='I') 
+                lix = norm[site,'BRA'].inds[::-1]
+                rix = norm[site,'KET'].inds 
+                tid = norm[site,'BRA'].get_fermion_info()[0]
+                norm._pop_tensor(tid,remove_from_fermion_space='end')
+                tid = norm[site,'KET'].get_fermion_info()[0]
+                norm._pop_tensor(tid,remove_from_fermion_space='front')
+                if dense:
+                    norm.select('I',which='!any').add_tag('N')
+                    norm.contract_tags('N',inplace=True,optimize=optimize)
+                dq = norm_plq[site,'KET'].data.dq
+                N = FTNLinearOperator(norm,lix,rix,dq,optimize=optimize) 
+
+                ovlp = copy(overlap)
+                ovlp.select((site,'BRA'),which='!all').add_tag('B')
+                ovlp.contract_tags('B',inplace=True,optimize=optimize,
+                                   output_inds=lix)
+                ovlp['B'].modify(tags={'B'})
+                tid = ovlp[site,'BRA'].get_fermion_info()[0]
+                ovlp._pop_tensor(tid,remove_from_fermion_space='end')
+                b = N.constructor.tensor_to_vector(ovlp['B'].data)
+                
+                x0 = N.constructor.tensor_to_vector(norm_plq[site,'KET'].data)
+                x = solver(N,b,x0=x0,**solver_opts)[0]
+                x = N.constructor.vector_to_tensor(x,dq) 
+                norm_plq[site,'KET'].modify(data=x.copy())
+                xH = x.dagger
+                norm_plq[site,'BRA'].modify(data=xH.copy())
+                overlap[site,'BRA'].modify(data=xH.copy())
+
+            cost_norm = norm_plq.contract()
+            cost_fid = overlap.contract()
+            cost = -2.0*cost_fid+cost_norm
+            print('iteration={},cost={},norm={},fid={}'.format(
+                   i,cost,cost_norm,cost_fid))
+            converged = (previous_cost is not None)and(abs(cost-previous_cost)<tol)
+            if previous_cost is not None:
+                assert cost-previous_cost<tol*2.0
+            if converged:
+                break
+            previous_cost = cost
+
+    if condition_tensors:
+        plq = norm_plq.select(tags_plq,which='any')
+        ket_plq = plq.select('KET',which='all')
+        if condition_maintain_norms:
+            conditioner(ket_plq,value=pre_norm,balance_bonds=condition_balance_bonds)
+        else:
+            conditioner(ket_plq,balance_bonds=condition_balance_bonds)
+    norm_plq = reorder(norm_plq,tags_plq)
+    for site in tags_plq:
+        ket[site].modify(data=norm_plq[site,'KET'].data.copy())
+        bra[site].modify(data=norm_plq[site,'BRA'].data.copy())
+
 class FullUpdate(FullUpdate):
     #@profile
+    @property
+    def fit_strategy(self):
+        return self._fit_strategy
+    @fit_strategy.setter
+    def fit_strategy(self, fit_strategy):
+        self._gate_fit_fn = {
+            'qr': gate_full_update_als_qr,
+            'site': gate_full_update_als_site,
+        }[fit_strategy]
+        self._fit_strategy = fit_strategy
+    def presweep(self, i):
+        """Full update presweep - compute envs and inject gate options.
+        """
+        # inject the specific gate options required (do
+        # here so user can change options between sweeps)
+        self._gate_opts = parse_specific_gate_opts(
+            self.fit_strategy, self.fit_opts)
+
+        # keep track of number of gates applied, and commutative groups
+        self._term_count = 0
+        self._group_count = 0
+        self._current_group = set()
     def compute_plaquette_environment(self,where):
         x_bsz, y_bsz = calc_plaquette_sizes([where])[0]
         if x_bsz<y_bsz:
@@ -657,10 +830,10 @@ class FullUpdate(FullUpdate):
         inds = np.argsort(np.array(sites))
         tags_plq = [tags_plq[ind] for ind in inds]
 
-        gate_full_update_als(ket=self._psi,env=env,bra=self._bra,G=G,
-                             where=where,tags_plq=tags_plq,max_bond=self.D,
-                             optimize=self.contract_optimize,
-                             condition_balance_bonds=self.condition_balance_bonds,
-                             **self._gate_opts)
+        self._gate_fit_fn(ket=self._psi,env=env,bra=self._bra,G=G,
+                          where=where,tags_plq=tags_plq,max_bond=self.D,
+                          optimize=self.contract_optimize,
+                          condition_balance_bonds=self.condition_balance_bonds,
+                          **self._gate_opts)
         self._term_count += 1
         
