@@ -4,7 +4,10 @@ import scipy.sparse.linalg as spla
 from autoray import do
 from opt_einsum import shared_intermediates
 
+from pyblock3.algebra.fermion_ops import creation,annihilation
+
 from ...utils import pairwise
+from ...utils import progbar as Progbar
 from ..tensor_core import contract_strategy,bonds
 from ..tensor_2d_tebd import (
     SimpleUpdate,
@@ -73,6 +76,33 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             count_b = count_neighbour(i,j+1)
             uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
             ham[where] = uop
+    return LocalHam2D(Lx, Ly, ham)
+def SpinlessFermion(t,v,Lx,Ly,mu=0.0,symmetry=None): 
+    ham = dict()
+    cre = creation(spin='a',symmetry=symmetry,flat=True)
+    des = cre.dagger
+    par = np.tensordot(cre,des,axes=((1,),(0,)))
+    op1 = np.tensordot(cre,des,axes=([],[]))
+    op1 = op1+op1.transpose([2,3,0,1])
+
+#    cre = creation(spin='b',symmetry=symmetry,flat=True)
+#    des = cre.dagger
+#    par = np.tensordot(cre,des,axes=((1,),(0,)))
+#    op1_ = np.tensordot(cre,des,axes=([],[]))
+#    op1_ = op1_+op1_.transpose([2,3,0,1])
+
+#    print(op1.pattern,op1.shape)
+    op2 = np.tensordot(par,par,axes=([],[]))
+    op = -t*op1+v*op2
+    op = op.transpose([0,2,1,3])
+#    exit()
+    for i, j in product(range(Lx), range(Ly)):
+        if i+1 != Lx:
+            where = ((i,j), (i+1,j))
+            ham[where] = op.copy()
+        if j+1 != Ly:
+            where = ((i,j), (i,j+1))
+            ham[where] = op.copy()
     return LocalHam2D(Lx, Ly, ham)
 
 class LocalHam2D(LocalHamGen):
@@ -501,6 +531,7 @@ def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol
         solver_opts = dict(tol=tol)
     solver = getattr(spla,solver)
     invert = True
+    invert = False
     for step in range(steps):
         for i,site in enumerate(tags_plq):
             ket_tid = norm_plq[site,'KET'].get_fermion_info()[0]
@@ -548,7 +579,7 @@ def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol
                 x = np.dot(mat_inv,b)
             else:
                 x0 = N.constructor.tensor_to_vector(norm_plq[site,'KET'].data)
-                x,info = solver(N,b,x0=x0,**solver_opts)
+                x = solver(N,b,x0=x0,**solver_opts)[0]
 
             x = N.constructor.vector_to_tensor(x,dq) 
             norm_plq[site,'KET'].modify(data=x.copy())
@@ -563,7 +594,8 @@ def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol
                step,cost,cost_norm,cost_fid))
         converged = (previous_cost is not None)and(abs(cost-previous_cost)<tol)
         if previous_cost is not None:
-            assert cost-previous_cost<tol*2.0
+            if cost-previous_cost>0.0:
+                break
         if converged:
             break
         previous_cost = cost
@@ -667,7 +699,7 @@ def gate_full_update_als_site(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,
     if solver in ('lsqr','lsmr'):
         solver_opts = dict(atol=tol,btol=tol)
     elif solver == 'gmres':
-        solver_opts = dict(tol=tol*1e-3,atol=tol*1e-3)
+        solver_opts = dict(tol=tol,atol=tol)
     else:
         solver_opts = dict(tol=tol)
     solver = getattr(spla,solver)
@@ -715,7 +747,8 @@ def gate_full_update_als_site(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,
                    i,cost,cost_norm,cost_fid))
             converged = (previous_cost is not None)and(abs(cost-previous_cost)<tol)
             if previous_cost is not None:
-                assert cost-previous_cost<tol*2.0
+                if cost-previous_cost>0.0:
+                    break
             if converged:
                 break
             previous_cost = cost
@@ -733,6 +766,54 @@ def gate_full_update_als_site(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,
         bra[site].modify(data=norm_plq[site,'BRA'].data.copy())
 
 class FullUpdate(FullUpdate):
+    def evolve(self, steps, tau=None, progbar=None, thresh=None):
+        """Evolve the state with the local Hamiltonian for ``steps`` steps with
+        time step ``tau``.
+        """
+        if tau is not None:
+            self.tau = tau
+
+        if progbar is None:
+            progbar = self.progbar
+
+        pbar = Progbar(total=steps, disable=self.progbar is not True)
+
+        try:
+            for i in range(steps):
+                # anything required by both energy and sweep
+                self.presweep(i)
+
+                # possibly compute the energy
+                should_compute_energy = (
+                    bool(self.compute_energy_every) and
+                    (i % self.compute_energy_every == 0))
+                if should_compute_energy:
+                    self._check_energy()
+                    self._update_progbar(pbar)
+                    if len(self.energies)>1 and thresh is not None:
+                        if self.energies[-2]-self.energies[-1]<thresh:
+                            break
+
+                # actually perform the gates
+                self.sweep(self.tau)
+                self._n += 1
+                pbar.update()
+
+                if self.callback is not None:
+                    if self.callback(self):
+                        break
+
+            # possibly compute the energy
+            if self.compute_energy_final:
+                self._check_energy()
+                self._update_progbar(pbar)
+
+        except KeyboardInterrupt:
+            # allow the user to interupt early
+            pass
+        finally:
+            pbar.close()
+
     #@profile
     @property
     def fit_strategy(self):
