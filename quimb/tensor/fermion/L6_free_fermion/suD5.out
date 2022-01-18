@@ -1,0 +1,147 @@
+Saving temporary files in: /tmp/fa53257b-fbaa-4070-a350-65e28285df78/
+tau= 0.1
+i=0,energy=-49.4172083748028
+i=1,energy=-49.42660847196144
+i=2,energy=-49.47805349634468
+i=3,energy=-49.437011281605955
+i=4,energy=-49.44545677594906
+tau= 0.08
+i=0,energy=-49.51016875375146
+i=1,energy=-49.503201935710365
+i=2,energy=-49.48208113680116
+i=3,energy=-49.46152357163563
+i=4,energy=-49.48777804354815
+tau= 0.06
+i=0,energy=-49.52133159097891
+i=1,energy=-49.53289156381005
+i=2,energy=-49.515565042244994
+i=3,energy=-49.517133116168395
+i=4,energy=-49.50653181885812
+tau= 0.04
+i=0,energy=-49.549922454468614
+i=1,energy=-49.55346108501524
+i=2,energy=-49.55150604392203
+i=3,energy=-49.557928332222716
+i=4,energy=-49.563499388773515
+tau= 0.02
+i=0,energy=-49.568760273403335
+i=1,energy=-49.573631715173136
+i=2,energy=-49.57921351637772
+i=3,energy=-49.57958064628164
+i=4,energy=-49.57755029796766
+tau= 0.01
+i=0,energy=-49.57724949459058
+i=1,energy=-49.581338547378216
+i=2,energy=-49.584001789157966
+i=3,energy=-49.585916840634674
+i=4,energy=-49.58640195292456
+tau= 0.01
+i=0,energy=-49.58470666429045
+i=1,energy=-49.58676254789596
+i=2,energy=-49.58670918911827
+i=3,energy=-49.58756596777527
+i=4,energy=-49.58669657635688
+tau= 0.008
+i=0,energy=-49.58409330200655
+i=1,energy=-49.58614180864756
+i=2,energy=-49.58674993568467
+i=3,energy=-49.58762813270779
+i=4,energy=-49.588149112863206
+tau= 0.006
+i=0,energy=-49.585684115719424
+i=1,energy=-49.58742308906487
+i=2,energy=-49.58868948178187
+i=3,energy=-49.58929319708017
+i=4,energy=-49.58972344623846
+tau= 0.004
+i=0,energy=-49.588141867663545
+i=1,energy=-49.58928097458025
+i=2,energy=-49.58999306977652
+i=3,energy=-49.590661179447565
+i=4,energy=-49.59120834006258
+tau= 0.002
+i=0,energy=-49.59052447625739
+i=1,energy=-49.59099231656069
+i=2,energy=-49.59142383760441
+i=3,energy=-49.59176663635167
+i=4,energy=-49.592130855131835
+tau= 0.001
+i=0,energy=-49.59178208300999
+i=1,energy=-49.59200796743146
+i=2,energy=-49.59221855776715
+i=3,energy=-49.592409025945045
+i=4,energy=-49.59258755735909
+tau= 0.001
+i=0,energy=-49.59220348333903
+i=1,energy=-49.59240743380983
+i=2,energy=-49.59258999097159
+i=3,energy=-49.59276463776545
+i=4,energy=-49.5929377944304
+tau= 0.0008
+i=0,energy=-49.5925656910389
+i=1,energy=-49.59271561948038
+i=2,energy=-49.59286213745615
+i=3,energy=-49.5929980548464
+i=4,energy=-49.593123862317746
+tau= 0.0006
+i=0,energy=-49.592679360765686
+i=1,energy=-49.5927992958666
+i=2,energy=-49.592911014772874
+i=3,energy=-49.59302231188575
+i=4,energy=-49.59312590747941
+tau= 0.0004
+i=0,energy=-49.592953229246056
+i=1,energy=-49.5930290100795
+i=2,energy=-49.593102648158776
+i=3,energy=-49.59317558743471
+i=4,energy=-49.59324669664626
+tau= 0.0002
+i=0,energy=-49.59316950658958
+i=1,energy=-49.59320729196711
+i=2,energy=-49.593244800608005
+i=3,energy=-49.5932779779804
+i=4,energy=-49.593314690902204
+tau= 0.0001
+i=0,energy=-49.59327608943949
+i=1,energy=-49.59329511318261
+i=2,energy=-49.593313915623334
+i=3,energy=-49.593332581971275
+i=4,energy=-49.59335116102342
+{}
+{}
+{}
+{}
+{}
+{}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+{'global_flip': False, 'local_inds': []}
+su time: 1642283473.273044
+saving to  ./saved_states/suD5_2
