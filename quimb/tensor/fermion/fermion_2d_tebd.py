@@ -1,9 +1,11 @@
 from itertools import product,starmap
-import functools
+from functools import partial
 import numpy as np
 import scipy.sparse.linalg as spla
+from scipy.linalg import lstsq
 from autoray import do
 from opt_einsum import shared_intermediates
+from pyblock3.algebra.fermion_ops import creation,bonded_vaccum
 
 from ...utils import pairwise
 from ...utils import progbar as Progbar
@@ -23,7 +25,8 @@ from ..tensor_2d import (
     calc_plaquette_sizes,
     calc_plaquette_map,
     Rotator2D,
-    plaquette_to_sites
+    plaquette_to_sites,
+    PEPS
 )
 
 from .block_interface import eye, Hubbard
@@ -36,7 +39,51 @@ from .fermion_core import (
     FTNLinearOperator
 )
 from .fermion_arbgeom_tebd import LocalHamGen
-from .fermion_2d import FermionTensorNetwork2D
+from .fermion_2d import FPEPS,FermionTensorNetwork2D
+
+def get_pattern(inds):
+    """
+    make sure patterns match in input tensors, eg,
+    --->A--->B--->
+     i    j    k
+    pattern for A_ij = +-
+    pattern for B_jk = +-
+    the pattern of j index must be reversed in two operands
+    """
+    inv_pattern = {"+":"-", "-":"+"}
+    ind_to_pattern_map = dict()
+    pattern = ""
+    for ix in inds[:-1]:
+        if ix in ind_to_pattern_map:
+            ipattern = inv_pattern[ind_to_pattern_map[ix]]
+        else:
+            nmin = pattern.count("-")
+            ipattern = "-" if nmin*2<len(pattern) else "+"
+            ind_to_pattern_map[ix] = ipattern
+        pattern += ipattern
+    pattern += "+" # assuming last index is the physical index
+    return pattern
+def get_half_filled_product_state(Lx,Ly,symmetry=None):
+    """
+    helper function to generate initial guess from regular PEPS
+    |psi> = \prod (|alpha> + |beta>) at each site
+    this function only works for half filled case with U1 symmetry
+    Note energy of this wfn is 0
+    """
+    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
+    ftn = FermionTensorNetwork([])
+    cre = creation(spin='sum',symmetry=symmetry,flat=True) 
+    for ix, iy in product(range(tn.Lx), range(tn.Ly)):
+        T = tn[ix, iy]
+        pattern = get_pattern(T.inds)
+        #put vaccum at site (ix, iy) and apply a^{\dagger}
+        vac = bonded_vaccum((1,)*(T.ndim-1), pattern=pattern)
+        trans_order = list(range(1,T.ndim))+[0]
+        data = np.tensordot(cre, vac, axes=((1,), (-1,))).transpose(trans_order)
+        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
+        ftn.add_tensor(new_T, virtual=False)
+    ftn.view_as_(FPEPS, like=tn)
+    return ftn
 
 def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
     """Create a LocalHam2D object for 2D Hubbard Model
@@ -305,7 +352,7 @@ def parse_specific_gate_opts(strategy,fit_opts):
     gate_opts['enforce_pos'] = fit_opts['als_enforce_pos']
     gate_opts['pos_smudge'] = fit_opts['als_enforce_pos_smudge']
     return gate_opts
-def init_benvs(ket,sweep,
+def init_benvs(fu,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
     contract_boundary_opts['max_bond'] = max_bond
@@ -315,9 +362,10 @@ def init_benvs(ket,sweep,
     contract_boundary_opts['dense'] = dense
     contract_boundary_opts['layer_tags'] = layer_tags
     contract_boundary_opts['compress_opts'] = compress_opts
-     
+    fu.benv_val = 1.0
+ 
     benvs = {}
-    norm,_,bra = ket.make_norm(return_all=True,layer_tags=layer_tags)
+    norm,_,fu._bra = fu._psi.make_norm(return_all=True,layer_tags=layer_tags)
     if sweep[0]=='v':
         benvs['left',0] = FermionTensorNetwork([])
         norm.reorder(direction='col',layer_tags=layer_tags,inplace=True)
@@ -328,8 +376,8 @@ def init_benvs(ket,sweep,
         norm.reorder(direction='row',layer_tags=layer_tags,inplace=True)
         benvs['mid',0] = norm.select(norm.row_tag(0)).copy() 
         norm.compute_top_environments(envs=benvs,**contract_boundary_opts)
-    return benvs,bra
-def compute_envs(bix,benvs,sweep,like,
+    return benvs
+def compute_envs(fu,bix,benvs,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
     contract_boundary_opts['max_bond'] = max_bond
@@ -339,13 +387,15 @@ def compute_envs(bix,benvs,sweep,like,
     contract_boundary_opts['dense'] = dense
     contract_boundary_opts['layer_tags'] = layer_tags
     contract_boundary_opts['compress_opts'] = compress_opts
+    fu.env_val = 1.0
     
+    ket = fu._psi
     envs = {}
     if sweep[0]=='v':
         envs['bottom',0] = FermionTensorNetwork([])
         tn = FermionTensorNetwork(
              (benvs['left',bix],benvs['mid',bix],benvs['right',bix])
-             ).view_as_(FermionTensorNetwork2D,like=like)
+             ).view_as_(FermionTensorNetwork2D,like=ket)
         tn.reorder(direction='row',layer_tags=layer_tags,inplace=True)
         envs['mid',0] = tn.select(tn.row_tag(0)).copy() 
         tn.compute_top_environments(envs=envs,
@@ -354,7 +404,7 @@ def compute_envs(bix,benvs,sweep,like,
         envs['left',0] = FermionTensorNetwork([])
         tn = FermionTensorNetwork(
              (benvs['bottom',bix],benvs['mid',bix],benvs['top',bix])
-             ).view_as_(FermionTensorNetwork2D,like=like)
+             ).view_as_(FermionTensorNetwork2D,like=ket)
         tn.reorder(direction='col',layer_tags=layer_tags,inplace=True)
         envs['mid',0] = tn.select(tn.col_tag(0)).copy() 
         tn.compute_right_environments(envs=envs,
@@ -375,7 +425,7 @@ def modify(T_tar,T_ref):
         axes = [T.inds.index(ind) for ind in local_inds]
         data._local_flip(axes)
     T_ref.modify(data=data) 
-def update_envs(ix,bix,envs,ket,sweep,like,
+def update_envs(fu,ix,bix,envs,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
     contract_boundary_opts['max_bond'] = max_bond
@@ -385,17 +435,39 @@ def update_envs(ix,bix,envs,ket,sweep,like,
     contract_boundary_opts['layer_tags'] = layer_tags
     contract_boundary_opts['compress_opts'] = compress_opts
 
+    ket = fu._psi
     if sweep[0]=='v':
         from_which,to_which,direction = 'bottom','top','row'
+        Lix,Lbix = ket.Lx,ket.Ly
         select_tag = ket.row_tag(ix)
         xrange,yrange = (ix-1,ix),(max(bix-1,0),min(bix+1,ket.Ly-1))
     else:   
         from_which,to_which,direction = 'left','right','col'
+        Lbix,Lix = ket.Lx,ket.Ly
         select_tag = ket.col_tag(ix)
         yrange,xrange = (ix-1,ix),(max(bix-1,0),min(bix+1,ket.Lx-1))
 
     envs.pop((to_which,ix))
-    norm,_,bra = ket.make_norm(return_all=True,layer_tags=layer_tags)
+#    if fu.pre_normalize:
+#        val = fu.env_val
+#        tn = envs.get((from_which,ix),FermionTensorNetwork([]))
+#        if tn.num_tensors>0:
+#            tn.multiply_(val**(ix*Lbix),spread_over='all')
+#        for i in [0,1]:
+#            tn = envs['mid',ix+i]
+#            site = ket.site_tag(ix+i,bix) if sweep[0]=='v' else \
+#                   ket.site_tag(bix,ix+i)
+#            tn = tn.select(site,which='!any')
+#            tn.multiply_(val**(Lbix-1),spread_over='all')
+#
+#        tn = envs.get(('mid',ix+2),FermionTensorNetwork([]))
+#        if tn.num_tensors>0:
+#            tn.multiply_(val**Lbix,spread_over='all')
+#        tn = envs.get((to_which,ix+2),FermionTensorNetwork([]))
+#        if tn.num_tensors>0:
+#            tn.multiply_(val**((Lix-(ix+3))*Lbix),spread_over='all')
+
+    norm,_,fu._bra = ket.make_norm(return_all=True,layer_tags=layer_tags)
     norm.reorder(direction=direction,layer_tags=layer_tags,inplace=True)
     for i in [0,1]:
         tn = envs['mid',ix+i]
@@ -407,13 +479,13 @@ def update_envs(ix,bix,envs,ket,sweep,like,
          (envs[from_which,ix],
           *[envs['mid',ix+i] for i in [0,1]],
           envs[to_which,ix+1])
-         ).view_as_(FermionTensorNetwork2D,like=like)
+         ).view_as_(FermionTensorNetwork2D,like=ket)
     if ix>0:
         tn.contract_boundary_from_(xrange=xrange,yrange=yrange,
             from_which=from_which,**contract_boundary_opts)
     envs[from_which,ix+1] = tn.select(select_tag).copy()
     return
-def update_benvs(bix,benvs,ket,sweep,
+def update_benvs(fu,bix,benvs,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
     contract_boundary_opts['max_bond'] = max_bond
@@ -423,17 +495,33 @@ def update_benvs(bix,benvs,ket,sweep,
     contract_boundary_opts['layer_tags'] = layer_tags
     contract_boundary_opts['compress_opts'] = compress_opts
 
+    ket = fu._psi
     if sweep[0]=='v':
         from_which,to_which,direction = 'left','right','col'
+        Lbix,Lix = ket.Ly,ket.Lx
         xrange,yrange = (0,ket.Lx-1),(bix-1,bix) 
         select_tag = ket.col_tag(bix)
     else:
         from_which,to_which,direction = 'bottom','top','row'
+        Lix,Lbix = ket.Ly,ket.Lx
         yrange,xrange = (0,ket.Ly-1),(bix-1,bix) 
         select_tag = ket.row_tag(bix)
     if bix>0: 
         benvs.pop((to_which,bix-1))
-    norm,_,bra = ket.make_norm(return_all=True,layer_tags=layer_tags)
+#    if fu.pre_normalize:
+#        val = fu.benv_val
+#        tn = benvs.get((from_which,bix),FermionTensorNetwork([]))
+#        if tn.num_tensors>0:
+#            tn.multiply_(val**(bix*Lix),spread_over='all')
+#        for i in [1]:
+#            tn = benvs.get(('mid',bix+i),FermionTensorNetwork([]))
+#            if tn.num_tensors>0:
+#                tn.multiply_(val**Lix,spread_over='all')
+#        tn = benvs.get((to_which,bix+1),FermionTensorNetwork([]))
+#        if tn.num_tensors>0:
+#            tn.multiply_(val**((Lbix-(bix+2))*Lix),spread_over='all')
+
+    norm,_,fu._bra = ket.make_norm(return_all=True,layer_tags=layer_tags)
     norm.reorder(direction=direction,layer_tags=layer_tags,inplace=True)
     benvs['mid',bix] = norm.select(select_tag).copy() 
 
@@ -448,64 +536,43 @@ def update_benvs(bix,benvs,ket,sweep,
 def pre_normalize(fu,env,where):
     if fu.pre_normalize:
         nfactor = do('abs',env.contract(all,optimize=fu.contract_optimize))
-        fu._psi.multiply_(nfactor**(-1/2),spread_over='all')
-        fu._bra.multiply_(nfactor**(-1/2),spread_over='all')
+        #fu._psi.multiply_(nfactor**(-1/2),spread_over='all')
+        #fu._bra.multiply_(nfactor**(-1/2),spread_over='all')
 
         n = fu._psi.num_tensors
         n_missing = 2
         tags_plq = tuple(starmap(fu._psi.site_tag,where))
         tns = env.select(tags_plq,which='!any')
         tns.multiply_(nfactor**(n_missing/n-1),spread_over='all')
+        for site in tags_plq:
+            env[site,'KET'].modify(apply=lambda data:data*nfactor**(-1/(2*n)))
+            env[site,'BRA'].modify(apply=lambda data:data*nfactor**(-1/(2*n)))
+        print('nfactor=',nfactor)
+        print('norm=',env.contract())
 
-        fu.env_val *= nfactor**(-1/(2*n))
-        fu.benv_val *= nfactor**(-1/(2*n))
+        fu.env_val *= nfactor**(-1/n)
+        fu.benv_val *= nfactor**(-1/n)
     return 
-#def normalize_envs(fu,ix,sweep,envs):
-#    if fu.pre_normalize:
-#        n = fu._psi.num_tensors
-#        if sweep[0]=='v':
-#            from_which,to_which = 'bottom','top'
-#            n_includes = fu._psi.Ly*(fu._psi.Lx-1-(ix+2)+1)
-#        else: 
-#        
-#def normalize_benvs(nfactor,sweep,benvs)
-#           fu.benv_val *= nfactor**(-1/(2*n))
-#           if sweep[0]=='v':
-#               from_which,to_which = 'left','right'
-#               assert where[0][1]==where[1][1]
-#               bix,L_sweep,L_orth = where[0][1],fu._psi.Ly,fu._psi.Lx
-#           else: 
-#               from_which,to_which = 'bottom','top'
-#               assert where[0][0]==where[1][0]
-#               bix,L_sweep,L_orth = where[0][0],fu._psi.Lx,fu._psi.Ly
-#           if bix<L_sweep-2:
-#               tn = benvs[to_which,bix+1]
-#               n_includes = L_orth-bix-2
-#               tn.multiply_(fu.benv_val**(n_includes*L_orth),spread_over='all')
-#        if envs is not None:
-#           fu.env_val *= nfactor**(-1/(2*n))
-            
 def normalize(fu):
-    env = compute_plaquette_environment(fu,((0,0),(1,0)))
-    nfactor = do('abs',env.contract(all,optimize=fu.contract_optimize))
-    print('nfactor=',nfactor)
-    fu._psi.multiply_(nfactor**(-1/2),spread_over='all')
-    fu._psi.balance_bonds_() 
-    fu._psi.equalize_norms_()
-    _,_,fu._bra = fu._psi.make_norm(return_all=True,layer_tags=('KET','BRA'))
+    if not fu.pre_normalize:
+        env = compute_plaquette_environment(fu,((0,0),(1,0)))
+        nfactor = do('abs',env.contract(all,optimize=fu.contract_optimize))
+        print('nfactor=',nfactor)
+        fu._psi.multiply_(nfactor**(-1/2),spread_over='all')
+        fu._psi.balance_bonds_() 
+        fu._psi.equalize_norms_()
+        _,_,fu._bra = fu._psi.make_norm(return_all=True,layer_tags=('KET','BRA'))
     return
 def vertical_sweep(fu,tau):
     Lx,Ly = fu._psi.Lx,fu._psi.Ly
-    init_benvs_ = functools.partial(init_benvs,sweep='v',max_bond=fu.chi) 
-    compute_envs_ = functools.partial(compute_envs,like=fu._psi,
-                          sweep='v',max_bond=fu.chi)
-    update_envs_ = functools.partial(update_envs,like=fu._psi,
-                   sweep='v',max_bond=fu.chi)
-    update_benvs_ = functools.partial(update_benvs,sweep='v',max_bond=fu.chi)
+    init_benvs_   = partial(init_benvs  ,sweep='v',max_bond=fu.chi) 
+    compute_envs_ = partial(compute_envs,sweep='v',max_bond=fu.chi)
+    update_envs_  = partial(update_envs, sweep='v',max_bond=fu.chi)
+    update_benvs_ = partial(update_benvs,sweep='v',max_bond=fu.chi)
 
-    col_envs,fu._bra = init_benvs_(ket=fu._psi)
+    col_envs = init_benvs_(fu)
     for j in range(Ly):
-        row_envs = compute_envs_(bix=j,benvs=col_envs)
+        row_envs = compute_envs_(fu,bix=j,benvs=col_envs)
         for i in range(Lx):
             if i+1!=Lx:
                 where = (i,j),(i+1,j)
@@ -517,21 +584,19 @@ def vertical_sweep(fu,tau):
                       check_collisions=False)
                 pre_normalize(fu,env,where) 
                 fu.gate(U,where,env=env)
-                update_envs_(ix=i,bix=j,envs=row_envs,ket=fu._psi)
-        update_benvs_(bix=j,benvs=col_envs,ket=fu._psi)
+                update_envs_(fu,ix=i,bix=j,envs=row_envs)
+        update_benvs_(fu,bix=j,benvs=col_envs)
     return
 def horizontal_sweep(fu,tau):
     Lx,Ly = fu._psi.Lx,fu._psi.Ly
-    init_benvs_ = functools.partial(init_benvs,sweep='h',max_bond=fu.chi) 
-    compute_envs_ = functools.partial(compute_envs,like=fu._psi,
-                          sweep='h',max_bond=fu.chi)
-    update_envs_ = functools.partial(update_envs,like=fu._psi,
-                   sweep='h',max_bond=fu.chi)
-    update_benvs_ = functools.partial(update_benvs,sweep='h',max_bond=fu.chi)
+    init_benvs_   = partial(init_benvs,  sweep='h',max_bond=fu.chi) 
+    compute_envs_ = partial(compute_envs,sweep='h',max_bond=fu.chi)
+    update_envs_  = partial(update_envs, sweep='h',max_bond=fu.chi)
+    update_benvs_ = partial(update_benvs,sweep='h',max_bond=fu.chi)
 
-    row_envs,fu._bra = init_benvs_(ket=fu._psi)
+    row_envs = init_benvs_(fu)
     for i in range(Lx):
-        col_envs = compute_envs_(bix=i,benvs=row_envs)
+        col_envs = compute_envs_(fu,bix=i,benvs=row_envs)
         for j in range(Ly):
             if j+1!=Ly:
                 where = (i,j),(i,j+1)
@@ -543,8 +608,8 @@ def horizontal_sweep(fu,tau):
                       check_collisions=False)
                 pre_normalize(fu,env,where) 
                 fu.gate(U,where,env=env)
-                update_envs_(ix=j,bix=i,envs=col_envs,ket=fu._psi)
-        update_benvs_(bix=i,benvs=row_envs,ket=fu._psi)
+                update_envs_(fu,ix=j,bix=i,envs=col_envs)
+        update_benvs_(fu,bix=i,benvs=row_envs)
     return
 def tensor_copy(tsr):
     new_tsr = FermionTensor(data=tsr.data.copy(),inds=tsr.inds,
@@ -735,7 +800,7 @@ def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol
         solver_opts = dict(tol=tol)
     solver = getattr(spla,solver)
     invert = True
-    invert = False
+#    invert = False
     for step in range(steps):
         for i,site in enumerate(tags_plq):
             ket_tid = norm_plq[site,'KET'].get_fermion_info()[0]
@@ -779,8 +844,14 @@ def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol
                     vec = np.zeros(dim)
                     vec[j] = 1.0
                     mat[:,j] = N._matvec(vec)
-                mat_inv = np.linalg.inv(mat)
+                u,s,v = np.linalg.svd(mat)
+                #print(s)
+                #print(b)
+                s = np.reciprocal(s[s>tol])
+                u,v = u[:,:len(s)],v[:len(s),:]
+                mat_inv = np.linalg.multi_dot([u,np.diag(s),v]).T
                 x = np.dot(mat_inv,b)
+                #print(np.linalg.norm(np.dot(mat,x)-b))
             else:
                 x0 = N.constructor.tensor_to_vector(norm_plq[site,'KET'].data)
                 x = solver(N,b,x0=x0,**solver_opts)[0]
@@ -1031,6 +1102,8 @@ def compute_plaquette_environment_col_first(self,where,x_bsz,y_bsz):
     return env
 def sweep(self,tau):
     Lx,Ly = self._psi.Lx,self._psi.Ly
+    self.env_val = 1.0 
+    self.benv_val = 1.0
     ordering = []
     for j in range(Ly):
         for i in range(Lx):
