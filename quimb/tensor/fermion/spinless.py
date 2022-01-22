@@ -265,7 +265,7 @@ def get_product_state(Lx,Ly,n=0.5,symmetry='u1'):
     this function only works for half filled case with U1 symmetry
     Note energy of this wfn is 0
     """
-    N = int(Lx*Ly*n)
+    N = int(Lx*Ly*n+1e-6)
     tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
     ftn = FermionTensorNetwork([])
     ind_to_pattern_map = dict()

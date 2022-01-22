@@ -1,10 +1,12 @@
 from itertools import product,starmap
 from functools import partial
-import numpy as np
-import scipy.sparse.linalg as spla
 from scipy.linalg import lstsq
 from autoray import do
 from opt_einsum import shared_intermediates
+import numpy as np
+import pickle,os
+import scipy.sparse.linalg as spla
+
 from pyblock3.algebra.fermion_ops import creation,bonded_vaccum
 
 from ...utils import pairwise
@@ -40,7 +42,7 @@ from .fermion_core import (
 )
 from .fermion_arbgeom_tebd import LocalHamGen
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
-
+######################### some helper fxns #######################
 def get_pattern(inds,ind_to_pattern_map):
     """
     make sure patterns match in input tensors, eg,
@@ -84,6 +86,74 @@ def get_half_filled_product_state(Lx,Ly,symmetry=None):
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)
     return ftn
+def write_ftn_to_disc(tn,tmpdir):
+    fname = tmpdir
+    print('saving to ', fname)
+    # Create a generic dictionary to hold all information
+    data = dict()
+    # Save which type of tn this is
+    data['class'] = type(tn)
+    # Add information relevant to the tensors
+    data['tn_info'] = dict()
+    for e in tn._EXTRA_PROPS:
+        data['tn_info'][e] = getattr(tn, e)
+    # Add the tensors themselves
+    data['tensors'] = []
+    ntensors = 0
+    for ten in tn.tensors:
+        ten_info = dict()
+        ten_info['fermion_info'] = ten.get_fermion_info()
+        ten_info['phase'] = ten.phase
+        ten_info['tensor'] = ten
+        data['tensors'].append(ten_info)
+        ntensors += 1
+    data['ntensors'] = ntensors
+    # Write to a file
+    with open(fname, 'wb') as f:
+        pickle.dump(data, f)
+    return 
+def load_ftn_from_disc(fname, delete_file=False):
+    # Open up the file
+    with open(fname, 'rb') as f:
+        data = pickle.load(f)
+    # Set up a dummy fermionic tensor network
+    tn = FermionTensorNetwork([])
+    # Put the tensors into the ftn
+    tensors = [None,] * data['ntensors']
+    for i in range(data['ntensors']):
+        # Get the tensor
+        ten_info = data['tensors'][i]
+        ten = ten_info['tensor']
+        ten = FermionTensor(ten.data, inds=ten.inds, tags=ten.tags)
+        # Get/set tensor info
+        tid, site = ten_info['fermion_info']
+        ten.fermion_owner = None
+        ten._avoid_phase = False
+        # Add the required phase
+        ten.phase = ten_info['phase']
+        # Add to tensor list
+        tensors[site] = (tid, ten)
+    # Add tensors to the tn
+    for (tid, ten) in tensors:
+        tn.add_tensor(ten, tid=tid, virtual=True)
+    # Get addition attributes needed
+    tn_info = data['tn_info']
+    # Set all attributes in the ftn
+    extra_props = dict()
+    for props in tn_info:
+        extra_props[props[1:]] = tn_info[props]
+    # Convert it to the correct type of fermionic tensor network
+    tn = tn.view_as_(data['class'], **extra_props)
+    # Remove file (if desired)
+    if delete_file:
+        delete_ftn_from_disc(fname)
+    # Return resulting tn
+    return tn
+def delete_ftn_from_disc(fname):
+    try:
+        os.remove(fname)
+    except:
+        pass
 
 def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
     """Create a LocalHam2D object for 2D Hubbard Model
