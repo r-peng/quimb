@@ -1,12 +1,22 @@
 import numpy as np
-import time,functools
+import time#,functools
 
 from itertools import product
-from ..tensor_2d import Rotator2D
-from .fermion_2d_tebd import insert,copy
-from .fermion_2d import FermionTensorNetwork2D 
+from .fermion_2d_tebd import (
+    insert,
+    copy,
+    write_ftn_to_disc,
+    load_ftn_from_disc,
+    delete_ftn_from_disc,
+)
 from .fermion_core import FermionTensor,FermionTensorNetwork
-########### MPI ##################
+from .fermion_2d import FermionTensorNetwork2D
+#from ..tensor_2d import Rotator2D
+
+#####################################################################################
+# MPI STUFF
+#####################################################################################
+
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
@@ -99,24 +109,13 @@ def worker_execution():
             results[func_call] = function(iterate_over[func_call], 
                                           *args, **kwargs)
         COMM.send(results, dest=0)
+##################################################################
 
-########### serial fxns #######################
-def apply_term(term,norm):
-#    print('############ after copy ##########')
-#    for tid,(tsr,_) in norm.fermion_space.tensor_order.items():
-#        assert norm.tensor_map[tid] is tsr
-#        print(tsr.inds)
-    ftn = norm.copy(full=True)
-#    ftn = copy(norm)
-#    print('############ after copy ##########')
-#    for tid,(tsr,_) in ftn.fermion_space.tensor_order.items():
-#        assert ftn.tensor_map[tid] is tsr
-#        print(tsr.inds)
+def apply_term(args,fname,directory):
+    sites,term_type,ops,fac = args
+    ftn = load_ftn_from_disc(fname) 
     n = ftn.num_tensors//2
-    apply_order = list(term.ops.keys())
-    apply_order.sort()
-    for key in apply_order:
-        where,op = term.ops[key]
+    for where,op in zip(sites,ops):
         ket = ftn[ftn.site_tag(*where),'KET']
         site_ix = ket.inds[-1]
         bnd = site_ix+'_'
@@ -130,247 +129,288 @@ def apply_term(term,norm):
         ftn.fermion_space.move(TG_tid,ket_site+1)
         
         ftn.contract_tags(ket.tags,which='all',inplace=True)
-    return ftn,term.fac
-def compute_environments(
-    tn,
-    from_which,
-    xrange=None,
-    yrange=None,
-    max_bond=None,
-    *,
-    cutoff=1e-10,
-    canonize=True,
-    mode='mps',
-    layer_tags=None,
-    dense=False,
-    compress_opts=None,
-    envs=None,
-    **contract_boundary_opts
-):
-    """Compute the ``self.Lx`` 1D boundary tensor networks describing
-    the environments of rows and columns. The returned tensor network
-    also contains the original plaquettes
-    """
-    direction = {"left": "col",
-                 "right": "col",
-                 "top": "row",
-                 "bottom": "row"}[from_which]
-    tn.reorder(direction, layer_tags=layer_tags, inplace=True)
+    new_fname = ftn.site_tag(*sites[0]) + '_' + ftn.site_tag(*sites[1]) \
+              + '_term{}'.format(term_type)
+    new_fname = directory+new_fname
+    write_ftn_to_disc(ftn,new_fname)
+    return sites,term_type,new_fname,fac
+def apply_terms(norm,H,directory='./saved_states/'):
+    fname = directory+'norm'
+    write_ftn_to_disc(norm,fname)
+    term_map = dict()
+    term_map['norm'] = 1.0,fname
 
-    r2d = Rotator2D(tn, xrange, yrange, from_which)
-    sweep, row_tag = r2d.vertical_sweep, r2d.row_tag
-    contract_boundary_fn = r2d.get_contract_boundary_fn()
+    fxn = apply_term
+    iterate_over = [tuple(key)+tuple(val) for key,val in H.items()] 
+    args = [fname,directory]
+    kwargs = dict()
+    results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for i in range(len(results)):
+        if results[i] is not None:
+            sites,term_type,new_fname,fac = results[i]
+            term_map[sites,term_type] = fac,new_fname
+    return term_map
+def contract_boundary(args,bix,from_which,**kwargs):
+    key,fname,orth_range = args
+    tn = load_ftn_from_disc(fname)
+    step = 1 if from_which in {'bottom','left'} else -1
+    if from_which in {'bottom','top'}:
+        tn.contract_boundary_from_(
+            xrange=(bix-2*step,bix-step),yrange=orth_range,
+            from_which=from_which,**kwargs)
+    else:
+        tn.contract_boundary_from_(
+            yrange=(bix-2*step,bix-step),xrange=orth_range,
+            from_which=from_which,**kwargs)
+    write_ftn_to_disc(tn,fname)
+    return key,fname
+def get_benvs(term_map,direction,Lbix,Lix,layer_tags=('KET','BRA'),
+              max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
+    kwargs = dict()
+    kwargs['max_bond'] = max_bond
+    kwargs['cutoff'] = cutoff
+    kwargs['canonize'] = canonize
+    kwargs['mode'] = mode
+    kwargs['layer_tags'] = layer_tags
 
-    if envs is None:
-        envs = {}
+    sides = ('left','right') if direction=='col' else ('bottom','top')
+    benvs = dict()
+    # middle:
+    for key,(_,fname) in term_map.items():
+        ftn = load_ftn_from_disc(fname)
+        ftn.reorder(direction,layer_tags=layer_tags,inplace=True)
+        write_ftn_to_disc(ftn,fname)
+        tag = ftn.col_tag if direction=='col' else ftn.row_tag
+        for bix in range(Lbix):
+            benv_name = fname+'_mid{}'.format(bix)
+            write_ftn_to_disc(ftn.select(tag(bix)).copy(),benv_name)
+            benvs[key,'mid',bix] = benv_name 
+        benv_name = fname+'_{}{}'.format(sides[0],0)
+        write_ftn_to_disc(FermionTensorNetwork([]),benv_name)
+        benvs[key,sides[0],0] = benv_name
+ 
+        benv_name = fname+'_{}{}'.format(sides[0],1)
+        write_ftn_to_disc(ftn.select(tag(0)).copy(),benv_name)
+        benvs[key,sides[0],1] = benv_name 
 
-    if mode == 'full-bond':
-        # set shared storage for opposite env contractions
-        contract_boundary_opts.setdefault('opposite_envs', {})
+        benv_name = fname+'_{}{}'.format(sides[1],Lbix-1)
+        write_ftn_to_disc(FermionTensorNetwork([]),benv_name)
+        benvs[key,sides[1],Lbix-1] = benv_name
+ 
+        benv_name = fname+'_{}{}'.format(sides[1],Lbix-2)
+        write_ftn_to_disc(ftn.select(tag(Lbix-1)).copy(),benv_name)
+        benvs[key,sides[1],Lbix-2] = benv_name 
 
-    envs[from_which, sweep[0]] = FermionTensorNetwork([])
-    first_row = row_tag(sweep[0])
-    envs['mid', sweep[0]] = tn.select(first_row).copy()
-    if len(sweep)==1:
-        return envs
-    if dense:
-        tn ^= first_row
-    envs[from_which, sweep[1]] = tn.select(first_row).copy()
+    orth_range = 0,Lix-1
+    # left
+    iterate_over = []
+    for key,(_,fname) in term_map.items():
+        ftn = load_ftn_from_disc(fname)
+        tmp_fname = fname+'_tmp'
+        write_ftn_to_disc(ftn,tmp_fname)
+        iterate_over.append((key,tmp_fname,orth_range)) 
+    for bix in range(2,Lbix):
+        fxn = contract_boundary
+        args = [bix,sides[0]] 
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        for i in range(len(results)):
+            if results[i] is not None:
+                key,tmp_fname = results[i]
+                ftn = load_ftn_from_disc(tmp_fname)
+                tag = ftn.col_tag if direction=='col' else ftn.row_tag
+                benv_name = term_map[key][1]+'_{}{}'.format(sides[0],bix)
+                write_ftn_to_disc(ftn.select(tag(0)).copy(),benv_name)
+                benvs[key,sides[0],bix] = benv_name
+    # right
+    iterate_over = []
+    for key,(_,fname) in term_map.items():
+        ftn = load_ftn_from_disc(fname)
+        tmp_fname = fname+'_tmp'
+        write_ftn_to_disc(ftn,tmp_fname)
+        iterate_over.append((key,tmp_fname,orth_range)) 
+    for bix in range(Lbix-3,-1,-1):
+        fxn = contract_boundary
+        args = [bix,sides[1]] 
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        for i in range(len(results)):
+            if results[i] is not None:
+                key,tmp_fname = results[i]
+                ftn = load_ftn_from_disc(tmp_fname)
+                tag = ftn.col_tag if direction=='col' else ftn.row_tag
+                benv_name = term_map[key][1]+'_{}{}'.format(sides[1],bix)
+                write_ftn_to_disc(ftn.select(tag(Lbix-1)).copy(),benv_name)
+                benvs[key,sides[1],bix] = benv_name
 
-    for i in sweep[2:]:
-        iprevprev = i - 2 * sweep.step
-        iprev = i - sweep.step
-        envs['mid', iprev] = tn.select(row_tag(iprev)).copy()
-        if dense:
-            tn ^= (row_tag(iprevprev), row_tag(iprev))
-        else:
-            contract_boundary_fn(
-                iprevprev, iprev,
-                max_bond=max_bond,
-                cutoff=cutoff,
-                mode=mode,
-                canonize=canonize,
-                layer_tags=layer_tags,
-                compress_opts=compress_opts,
-                **contract_boundary_opts,
-            )
+    fname = term_map['norm'][1]
+    like = load_ftn_from_disc(fname)
+    for key,(_,fname) in term_map.items():
+        delete_ftn_from_disc(fname)
+    for (_,tmp_fname,_) in iterate_over:
+        delete_ftn_from_disc(tmp_fname)
 
-        envs[from_which, i] = tn.select(first_row).copy()
+    benv_map = dict() 
+    for key,(_,fname) in term_map.items():
+        for bix in range(Lbix):
+            b0 = load_ftn_from_disc(benvs[key,sides[0],bix])
+            m  = load_ftn_from_disc(benvs[key,'mid',bix])
+            b1 = load_ftn_from_disc(benvs[key,sides[1],bix])
+            ftn = FermionTensorNetwork((b0,m,b1)).view_as_(
+                  FermionTensorNetwork2D,like=like)
+            bftn_name = fname+'_bix{}'.format(bix) 
+            write_ftn_to_disc(ftn,bftn_name)
+            benv_map[key,bix] = bftn_name 
+           
+    for key,fname in benvs.items():
+        delete_ftn_from_disc(fname)
+    return benv_map
+def get_plqs(benv_map,direction,Lbix,Lix,layer_tags=('KET','BRA'),
+             max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
+    kwargs = dict()
+    kwargs['max_bond'] = max_bond
+    kwargs['cutoff'] = cutoff
+    kwargs['canonize'] = canonize
+    kwargs['mode'] = mode
+    kwargs['layer_tags'] = layer_tags
 
-    return envs
-
-#compute_bottom_environments = functools.partialmethod(
-compute_bottom_environments = functools.partial(
-    compute_environments, from_which='bottom')
-
-#compute_top_environments = functools.partialmethod(
-compute_top_environments = functools.partial(
-    compute_environments, from_which='top')
-
-#compute_left_environments = functools.partialmethod(
-compute_left_environments = functools.partial(
-    compute_environments, from_which='left')
-
-#compute_right_environments = functools.partialmethod(
-compute_right_environments = functools.partial(
-    compute_environments, from_which='right')
-def compute_top_envs(info,**plq_env_opts):
-    key,ftn = info
-    envs = compute_top_environments(ftn,**plq_env_opts)
-    return key,envs
-def compute_bottom_envs(info,**plq_env_opts):
-    key,ftn = info
-    envs = compute_bottom_environments(ftn,envs,**plq_env_opts)
-    return key,envs
-def compute_col_envs(ftn,xrange,**plq_env_opts):
-    envs = {}
-    compute_left_environments(ftn,envs=envs,xrange=xrange,**plq_env_opts)
-    compute_right_environments(ftn,envs=envs,xrange=xrange,**plq_env_opts)
-    return envs
-def compute_plq_envs(info,x_bsz,y_bsz,**plq_env_opts):
-    key,ftn,fac = info
-#    plq_envs = ftn.compute_plaquette_environments(x_bsz=x_bsz,y_bsz=y_bsz,
-#               **plq_env_opts)
-    print('############')
-    print(ftn)
-    row_envs = compute_row_envs(ftn,**plq_env_opts)
-    col_envs = dict()
-    for i in range(ftn.Lx - x_bsz + 1):
-        row_i = FermionTensorNetwork((
-            row_envs['bottom', i],
-            *[row_envs['mid', i+x] for x in range(x_bsz)],
-            row_envs['top', i + x_bsz - 1],
-        )).view_as_(FermionTensorNetwork2D, like=ftn)
-        col_envs[i] = compute_col_envs(row_i,
-            xrange=(max(i - 1, 0), min(i + x_bsz, ftn.Lx - 1)),
-            **plq_env_opts)
+    sides = ('left','right') if direction=='col' else ('bottom','top')
     plq_envs = dict()
-    for i0, j0 in product(range(ftn.Lx - x_bsz + 1),
-                          range(ftn.Ly - y_bsz + 1)):
-        env_ij = FermionTensorNetwork((
-            col_envs[i0]['left', j0],
-            *[col_envs[i0]['mid', ix] for ix in range(j0, j0+y_bsz)],
-            col_envs[i0]['right', j0 + y_bsz - 1]
-        ), check_collisions=False)
+    # middle:
+    for key,fname in benv_map.items():
+        ftn = load_ftn_from_disc(fname)
+        ftn.reorder(direction,layer_tags=layer_tags,inplace=True)
+        write_ftn_to_disc(ftn,fname)
+        tag = ftn.col_tag if direction=='col' else ftn.row_tag
+        for ix in range(Lix):
+            plq_name = fname+'_mid{}'.format(ix)
+            write_ftn_to_disc(ftn.select(tag(ix)).copy(),plq_name)
+            plq_envs[key,'mid',ix] = plq_name 
+        plq_name = fname+'_{}{}'.format(sides[0],0)
+        write_ftn_to_disc(FermionTensorNetwork([]),plq_name)
+        plq_envs[key,sides[0],0] = plq_name 
 
-        plq_envs[(i0, j0), (x_bsz, y_bsz)] = env_ij
-    return key,plq_envs,fac
-def term_to_flat(term_map):
-    flat_map = dict()
-    for term_key,(plq_envs,fac) in term_map.items():
-        for (where,_),env in plq_envs.items():
-            flat_map[where,term_key] = env,fac
-    return flat_map
-def get_components_site(site,env,fac=1.0):
-    scalar = env.contract()
-    bra = env[site,'BRA']
-    tid = bra.get_fermion_info()[0]
-    env._pop_tensor(tid,remove_from_fermion_space='end')
-    grad = env.contract(output_inds=bra.inds[::-1])
-    return scalar*fac,grad*fac
-def flat_to_site(flat_map):
-    site_map = dict()
-    for (where,term_key),val in flat_map.items():
-        if where not in site_map:
-            site_map[where] = dict()
-        local_map = site_map[where]
-        local_map[term_key] = val
-    return site_map
-def get_local_grad(local_map):
-    scalar_H = 0.0
-    grad_H = 0.0
-    for key,(scalar,grad) in local_map.items():
+        plq_name = fname+'_{}{}'.format(sides[0],1)
+        write_ftn_to_disc(ftn.select(tag(0)).copy(),plq_name)
+        plq_envs[key,sides[0],1] = plq_name 
+
+        plq_name = fname+'_{}{}'.format(sides[1],Lix-1)
+        write_ftn_to_disc(FermionTensorNetwork([]),plq_name)
+        plq_envs[key,sides[1],Lix-1] = plq_name
+
+        plq_name = fname+'_{}{}'.format(sides[1],Lix-2)
+        write_ftn_to_disc(ftn.select(tag(Lix-1)).copy(),plq_name)
+        plq_envs[key,sides[1],Lix-2] = plq_name 
+
+    # bottom
+    iterate_over = []
+    for key,fname in benv_map.items():
+        ftn = load_ftn_from_disc(fname)
+        tmp_fname = fname+'_tmp'
+        write_ftn_to_disc(ftn,tmp_fname)
+        
+        bix = key[-1]
+        orth_range = max(bix-1,0),min(bix+1,Lbix-1)
+        iterate_over.append((key,tmp_fname,orth_range)) 
+    for ix in range(2,Lix):
+        fxn = contract_boundary
+        args = [ix,sides[0]]
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        for i in range(len(results)):
+            if results[i] is not None:
+                key,tmp_fname = results[i]
+                ftn = load_ftn_from_disc(tmp_fname)
+                tag = ftn.col_tag if direction=='col' else ftn.row_tag
+                plq_name = benv_map[key]+'_{}{}'.format(sides[0],ix)
+                write_ftn_to_disc(ftn.select(tag(0)).copy(),plq_name)
+                plq_envs[key,sides[0],ix] = plq_name 
+    # top
+    iterate_over = []
+    for key,fname in benv_map.items():
+        ftn = load_ftn_from_disc(fname)
+        tmp_fname = fname+'_tmp'
+        write_ftn_to_disc(ftn,tmp_fname)
+        
+        bix = key[-1]
+        orth_range = max(bix-1,0),min(bix+1,Lbix-1)
+        iterate_over.append((key,tmp_fname,orth_range)) 
+    for ix in range(Lix-3,-1,-1):
+        fxn = contract_boundary
+        args = [ix,sides[1]]
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        for i in range(len(results)):
+            if results[i] is not None:
+                key,tmp_fname = results[i]
+                ftn = load_ftn_from_disc(tmp_fname)
+                tag = ftn.col_tag if direction=='col' else ftn.row_tag
+                plq_name = benv_map[key]+'_{}{}'.format(sides[1],ix)
+                write_ftn_to_disc(ftn.select(tag(Lix-1)).copy(),plq_name)
+                plq_envs[key,sides[1],ix] = plq_name 
+
+    fname = benv_map['norm',0]
+    like = load_ftn_from_disc(fname)
+    for key,fname in benv_map.items():
+        delete_ftn_from_disc(fname)
+    for (_,tmp_fname,_) in iterate_over:
+        delete_ftn_from_disc(tmp_fname)
+
+    plq_map = dict() 
+    for key,fname in benv_map.items():
+        for ix in range(Lix):
+            b0 = load_ftn_from_disc(plq_envs[key,sides[0],ix])
+            m  = load_ftn_from_disc(plq_envs[key,'mid',ix])
+            b1 = load_ftn_from_disc(plq_envs[key,sides[1],ix])
+            ftn = FermionTensorNetwork((b0,m,b1),check_collisions=False
+                  ).view_as_(FermionTensorNetwork2D,like=like)
+            plq_name = fname+'_ix{}'.format(ix) 
+            write_ftn_to_disc(ftn,plq_name)
+
+            ham_term,bix = key
+            site = (ix,bix) if direction=='row' else (bix,ix)
+            if site not in plq_map:
+                plq_map[site] = dict()
+            site_map = plq_map[site]
+            site_map[ham_term] = plq_name 
+
+    for key,fname in plq_envs.items():
+        delete_ftn_from_disc(fname)
+    return plq_map
+def get_component(site,env,fac=1.0):
+    scal = env.contract()
+    ket = env[env.site_tag(*site),'KET']
+    tid = ket.get_fermion_info()[0]
+    env._pop_tensor(tid,remove_from_fermion_space='front')
+    tsr = env.contract(output_inds=ket.inds)
+    return scal*fac,tsr*fac
+def get_grad(args,term_map):
+    site,site_map = args
+    H_scal,H_tsr = 0.0,0.0
+    for key,(fac,_) in term_map.items():
+        fname = site_map[key]
+        ftn = load_ftn_from_disc(fname)
+        scal,tsr = get_component(site,ftn,fac=fac)
         if key=='norm':
-            scalar_N,grad_N = scalar,grad
+            N_scal,N_tsr = scal,tsr
         else:
-            scalar_H += scalar
-            grad_H += grad
-    print('energy=',scalar_H/scalar_N)
-    return grad_H/scalar_N-grad_N*scalar_H/scalar_N**2
-############### parallelizable fxns ##############################
-def apply_terms(norm,H,parallel=False):
-    ftn_map = dict()
-    ftn_map['norm'] = norm,1.0
-    if parallel:
-        fxn = apply_term
-        iterate_over = H
-        args = [norm]
-        kwargs = {}
-        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-        count = 0
-        for i in range(len(results)):
-            if results[i] is not None:
-                ftn = results[i][0]
-                fac = results[i][1]
-                ftn_map[count] = ftn,fac
-                count += 1
-        assert count==len(H)
-    else:
-        for i,term in enumerate(H):
-            ftn_map[i] = apply_term(term,norm)
-    return ftn_map
-def get_plq_envs(ftn_map,parallel=True,
-    max_bond=None,cutoff=1e-10,canonize=True,mode='mps',layer_tags=('KET','BRA'),
-    **plq_env_opts):
-    plq_env_opts['max_bond'] = max_bond
-    plq_env_opts['cutoff'] = cutoff
-    plq_env_opts['canonize'] = canonize
-    plq_env_opts['mode'] = mode
-    plq_env_opts['layer_tags'] = layer_tags
-    x_bsz = y_bsz = 1
-    env_map = dict()
-    if parallel:
-        fxn = compute_top_envs
-        iterate_over = [(key,ftn.copy()) for key,(ftn,_) in ftn_map.items()]
-        args = []
-        kwargs = plq_env_opts
-        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-        top_env_map = dict()
-        for i in range(len(results)):
-            if results[i] is not None:
-                key = results[i][0]
-                envs = results[i][1]
-                top_env_map[key] = envs
-        assert len(top_env_map)==len(ftn_map)
+            H_scal += scal
+            H_tsr  += tsr
+    print('energy=',H_scal/N_scal)
+    grad = H_tsr/N_scal-N_tsr*H_scal/N_scal**2
 
-        fxn = compute_bottom_envs
-        iterate_over = [(key,ftn.copy()) for key,(ftn,_) in ftn_map.items()]
-        args = []
-        kwargs = plq_env_opts
-        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-        bottom_env_map = dict()
-        for i in range(len(results)):
-            if results[i] is not None:
-                key = results[i][0]
-                envs = results[i][1]
-                bottom_env_map[key] = envs
-        assert len(bottom_env_map)==len(ftn_map)
-
-        row_env_map = dict()
-        for key in top_envs_map.keys():
-            row_envs = dict()
-            row_envs.update(top_env_map[key])
-            row_envs.update(bottom_env_map[key])
-            row_env_map[key] = row_envs
-
-
-    else:
-        for key,(ftn,fac) in ftn_map.items():
-            plq_envs = ftn.compute_plaquette_environments(x_bsz=x_bsz,y_bsz=y_bsz,
-                       **plq_env_opts)
-            env_map[key] = plq_envs,fac
-    return env_map
-def get_components(flat_env_map,ftn):
-    component_map = dict()
-    for key,(env,fac) in flat_env_map.items():
-        site = ftn.site_tag(*key[0])
-        component_map[key] = get_components_site(site,env,fac)
-    return component_map
-def get_grad(component_map):
+    for key,fname in site_map.items():
+        delete_ftn_from_disc(fname)
+    return site,grad 
+def get_grads(plq_map,term_map):
+    fxn = get_grad
+    iterate_over = [(site,site_map) for site,site_map in plq_map.items()]
+    args = [term_map]
+    kwargs = dict() 
+    results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     grad_map = dict()
-    for where,local_map in component_map.items():
-        grad_map[where] = get_local_grad(local_map)
+    for i in range(len(results)):
+        if results[i] is not None:
+            site,grad = results[i]
+            grad_map[site] = grad
     return grad_map
+
 class GlobalGrad():
     def __init__(self,H,peps,D,chi,maxiter=1000,tol=1e-5):
         self.H = H
@@ -379,44 +419,48 @@ class GlobalGrad():
         self.chi = chi
         self.maxiter = maxiter
         self.tol = tol
-    def kernel(self,maxiter=None,tol=None):
+    def kernel(self,maxiter=None,tol=None,col_first=True):
         maxiter = self.maxiter if maxiter is None else maxiter
         tol = self.tol if tol is None else tol
+        if col_first:
+            direction = 'col','row'
+            Lbix,Lix = self._psi.Ly,self._psi.Lx
+        else:
+            direction = 'row','col'
+            Lbix,Lix = self._psi.Lx,self._psi.Ly
+
         for i in range(maxiter):
             norm,_,self._bra = self._psi.make_norm(return_all=True,
                                         layer_tags=('KET','BRA'))
-            ftn_map = apply_terms(norm,self.H)
-            env_map = get_plq_envs(ftn_map,max_bond=self.chi)
-            flat_env_map = term_to_flat(env_map)
-            flat_component_map = get_components(flat_env_map,norm)
-            component_map = flat_to_site(flat_component_map)
-            grad_map = get_grad(component_map)
+            term_map = apply_terms(norm,self.H)
+            benv_map = get_benvs(term_map,direction[0],Lbix,Lix,max_bond=self.chi)
+            plq_map = get_plqs(benv_map,direction[1],Lbix,Lix,max_bond=self.chi)
+            grad_map = get_grads(plq_map,term_map)
             exit() 
-class Term():
-    def __init__(self,ops,fac):
-        self.ops = ops
-        self.fac = fac
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
     from .spinless import creation
-    ham = []
+    ham = dict()
     cre = creation(symmetry=symmetry)
     ann = cre.dagger
     pn = np.tensordot(cre,ann,axes=((1,),(0,)))
+    def get_terms(sites):
+        ls = []
+        # cre0,ann1 = (-1)**S ann1,cre0 
+        ops = cre.copy(),ann.copy()
+        phase = (-1)**(cre.parity*ann.parity)
+        ham[sites,0] = ops,-t*phase
+        # cre1,ann0
+        ops = ann.copy(),cre.copy()
+        phase = 1.0
+        ham[sites,1] = ops,-t*phase
+        # pn1,pn2
+        ops = pn.copy(),pn.copy()
+        phase = 1.0
+        ham[sites,2] = ops,v*phase
+        return 
     for i, j in product(range(Lx), range(Ly)):
         if i+1 != Lx:
-            where = ((i,j),(i+1,j)) 
-            ops = {1:(where[0],cre.copy()),0:(where[1],ann.copy())}
-            ham.append(Term(ops,-t))
-            ops = {1:(where[1],cre.copy()),0:(where[0],ann.copy())}
-            ham.append(Term(ops,-t))
-            ops = {1:(where[0],pn.copy()),0:(where[1],pn.copy())}
-            ham.append(Term(ops,v))
+            get_terms(((i,j),(i+1,j)))
         if j+1 != Ly:
-            where = ((i,j), (i,j+1))
-            ops = {1:(where[0],cre.copy()),0:(where[1],ann.copy())}
-            ham.append(Term(ops,-t))
-            ops = {1:(where[1],cre.copy()),0:(where[0],ann.copy())}
-            ham.append(Term(ops,-t))
-            ops = {1:(where[0],pn.copy()),0:(where[1],pn.copy())}
-            ham.append(Term(ops,v))
+            get_terms(((i,j),(i,j+1)))
     return ham 

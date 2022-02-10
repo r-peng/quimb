@@ -111,7 +111,7 @@ def write_ftn_to_disc(tn,tmpdir):
     # Write to a file
     with open(fname, 'wb') as f:
         pickle.dump(data, f)
-    return 
+    return fname 
 def load_ftn_from_disc(fname, delete_file=False):
     # Open up the file
     with open(fname, 'rb') as f:
