@@ -88,7 +88,7 @@ def get_half_filled_product_state(Lx,Ly,symmetry=None):
     return ftn
 def write_ftn_to_disc(tn,tmpdir):
     fname = tmpdir
-    print('saving to ', fname)
+#    print('saving to ', fname)
     # Create a generic dictionary to hold all information
     data = dict()
     # Save which type of tn this is
@@ -478,7 +478,8 @@ def compute_envs(fu,bix,benvs,sweep,
         tn.compute_right_environments(envs=envs,
             xrange=(max(bix-1,0),min(bix+1,tn.Lx-1)),**contract_boundary_opts)
     return envs
-def modify(T_tar,T_ref):
+def match_phase(T_tar,T_ref):
+    # match phase of T_tar to T_ref
     global_flip_tar = T_tar.phase.get('global_flip',False)
     local_inds_tar = set(T_tar.phase.get('local_inds',[]))
     global_flip_ref = T_ref.phase.get('global_flip',False)
@@ -492,7 +493,7 @@ def modify(T_tar,T_ref):
     if len(local_inds)>0:
         axes = [T.inds.index(ind) for ind in local_inds]
         data._local_flip(axes)
-    T_ref.modify(data=data) 
+    return data
 def update_envs(fu,ix,bix,envs,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
@@ -521,8 +522,10 @@ def update_envs(fu,ix,bix,envs,sweep,
     for i in [0,1]:
         tn = envs['mid',ix+i]
         site = ket.site_tag(ix+i,bix) if sweep[0]=='v' else ket.site_tag(bix,ix+i)
-        modify(norm[site,'KET'],tn[site,'KET'])
-        modify(norm[site,'BRA'],tn[site,'BRA'])
+        data = match_phase(norm[site,'KET'],tn[site,'KET'])
+        tn[site,'KET'].modify(data=data)
+        data = match_phase(norm[site,'BRA'],tn[site,'BRA'])
+        tn[site,'BRA'].modify(data=data)
 
     tn = FermionTensorNetwork(
          (envs[from_which,ix],

@@ -4,7 +4,8 @@ import time#,functools
 from itertools import product
 from .fermion_2d_tebd import (
     insert,
-    copy,
+    match_phase,
+#    copy,
     write_ftn_to_disc,
     load_ftn_from_disc,
     delete_ftn_from_disc,
@@ -374,30 +375,36 @@ def get_plqs(benv_map,direction,Lbix,Lix,layer_tags=('KET','BRA'),
         delete_ftn_from_disc(fname)
     return plq_map
 def get_component(site,env,fac=1.0):
+    site_tag = env.site_tag(*site)
+    bra = env[site_tag,'BRA']
+    env.select((site_tag,'BRA'),which='!all').add_tag('grad')
+    env.contract_tags('grad',inplace=True,output_inds=bra.inds[::-1])
+    assert env.num_tensors==2
     scal = env.contract()
-    ket = env[env.site_tag(*site),'KET']
-    tid = ket.get_fermion_info()[0]
-    env._pop_tensor(tid,remove_from_fermion_space='front')
-    tsr = env.contract(output_inds=ket.inds)
-    return scal*fac,tsr*fac
+
+    tid = bra.get_fermion_info()[0]
+    env.fermion_space.move(tid,1)
+    env._refactor_phase_from_tids((tid,))
+    data = env['grad'].data
+    return scal*fac,data*fac
 def get_grad(args,term_map):
     site,site_map = args
-    H_scal,H_tsr = 0.0,0.0
+    H_scal,H_arr = 0.0,0.0
     for key,(fac,_) in term_map.items():
         fname = site_map[key]
         ftn = load_ftn_from_disc(fname)
-        scal,tsr = get_component(site,ftn,fac=fac)
+        scal,arr = get_component(site,ftn,fac=fac)
         if key=='norm':
-            N_scal,N_tsr = scal,tsr
+            N_scal,N_arr = scal,arr
         else:
-            H_scal += scal
-            H_tsr  += tsr
-    print('energy=',H_scal/N_scal)
-    grad = H_tsr/N_scal-N_tsr*H_scal/N_scal**2
-
-    for key,fname in site_map.items():
-        delete_ftn_from_disc(fname)
-    return site,grad 
+            H_scal = H_scal + scal
+            H_arr  = H_arr + arr
+    energy = H_scal/N_scal
+    grad = H_arr/N_scal-N_arr*H_scal/N_scal**2
+#    for key,fname in site_map.items():
+#        delete_ftn_from_disc(fname)
+    grad_norm = grad.norm()
+    return site,grad,grad_norm,energy 
 def get_grads(plq_map,term_map):
     fxn = get_grad
     iterate_over = [(site,site_map) for site,site_map in plq_map.items()]
@@ -405,12 +412,18 @@ def get_grads(plq_map,term_map):
     kwargs = dict() 
     results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     grad_map = dict()
+    norm = 0.0
     for i in range(len(results)):
         if results[i] is not None:
-            site,grad = results[i]
-            grad_map[site] = grad
-    return grad_map
-
+            site,gradi,normi,energy = results[i]
+            grad_map[site] = gradi,normi
+            norm += normi
+    return grad_map,norm,energy
+def update_wfn(psi,dir_map,alpha):
+    for site,(data,_) in dir_map.items():
+        data = psi[site].data+alpha*data
+        psi[site].modify(data=data)
+    return psi
 class GlobalGrad():
     def __init__(self,H,peps,D,chi,maxiter=1000,tol=1e-5):
         self.H = H
@@ -428,15 +441,21 @@ class GlobalGrad():
         else:
             direction = 'row','col'
             Lbix,Lix = self._psi.Lx,self._psi.Ly
-
+        alpha = 0.05
         for i in range(maxiter):
+            # compute grad
             norm,_,self._bra = self._psi.make_norm(return_all=True,
                                         layer_tags=('KET','BRA'))
             term_map = apply_terms(norm,self.H)
             benv_map = get_benvs(term_map,direction[0],Lbix,Lix,max_bond=self.chi)
             plq_map = get_plqs(benv_map,direction[1],Lbix,Lix,max_bond=self.chi)
-            grad_map = get_grads(plq_map,term_map)
-            exit() 
+            grad_map,grad_norm,energy = get_grads(plq_map,term_map)
+            print('iter={},energy={},grad_norm={}'.format(i,energy,grad_norm))
+            # line search
+            # cg
+            # update
+            self._psi = update_wfn(self._psi,grad_map,-alpha)
+#            exit() 
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
     from .spinless import creation
     ham = dict()
