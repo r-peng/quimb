@@ -77,3 +77,33 @@ def pre_normalize(fu,env,where):
 #        tn = benvs.get((to_which,bix+1),FermionTensorNetwork([]))
 #        if tn.num_tensors>0:
 #            tn.multiply_(val**((Lbix-(bix+2))*Lix),spread_over='all')
+def get_grad(args,term_map):
+    site,site_map = args
+    H_scal,H_arr = 0.0,0.0
+    for key,(fac,_) in term_map.items():
+        scal,arr = get_component(site,site_map[key],fac=fac)
+        if key=='norm':
+            N_scal,N_arr = scal,arr
+        else:
+            H_scal = H_scal + scal
+            H_arr  = H_arr + arr
+    energy = H_scal/N_scal
+    grad = H_arr/N_scal-N_arr*H_scal/N_scal**2
+#    for key,fname in site_map.items():
+#        delete_ftn_from_disc(fname)
+    grad_norm = grad.norm()
+    return site,grad,grad_norm,energy 
+def get_grads(plq_map,term_map):
+    fxn = get_grad
+    iterate_over = [(site,site_map) for site,site_map in plq_map.items()]
+    args = [term_map]
+    kwargs = dict() 
+    results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    grad_map = dict()
+    norm = 0.0
+    for i in range(len(results)):
+        if results[i] is not None:
+            site,gradi,normi,energy = results[i]
+            grad_map[site] = gradi,normi
+            norm += normi
+    return grad_map,norm,energy

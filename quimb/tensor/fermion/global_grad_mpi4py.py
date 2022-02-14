@@ -111,10 +111,7 @@ def worker_execution():
                                           *args, **kwargs)
         COMM.send(results, dest=0)
 ##################################################################
-
-def apply_term(args,fname,directory):
-    sites,term_type,ops,fac = args
-    ftn = load_ftn_from_disc(fname) 
+def _apply_term(ftn,sites,ops):
     n = ftn.num_tensors//2
     for where,op in zip(sites,ops):
         ket = ftn[ftn.site_tag(*where),'KET']
@@ -130,12 +127,17 @@ def apply_term(args,fname,directory):
         ftn.fermion_space.move(TG_tid,ket_site+1)
         
         ftn.contract_tags(ket.tags,which='all',inplace=True)
+    return ftn
+def apply_term(args,norm,directory):
+    sites,term_type,ops,fac = args
+    ftn = load_ftn_from_disc(norm)
+    ftn = _apply_term(ftn,sites,ops) 
     new_fname = ftn.site_tag(*sites[0]) + '_' + ftn.site_tag(*sites[1]) \
               + '_term{}'.format(term_type)
     new_fname = directory+new_fname
     write_ftn_to_disc(ftn,new_fname)
     return sites,term_type,new_fname,fac
-def apply_terms(norm,H,directory='./saved_states/'):
+def get_terms(norm,H,directory='./saved_states/'):
     fname = directory+'norm'
     write_ftn_to_disc(norm,fname)
     term_map = dict()
@@ -354,6 +356,7 @@ def get_plqs(benv_map,direction,Lbix,Lix,layer_tags=('KET','BRA'),
         delete_ftn_from_disc(tmp_fname)
 
     plq_map = dict() 
+    iterate_over = []
     for key,fname in benv_map.items():
         for ix in range(Lix):
             b0 = load_ftn_from_disc(plq_envs[key,sides[0],ix])
@@ -364,98 +367,195 @@ def get_plqs(benv_map,direction,Lbix,Lix,layer_tags=('KET','BRA'),
             plq_name = fname+'_ix{}'.format(ix) 
             write_ftn_to_disc(ftn,plq_name)
 
-            ham_term,bix = key
+            term_key,bix = key
             site = (ix,bix) if direction=='row' else (bix,ix)
-            if site not in plq_map:
-                plq_map[site] = dict()
-            site_map = plq_map[site]
-            site_map[ham_term] = plq_name 
-
+            plq_map[site,term_key] = plq_name
+            iterate_over.append((site,plq_name))
+    # partially contract all plq_ftns
+    fxn = partial_contract
+    args = []
+    kwargs = dict()
+    results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for key,fname in plq_envs.items():
         delete_ftn_from_disc(fname)
     return plq_map
-def get_component(site,env,fac=1.0):
-    site_tag = env.site_tag(*site)
-    bra = env[site_tag,'BRA']
-    env.select((site_tag,'BRA'),which='!all').add_tag('grad')
-    env.contract_tags('grad',inplace=True,output_inds=bra.inds[::-1])
-    assert env.num_tensors==2
-    scal = env.contract()
+def partial_contract(args):
+    site,fname = args
+    ftn = load_ftn_from_disc(fname)
+    site_tag = ftn.site_tag(*site)
+    ftn.select(site_tag,which='!any').add_tag('env')
+    bra = ftn[site_tag,'BRA']
+    ket = ftn[site_tag,'KET']
+    output_inds = bra.inds[1:]+ket.inds[:-1]
+    ftn.contract_tags('env',inplace=True,output_inds=output_inds)
+    assert ftn.num_tensors==3
+    bra_tid = bra.get_fermion_info()[0]
+    ket_tid = ket.get_fermion_info()[0]
+    ftn.fermion_space.move(bra_tid,2)
+    ftn.fermion_space.move(ket_tid,0)
+    ftn._refactor_phase_from_tids((bra_tid,ket_tid))
+    write_ftn_to_disc(ftn,fname)
+    return 
+def get_component(args,norm):
+    site,term_key,fname,(ops,fac),t,d = args
+    ftn = load_ftn_from_disc(fname)
+    site_tag = ftn.site_tag(*site)
+    bra = ftn[site_tag,'BRA']
+    ket = ftn[site_tag,'KET']
+    bra_tid = bra.get_fermion_info()[0]
+    ket_tid = ket.get_fermion_info()[0]
+#    ftn.fermion_space.move(bra_tid,ftn.num_tensors-1)
+#    ftn.fermion_space.move(ket_tid,0)
+#    ftn._refactor_phase_from_tids((bra_tid,ket_tid))
 
-    tid = bra.get_fermion_info()[0]
-    env.fermion_space.move(tid,1)
-    env._refactor_phase_from_tids((tid,))
-    data = env['grad'].data
-    return scal*fac,data*fac
-def get_grad(args,term_map):
-    site,site_map = args
-    H_scal,H_arr = 0.0,0.0
-    for key,(fac,_) in term_map.items():
-        fname = site_map[key]
-        ftn = load_ftn_from_disc(fname)
-        scal,arr = get_component(site,ftn,fac=fac)
-        if key=='norm':
-            N_scal,N_arr = scal,arr
+    if term_key=='norm':
+        _apply = False
+    else:
+        term_sites,term_type = term_key
+        _apply = True if site in term_sites else False
+#    if not _apply:
+#        assert (ket.data-bra.data.dagger).norm() < 1e-15
+    if d is not None:
+        ftn_ = load_ftn_from_disc(norm)
+        ftn_[site_tag,'KET'].modify(data=ftn_[site_tag,'KET'].data+t*d)
+        ftn_[site_tag,'BRA'].modify(data=ftn_[site_tag,'BRA'].data+t*d.dagger)
+        if _apply:
+            ftn_ = _apply_term(ftn_,term_sites,ops)
+        ket_ = ftn_[site_tag,'KET']
+        bra_ = ftn_[site_tag,'BRA']
+        ket_tid_ = ket_.get_fermion_info()[0]
+        bra_tid_ = bra_.get_fermion_info()[0]
+        ftn_.fermion_space.move(bra_tid_,ftn_.num_tensors-1)
+        ftn_.fermion_space.move(ket_tid_,0)
+        ftn_._refactor_phase_from_tids((bra_tid_,ket_tid_))
+        
+        ket.modify(data=ket_.data.copy())
+        bra.modify(data=bra_.data.copy())
+    ftn.select((site_tag,'BRA'),which='!all').add_tag('grad')
+    ftn.contract_tags('grad',inplace=True,output_inds=bra.inds[::-1])
+    assert ftn.num_tensors==2
+    scal = ftn.contract()
+    ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
+    data = ftn['grad'].data
+    return site,term_key,scal*fac,data*fac
+def test_t(args,m1,m2):
+    # Wolfe: suppose f parabollic
+    # m1: controlls the sup of allowed t, smaller m1 -> higher sup
+    # m2: controlls the inf of allowed t, larger m2 -> lower inf
+    site,(t,tL,tR),q0,dq0,qt,dqt = args
+    if qt>q0+m1*t*dq0: # b
+        return site,(t,tL,t),False
+    else:
+        if dqt<m2*dq0: # c
+            return site,(t,t,tR),False
         else:
-            H_scal = H_scal + scal
-            H_arr  = H_arr + arr
-    energy = H_scal/N_scal
-    grad = H_arr/N_scal-N_arr*H_scal/N_scal**2
-#    for key,fname in site_map.items():
-#        delete_ftn_from_disc(fname)
-    grad_norm = grad.norm()
-    return site,grad,grad_norm,energy 
-def get_grads(plq_map,term_map):
-    fxn = get_grad
-    iterate_over = [(site,site_map) for site,site_map in plq_map.items()]
-    args = [term_map]
-    kwargs = dict() 
-    results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    grad_map = dict()
-    norm = 0.0
-    for i in range(len(results)):
-        if results[i] is not None:
-            site,gradi,normi,energy = results[i]
-            grad_map[site] = gradi,normi
-            norm += normi
-    return grad_map,norm,energy
-def update_wfn(psi,dir_map,alpha):
-    for site,(data,_) in dir_map.items():
-        data = psi[site].data+alpha*data
-        psi[site].modify(data=data)
-    return psi
+            return site,(t,tL,tR),True 
+def line_search(plq_map,H,norm,m1=0.2,m2=0.8,maxiter=10,t0=0.5):
+    def get_q(d=None,t=dict()):
+        fxn = get_component
+        if d is None:
+            iterate_over = [(site,term,fname,H.get(term,(None,1.0)),None,None) \
+                for (site,term),fname in plq_map.items()]
+        else:
+            iterate_over = [(site,term,fname,H.get(term,(None,1.0)),
+                             t[site][0],d[site]) \
+                for (site,term),fname in plq_map.items() if site in t]
+        args = [norm]
+        kwargs = dict()
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        Narr,Nscal,Harr,Hscal = dict(),dict(),dict(),dict()
+        for i in range(len(results)):
+            if results[i] is not None:
+                site,term_key,scal,arr = results[i]
+                if term_key=='norm':
+                    Nscal[site] = scal
+                    Narr[site] = arr
+                else:
+                    if site not in Hscal:
+                        Hscal[site] = 0.0
+                    if site not in Harr:
+                        Harr[site] = 0.0
+                    Hscal[site] = Hscal[site]+scal
+                    Harr[site]  = Harr[site] +arr
+        q,dq = dict(),dict()
+        d = dict() if d is None else d
+        grad_norm = 0.0
+        for site in Narr:
+            q[site] = Hscal[site]/Nscal[site]
+            grad = (Harr[site]-Narr[site]*q[site])/Nscal[site]
+            if site not in d:
+                d[site] = -grad
+                grad_norm += grad.norm()
+            dq[site] = np.dot(grad.data,d[site].data)
+        return d,q,dq,grad_norm
+    d,q0,dq0,grad_norm = get_q()
+    t_conv = dict() # converged t
+    t_cont = {site:(t0,0.0,0.0) for site in d}
+    print('t0={},maxiter={},m1={},m2={}'.format(t0,maxiter,m1,m2))
+    for i in range(maxiter):
+        print('line search=',i)
+        _,qt,dqt,_ = get_q(d,t_cont)
+
+        fxn = test_t
+        iterate_over = [(site,ts,q0[site],dq0[site],qt[site],dqt[site])
+                        for site,ts in t_cont.items()]
+        args = [m1,m2]
+        kwargs = dict()
+        results = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+        t_cont = dict()
+        x = dict()
+        for i in range(len(results)):
+            if results[i] is not None:
+                site,(t,tL,tR),stop = results[i]
+                if stop:
+                    t_conv[site] = t
+                else:
+                    t = 0.5*(tL+tR) if tR>tL else 2.0*t
+                    t_cont[site] = t,tL,tR
+        if len(t_cont)==0:
+            break
+    for site,(t,_,_) in t_cont.items():
+        t_conv[site] = t
+    return t_conv,d,grad_norm,list(q0.values())[0] 
 class GlobalGrad():
-    def __init__(self,H,peps,D,chi,maxiter=1000,tol=1e-5):
+    def __init__(self,H,peps,D,chi,maxiter=1000,tol=1e-5,
+                 directory='./saved_states/'):
         self.H = H
-        self._psi = peps
         self.D = D
         self.chi = chi
         self.maxiter = maxiter
         self.tol = tol
+        self.directory = directory
+        self._psi = directory+'_psi'
+        write_ftn_to_disc(peps,self._psi)
     def kernel(self,maxiter=None,tol=None,col_first=True):
         maxiter = self.maxiter if maxiter is None else maxiter
         tol = self.tol if tol is None else tol
+        psi = load_ftn_from_disc(self._psi)
         if col_first:
             direction = 'col','row'
-            Lbix,Lix = self._psi.Ly,self._psi.Lx
+            Lbix,Lix = psi.Ly,psi.Lx
         else:
             direction = 'row','col'
-            Lbix,Lix = self._psi.Lx,self._psi.Ly
-        alpha = 0.05
+            Lbix,Lix = psi.Lx,psi.Ly
+        alpha = 0.1
         for i in range(maxiter):
             # compute grad
-            norm,_,self._bra = self._psi.make_norm(return_all=True,
-                                        layer_tags=('KET','BRA'))
-            term_map = apply_terms(norm,self.H)
+            norm = psi.make_norm(layer_tags=('KET','BRA'))
+            fname = self.directory+'norm_as_psi'
+            write_ftn_to_disc(norm,fname)
+            term_map = get_terms(norm,self.H,self.directory)
             benv_map = get_benvs(term_map,direction[0],Lbix,Lix,max_bond=self.chi)
             plq_map = get_plqs(benv_map,direction[1],Lbix,Lix,max_bond=self.chi)
-            grad_map,grad_norm,energy = get_grads(plq_map,term_map)
+            tmap,dir_map,grad_norm,energy = line_search(plq_map,self.H,fname)
             print('iter={},energy={},grad_norm={}'.format(i,energy,grad_norm))
+            print(tmap)
             # line search
             # cg
             # update
-            self._psi = update_wfn(self._psi,grad_map,-alpha)
-#            exit() 
+            for site,data in dir_map.items():
+                ket = psi[psi.site_tag(*site)]
+                ket.modify(data=ket.data+tmap[site]*data)
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
     from .spinless import creation
     ham = dict()
