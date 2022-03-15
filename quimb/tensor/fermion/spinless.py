@@ -2,7 +2,7 @@ import numpy as np
 from itertools import product
 from functools import reduce
 
-from pyblock3.algebra.fermion_symmetry import U1,Z2
+from pyblock3.algebra.fermion_setting import symmetry_map
 from pyblock3.algebra.core import SubTensor
 from pyblock3.algebra.fermion import SparseFermionTensor
 from pyblock3.algebra.fermion_ops import (
@@ -20,6 +20,8 @@ SVD_SCREENING = 1e-28
 #################### pyblock-like operators ##############
 def creation(symmetry='u1'):
     dat = np.array([[1.0]])
+    symmetry = symmetry.upper()
+    symm = symmetry_map(symmetry)
     if symmetry=='u1':
         qlab = U1(1),U1(0)
     elif symmetry=='z2':

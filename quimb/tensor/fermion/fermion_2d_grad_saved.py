@@ -143,7 +143,39 @@ def apply_term(term_key,H,psi,directory):
             write_ftn_to_disc(tmp,fname)
             term_dict[site[1]] = fname
     return term_key,term_dict
-def compute_left_envs_wrapper(info,norm_benvs,directory,**compress_opts):
+def compute_energy_term(info,norm_benvs,directory,**compress_opts):
+    term_key,term_dict = info
+    cols = list(term_dict.keys())
+    cols.sort()
+    like = load_ftn_from_disc(norm_benvs['mid',0])
+    Lx,Ly = like.Lx,like.Ly
+
+    nl,nr = cols[-1]+1,Ly-1-cols[0]+1
+    jmin = max(cols[0]-1,0)
+    jmax = min(cols[-1]+1,Ly-1)
+    if nl<nr:
+        _,benvs = compute_left_envs_wrapper(info,norm_benvs,directory,
+                  True,**compress_opts) 
+        ls = benvs['left',jmax],norm_benvs['right',jmax-1] 
+        yrange = jmax-1,jmax
+    else:
+        _,benvs = compute_right_envs_wrapper(info,norm_benvs,directory,
+                  True,**compress_opts) 
+        ls = norm_benvs['left',jmin+1],benvs['right',jmin]
+        yrange = jmin,jmin+1
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=like)
+    i = Lx//2
+    row_envs = dict()
+    ftn.compute_bottom_environments(envs=row_envs,xrange=(0,i),yrange=yrange,
+                                    **compress_opts)
+    ftn.compute_top_environments(envs=row_envs,xrange=(i-1,Lx-1),yrange=yrange,
+                                 **compress_opts)
+    ftn = FermionTensorNetwork((row_envs['bottom',i],row_envs['top',i-1]))
+    for _,fname in benvs.items():
+        delete_ftn_from_disc(fname)
+    return term_key,ftn.contract()
+def compute_left_envs_wrapper(info,norm_benvs,directory,partial,**compress_opts):
     term_key,term_dict = info
     cols = list(term_dict.keys())
     cols.sort()
@@ -157,7 +189,8 @@ def compute_left_envs_wrapper(info,norm_benvs,directory,**compress_opts):
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=like)
     jmin = max(cols[0]-1,0)
-    term_benvs = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
+    jmax = min(cols[-1]+1,Ly-1) if partial else Ly-1
+    term_benvs = ftn.compute_left_environments(yrange=(jmin,jmax),**compress_opts) 
 
     sites,typ = term_key
     term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
@@ -166,7 +199,7 @@ def compute_left_envs_wrapper(info,norm_benvs,directory,**compress_opts):
         write_ftn_to_disc(term_benvs[key],fname)
         term_benvs[key] = fname
     return term_key,term_benvs
-def compute_right_envs_wrapper(info,norm_benvs,directory,**compress_opts): 
+def compute_right_envs_wrapper(info,norm_benvs,directory,partial,**compress_opts): 
     term_key,term_dict = info
     cols = list(term_dict.keys())
     cols.sort()
@@ -180,8 +213,9 @@ def compute_right_envs_wrapper(info,norm_benvs,directory,**compress_opts):
     ls.append(norm_benvs['right',cols[-1]])
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=like)
+    jmin = max(cols[0]-1,0) if partial else 0
     jmax = min(cols[-1]+1,Ly-1)
-    term_benvs = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts)
+    term_benvs = ftn.compute_right_environments(yrange=(jmin,jmax),**compress_opts)
 
     sites,typ = term_key
     term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
@@ -224,7 +258,7 @@ def compute_plq_envs_wrapper(info,norm_benvs,directory,**compress_opts):
         write_ftn_to_disc(ftn,fname)
         plq_envs[term_key,site_tag] = fname
     return plq_envs
-def compute_site_components(site_tag,H,plq_envs):
+def compute_site_grad(site_tag,H,plq_envs):
     H0,H1 = 0.0,0.0 # scalar/tsr H
     for key in ['norm']+list(H.keys()):
         ftn = load_ftn_from_disc(plq_envs[key,site_tag])
@@ -234,14 +268,15 @@ def compute_site_components(site_tag,H,plq_envs):
         assert ftn.num_tensors==2
         scal = ftn.contract()
         bra_tid = bra.get_fermion_info()[0]
-        bra = ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
+        ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
         data = ftn['grad'].data
         if key=='norm':
             N0,N1 = scal,data
         else:
             H0,H1 = H0+scal*H[key][-1],H1+data*H[key][-1]
-    return site_tag,H1,N1,H0,N0
-def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
+    E = H0/N0
+    return site_tag,(H1-N1*E)/N0,E,N0
+def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
     compress_opts['max_bond'] = max_bond
@@ -259,105 +294,22 @@ def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
         fname = directory+'norm_'+key[0]+'_'+norm.col_tag(key[1])
         write_ftn_to_disc(norm_benvs[key],fname)
         norm_benvs[key] = fname
-    # get term cols
-    fxn = apply_term
-    iterate_over = list(H.keys())
-    args = [H,psi_fname,directory]
-    kwargs = dict()
-    terms = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    # get terms col envs
-    benvs = {'norm':norm_benvs}
-
-    fxn = compute_left_envs_wrapper
-    iterate_over = terms
-    args = [norm_benvs,directory]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for (term_key,term_benvs) in ls:
-        benvs[term_key] = term_benvs
-
-    fxn = compute_right_envs_wrapper
-    iterate_over = terms
-    args = [norm_benvs,directory]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for (term_key,term_benvs) in ls:
-        benvs[term_key].update(term_benvs)
-    # get terms & norm plq_envs
-    plq_envs = dict()
-    fxn = compute_plq_envs_wrapper
-    iterate_over = [(term_key,term_benvs,j) \
-                    for term_key,term_benvs in benvs.items() for j in range(Ly)]
-    args = [norm_benvs,directory]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for plq_envs_term in ls:
-        plq_envs.update(plq_envs_term)
-    # compute grad
-    fxn = compute_site_components
-    iterate_over = [norm.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
-    args = [H,plq_envs]
-    kwargs = dict()
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    grad = dict()
-    site00 = norm.site_tag(0,0)
-    for (site_tag,H1,N1,H0,N0) in ls:
-        E = H0/N0
-        # f = <psi|H|psi>/<psi|psi>
-        grad[site_tag] = (H1-N1*E)/N0
-        if site_tag == site00:
-            E00,N00 = E,N0
-    # delete files 
+    # compute norm
+    j = Ly//2
+    ls = norm_benvs['left',j],norm_benvs['right',j-1]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=norm)
+    i = (Lx-1)//2
+    row_envs = dict()
+    ftn.compute_bottom_environments(envs=row_envs,xrange=(0,i),yrange=(j-1,j),
+                                    **compress_opts)
+    ftn.compute_top_environments(envs=row_envs,xrange=(i-1,Lx-1),yrange=(j-1,j),
+                                 **compress_opts)
+    ftn = FermionTensorNetwork((row_envs['bottom',i],row_envs['top',i-1]))
+    N = ftn.contract() 
     for _,fname in norm_benvs.items():
         delete_ftn_from_disc(fname) 
-    for (_,term_dict) in terms:
-        for _,fname in term_dict.items():
-            delete_ftn_from_disc(fname)
-    for _,term_benvs in benvs.items():
-        for _,fname in term_benvs.items():
-            delete_ftn_from_disc(fname)
-    for _,fname in plq_envs.items():
-        delete_ftn_from_disc(fname)
-    return grad,E00,N00
-def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
-    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
-    compress_opts = dict()
-    compress_opts['max_bond'] = max_bond
-    compress_opts['cutoff'] = cutoff
-    compress_opts['canonize'] = canonize
-    compress_opts['mode'] = mode
-    compress_opts['layer_tags'] = layer_tags
-    psi = load_ftn_from_disc(psi_fname)
-    Lx,Ly = psi.Lx,psi.Ly
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
-    norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    right_envs = norm.compute_right_environments(**compress_opts)
-
-    ftn = FermionTensorNetwork(
-          (norm.select(norm.col_tag(0)).copy(),right_envs['right',0])
-          ).view_as_(FermionTensorNetwork2D,like=norm)
-    ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
-    return ftn.contract() 
-def compute_energy_term(info,norm_benvs,directory,**compress_opts):
-    term_key,term_dict = info
-    like = load_ftn_from_disc(norm_benvs['mid',0])
-    Lx,Ly = like.Lx,like.Ly
-
-    _,right_envs = compute_right_envs_wrapper(info,norm_benvs,directory,**compress_opts) 
-    col0 = term_dict[0] if 0 in term_dict else norm_benvs['mid',0]
-    ls = col0,right_envs['right',0]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
-          ).view_as_(FermionTensorNetwork2D,like=like)
-    ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
-    for _,fname in right_envs.items():
-        delete_ftn_from_disc(fname)
-    return term_key,ftn.contract()
+    return N
 def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -393,13 +345,17 @@ def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
         Ei *= H[term_key][-1]
         E += Ei
     # compute norm
-    ls = norm_benvs['mid',0],norm_benvs['right',0]
+    j = Ly//2
+    ls = norm_benvs['left',j],norm_benvs['right',j-1]
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=norm)
-    ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
+    i = (Lx-1)//2
+    row_envs = dict()
+    ftn.compute_bottom_environments(envs=row_envs,xrange=(0,i),yrange=(j-1,j),
+                                    **compress_opts)
+    ftn.compute_top_environments(envs=row_envs,xrange=(i-1,Lx-1),yrange=(j-1,j),
+                                 **compress_opts)
+    ftn = FermionTensorNetwork((row_envs['bottom',i],row_envs['top',i-1]))
     N = ftn.contract() 
     # delete files
     for _,fname in norm_benvs.items():
@@ -408,6 +364,81 @@ def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
         for _,fname in term_dict.items():
             delete_ftn_from_disc(fname)
     return E/N
+def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
+    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
+    compress_opts = dict()
+    compress_opts['max_bond'] = max_bond
+    compress_opts['cutoff'] = cutoff
+    compress_opts['canonize'] = canonize
+    compress_opts['mode'] = mode
+    compress_opts['layer_tags'] = layer_tags
+    # get norm col envs
+    psi = load_ftn_from_disc(psi_fname)
+    Lx,Ly = psi.Lx,psi.Ly
+    norm = psi.make_norm(layer_tags=('KET','BRA'))
+    norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
+    norm_benvs = norm.compute_col_environments(**compress_opts)
+    for key in norm_benvs.keys():
+        fname = directory+'norm_'+key[0]+'_'+norm.col_tag(key[1])
+        write_ftn_to_disc(norm_benvs[key],fname)
+        norm_benvs[key] = fname
+    # get term cols
+    fxn = apply_term
+    iterate_over = list(H.keys())
+    args = [H,psi_fname,directory]
+    kwargs = dict()
+    terms = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    # get terms col envs
+    benvs = {'norm':norm_benvs}
+
+    fxn = compute_left_envs_wrapper
+    iterate_over = terms
+    args = [norm_benvs,directory,False]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for (term_key,term_benvs) in ls:
+        benvs[term_key] = term_benvs
+
+    fxn = compute_right_envs_wrapper
+    iterate_over = terms
+    args = [norm_benvs,directory,False]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for (term_key,term_benvs) in ls:
+        benvs[term_key].update(term_benvs)
+    # get terms & norm plq_envs
+    plq_envs = dict()
+    fxn = compute_plq_envs_wrapper
+    iterate_over = [(term_key,term_benvs,j) \
+                    for term_key,term_benvs in benvs.items() for j in range(Ly)]
+    args = [norm_benvs,directory]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for plq_envs_term in ls:
+        plq_envs.update(plq_envs_term)
+    # compute grad
+    fxn = compute_site_grad
+    iterate_over = [norm.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
+    args = [H,plq_envs]
+    kwargs = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    grad,E,N = dict(),dict(),dict()
+    for (site_tag,gsite,Esite,Nsite) in ls:
+        grad[site_tag] = gsite
+        E[site_tag] = Esite
+        N[site_tag] = Nsite
+    # delete files 
+    for _,fname in norm_benvs.items():
+        delete_ftn_from_disc(fname) 
+    for (_,term_dict) in terms:
+        for _,fname in term_dict.items():
+            delete_ftn_from_disc(fname)
+    for _,term_benvs in benvs.items():
+        for _,fname in term_benvs.items():
+            delete_ftn_from_disc(fname)
+    for _,fname in plq_envs.items():
+        delete_ftn_from_disc(fname)
+    return grad,E,N 
 class GlobalGrad():
     def __init__(self,H,peps,D,chi,directory):
         self.H = H
@@ -466,26 +497,28 @@ class GlobalGrad():
                 g.append(cons.tensor_to_vector(grad[site_tag]))
         g = np.concatenate(g)        
 
-#        E_ = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi)
-#        print(abs((E-E_)/E))
-        if self.chi is None:
-            print('eval={},E={},N={},gmax={}'.format(
-                  self.k,E,N,np.amax(abs(g))))
-        else:
-            E_ = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi//2)
-            print('eval={},E={},N={},Eerr={},gmax={}'.format(
-                  self.k,E,N,abs((E-E_)/E),np.amax(abs(g))))
+#        N1 = sum(N.values())
+#        E1 = sum(E.values())/N1
+#        E2 = [Esite/N[site_tag] for site_tag,Esite in E.items()]
+#        E2min,E2max,E2mean = min(E2),max(E2),np.mean(E2)
+#        print('k={},E1={},E2={},Eerr={},norm={},gmax={}'.format(
+#               self.k,E1,E2mean,abs((E2max-E2min)/E2mean),N1/len(N),np.amax(abs(g))))
+#        f = E2mean
+
+        f = E[psi.site_tag(0,0)]/N[psi.site_tag(0,0)]
+        norm = psi.make_norm(layer_tags=('KET','BRA'))
+#        renvs = norm.compute_right_environments(**compress_opts)
         if self.sep_energy_grad:
             return g
         else:
-            return E,g
+            return f,g
     def callback(self,x):
         psi = self.vec2fpeps(x)
         write_ftn_to_disc(psi,self.psi)
         delete_ftn_from_disc(self.tmp)
         self.it += 1
         print('iter=',self.it)
-    def kernel(self,method='BFGS',options={'maxiter':100,'gtol':1e-5}):
+    def kernel(self,method='BFGS',maxiter=100,etol=1e-5,gtol=1e-3):
         self.sep_energy_grad = False
         if self.sep_energy_grad:
             fun = self.compute_energy
@@ -495,9 +528,13 @@ class GlobalGrad():
             jac = True
         self.it = 0
         self.k = 0
+        options = {'gtol':gtol,
+                   'maxiter':maxiter}
         result = scipy.optimize.minimize(fun=fun,jac=jac,method=method,
                  x0=self.fpeps2vec(load_ftn_from_disc(self.psi)),
-                 callback=self.callback,options=options)
+                 tol=etol,
+                 callback=self.callback,
+                 options=options)
         psi = self.vec2fpeps(result.x)
         write_ftn_to_disc(psi,self.psi)
         print(result.message)
@@ -606,9 +643,11 @@ def line_search(d,EL,t0,H,psi_name,directory,
         return tR,ER
     else:
         return tM,EM
-def kernel(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
-    print('using fpeps update')
+def kernel(H,psi_name,directory,chi,maxiter=50,tol=1e-5,gtol=1e-5,t0=0.5):
+#    E_old = compute_energy(H,psi_name,directory,max_bond=chi)
+#    print('initial energy=',E_old)
     E_old = 0.0
+    print('using fpeps update')
     d_old,gnormsq_old = None,None
     for i in range(maxiter):
         grad,E,N = compute_grad(H,psi_name,directory,max_bond=chi)
@@ -617,11 +656,7 @@ def kernel(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
         t = t0
         g = [gi.data for _,gi in grad.items()]
         g = np.concatenate(g)
-#        E_ = compute_energy(H,psi_name,directory,max_bond=chi)
-#        print(abs((E-E_)/E))
-        E_ = compute_energy(H,psi_name,directory,max_bond=chi//2)
-        print('iter={},E={},N={},Eerr={},gmax={},t={}'.format(
-               i,E,N,abs((E-E_)/E),np.amax(abs(g)),t))
+        print('iter={},E={},N={},gmax={},t={}'.format(i,E,N,np.amax(abs(g)),t))
         if E-E_old>0.0:
             break
         if np.amax(abs(g))<gtol:
@@ -634,10 +669,8 @@ def kernel(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
         write_ftn_to_disc(psi,psi_name)
     print('end iteration')
     return E
-def kernel_vec(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
+def kernel_vec(H,psi_name,directory,chi,maxiter=50,tol=1e-5,t0=0.5):
     print('using vector update')
-    E_old = 0.0
-
     peps = load_ftn_from_disc(psi_name) 
     constructors = dict()
     for i in range(peps.Lx):
@@ -671,7 +704,6 @@ def kernel_vec(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
                 start = stop
         write_ftn_to_disc(psi,directory+'tmp')
         grad,E,N = compute_grad(H,directory+'tmp',directory,max_bond=chi)
-        t = t0
         g = []
         for i in range(psi.Lx):
             for j in range(psi.Ly):
@@ -679,23 +711,16 @@ def kernel_vec(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
                 cons = constructors[site_tag][0]
                 g.append(cons.tensor_to_vector(grad[site_tag]))
         g = np.concatenate(g)
-#        E_ = compute_energy(H,directory+'tmp',directory,max_bond=chi)
-#        print(abs((E-E_)/E))
-        E_ = compute_energy(H,directory+'tmp',directory,max_bond=chi//2)
-        print('iter={},E={},N={},Eerr={},gmax={},t={}'.format(
-              it,E,N,abs((E-E_)/E),np.amax(abs(g)),t))
-        if E-E_old>0.0:
-            break
-        if np.amax(abs(g))<gtol:
-            break
+        t = t0
         x = x - t*g  
-    print('end iteration')
+        print('iter={},E={},N={},gmax={},t={}'.format(it,E,N,np.amax(abs(g)),t))
     return
-def custom(fun,x0,jac=None,callback=None,gtol=1e-5,maxiter=50,t0=0.5,**options):
+def custom(fun,x0,jac=None,callback=None,gtol=1e-3,maxiter=5,**options):
     print('using scipy.optimize custom')
     fun,grad = fun,jac
-    t = t0
+    t = 0.5
     print('t=',t)
+    tol = 1e-6
     x = x0
     fold = 0.0
     nit = 0

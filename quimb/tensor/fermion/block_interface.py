@@ -54,3 +54,5 @@ Hubbard = fermion_ops.Hubbard
 onsite_U = fermion_ops.onsite_U
 measure_SZ = fermion_ops.measure_SZ
 ParticleNumber = fermion_ops.ParticleNumber
+creation = fermion_ops.creation
+annihilation = fermion_ops.annihilation

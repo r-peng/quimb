@@ -224,7 +224,7 @@ def compute_plq_envs_wrapper(info,norm_benvs,directory,**compress_opts):
         write_ftn_to_disc(ftn,fname)
         plq_envs[term_key,site_tag] = fname
     return plq_envs
-def compute_site_components(site_tag,H,plq_envs):
+def compute_site_grad(site_tag,H,plq_envs):
     H0,H1 = 0.0,0.0 # scalar/tsr H
     for key in ['norm']+list(H.keys()):
         ftn = load_ftn_from_disc(plq_envs[key,site_tag])
@@ -238,9 +238,13 @@ def compute_site_components(site_tag,H,plq_envs):
         data = ftn['grad'].data
         if key=='norm':
             N0,N1 = scal,data
+            print('check norm:',(data-bra.data.dagger).norm())
+            print('check norm:',data)
+            print('check norm:',bra.data.dagger)
         else:
             H0,H1 = H0+scal*H[key][-1],H1+data*H[key][-1]
-    return site_tag,H1,N1,H0,N0
+    E = H0/N0
+    return site_tag,(H1-N1*E)/N0,E,N0
 def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -294,19 +298,17 @@ def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
     for plq_envs_term in ls:
         plq_envs.update(plq_envs_term)
     # compute grad
-    fxn = compute_site_components
+    fxn = compute_site_grad
     iterate_over = [norm.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
     args = [H,plq_envs]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     grad = dict()
     site00 = norm.site_tag(0,0)
-    for (site_tag,H1,N1,H0,N0) in ls:
-        E = H0/N0
-        # f = <psi|H|psi>/<psi|psi>
-        grad[site_tag] = (H1-N1*E)/N0
+    for (site_tag,gsite,Esite,Nsite) in ls:
+        grad[site_tag] = gsite
         if site_tag == site00:
-            E00,N00 = E,N0
+            E,N = Esite,Nsite
     # delete files 
     for _,fname in norm_benvs.items():
         delete_ftn_from_disc(fname) 
@@ -318,7 +320,8 @@ def compute_grad(H,psi_fname,directory,layer_tags=('KET','BRA'),
             delete_ftn_from_disc(fname)
     for _,fname in plq_envs.items():
         delete_ftn_from_disc(fname)
-    return grad,E00,N00
+    exit()
+    return grad,E,N 
 def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
