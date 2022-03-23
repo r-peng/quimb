@@ -3,6 +3,7 @@ import time,scipy
 
 from .fermion_2d_tebd import (
     insert,
+    match_phase,
     write_ftn_to_disc,
     load_ftn_from_disc,
     delete_ftn_from_disc,
@@ -134,86 +135,79 @@ def apply_term(term_key,H,psi_name,directory):
         ket_tid,ket_site = ket.get_fermion_info()
         ftn = insert(ftn,ket_site+1,TG)
         ftn.contract_tags(ket.tags,which='all',inplace=True)
-    term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
-    term_dict = dict()
-    for idx,site in enumerate(sites):
-        if site[1] not in term_dict:
-            fname = directory+term_str+ftn.col_tag(site[1])
-            tmp = ftn.select(ftn.col_tag(site[1])).copy()
-            write_ftn_to_disc(tmp,fname)
-            term_dict[site[1]] = fname
-    return term_key,term_dict
-def compute_left_envs_wrapper(info,norm_benvs,directory,**compress_opts):
-    term_key,term_dict = info
-    cols = list(term_dict.keys())
+    term_str = '_'+str(term_key)+'_'
+    fname_dict = dict()
+    cols = list(set([site[1] for site in sites]))
+    for j in cols:
+        fname = directory+term_str+'mid'+str(j)
+        tmp = ftn.select(ftn.col_tag(j)).copy()
+        write_ftn_to_disc(tmp,fname)
+        fname_dict[term_key,'mid',j] = fname
+    return fname_dict
+def compute_left_envs_wrapper(term_key,benvs,directory,**compress_opts):
+    cols = list(set([site[1] for site in term_key[0]]))
     cols.sort()
-    like = load_ftn_from_disc(norm_benvs['mid',0])
+    like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
 
-    ls = [norm_benvs['left',cols[0]]]
+    ls = [benvs['norm','left',cols[0]]]
     for idx,j1 in enumerate(cols):
         j2 = Ly if idx==len(cols)-1 else cols[idx+1]
-        ls += [term_dict[j1]]+[norm_benvs['mid',j] for j in range(j1+1,j2)]
+        ls += [benvs[term_key,'mid',j1]]
+        ls += [benvs['norm','mid',j] for j in range(j1+1,j2)]
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=like)
     jmin = max(cols[0]-1,0)
-    term_benvs = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
+    ftn_dict = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
 
-    sites,typ = term_key
-    term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
-    for key in term_benvs.keys():
-        fname = directory+term_str+key[0]+'_'+ftn.col_tag(key[1])
-        write_ftn_to_disc(term_benvs[key],fname)
-        term_benvs[key] = fname
-    return term_key,term_benvs
-def compute_right_envs_wrapper(info,norm_benvs,directory,**compress_opts): 
-    term_key,term_dict = info
-    cols = list(term_dict.keys())
+    term_str = '_'+str(term_key)+'_' 
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict[term_key,side,j] = fname
+    return fname_dict
+def compute_right_envs_wrapper(term_key,benvs,directory,**compress_opts): 
+    cols = list(set([site[1] for site in term_key[0]]))
     cols.sort()
-    like = load_ftn_from_disc(norm_benvs['mid',0])
+    like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
 
     ls = []
     for idx,j2 in enumerate(cols):
         j1 = -1 if idx==0 else cols[idx-1]
-        ls += [norm_benvs['mid',j] for j in range(j1+1,j2)]+[term_dict[j2]]
-    ls.append(norm_benvs['right',cols[-1]])
+        ls += [benvs['norm','mid',j] for j in range(j1+1,j2)]
+        ls += [benvs[term_key,'mid',j2]]
+    ls += [benvs['norm','right',cols[-1]]]
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=like)
     jmax = min(cols[-1]+1,Ly-1)
-    term_benvs = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts)
+    ftn_dict = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts)
 
-    sites,typ = term_key
-    term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
-    for key in term_benvs.keys():
-        fname = directory+term_str+key[0]+'_'+ftn.col_tag(key[1])
-        write_ftn_to_disc(term_benvs[key],fname)
-        term_benvs[key] = fname
-    return term_key,term_benvs
-def compute_plq_envs_wrapper(info,norm_benvs,directory,**compress_opts):
-    term_key,term_benvs,j = info
-    like = load_ftn_from_disc(norm_benvs['mid',0])
+    term_str = '_'+str(term_key)+'_' 
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict[term_key,side,j] = fname
+    return fname_dict
+def compute_plq_envs_wrapper(info,benvs,directory,**compress_opts):
+    term_key,j = info
+    like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
     if term_key=='norm':
-        ls = [norm_benvs[side,j] for side in ['left','mid','right']]
+        cols = [j]
     else:
         cols = list(set([site[1] for site in term_key[0]]))
         cols.sort()
-        if j<cols[0]:
-            ls = norm_benvs['left',j],norm_benvs['mid',j],term_benvs['right',j]
-        elif j>cols[-1]:
-            ls = term_benvs['left',j],norm_benvs['mid',j],norm_benvs['right',j]
-        else:
-            ls = [term_benvs[side,j] for side in ['left','mid','right']]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+    l = benvs[term_key,'left',j] if j>cols[0] else benvs['norm','left',j]
+    m = benvs[term_key,'mid',j] if j in cols else benvs['norm','mid',j]
+    r = benvs[term_key,'right',j] if j<cols[-1] else benvs['norm','right',j]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in [l,m,r]]
           ).view_as_(FermionTensorNetwork2D,like=like)
     row_envs = ftn.compute_row_environments(yrange=(max(j-1,0),min(j+1,Ly-1)),
                                             **compress_opts)
-    if term_key=='norm':
-        term_str = term_key+'_'
-    else:
-        sites,typ = term_key
-        term_str = '_'.join([ftn.site_tag(*site) for site in sites]+[str(typ)])+'_'
+    term_str = '_'+str(term_key)+'_'
     plq_envs = dict()
     for i in range(Lx):
         ftn = FermionTensorNetwork(
@@ -224,24 +218,32 @@ def compute_plq_envs_wrapper(info,norm_benvs,directory,**compress_opts):
         write_ftn_to_disc(ftn,fname)
         plq_envs[term_key,site_tag] = fname
     return plq_envs
-def compute_site_components(site_tag,H,plq_envs):
+def contract_site(key,plq_envs,H):
+    term_key,site_tag = key[:2]
+    fname = plq_envs[key] 
+    ftn = load_ftn_from_disc(fname)
+    ftn.select((site_tag,'BRA'),which='!all').add_tag('grad')
+    bra = ftn[site_tag,'BRA']
+    ftn.contract_tags('grad',which='any',inplace=True,
+                      output_inds=bra.inds[::-1])
+    assert ftn.num_tensors==2
+    scal = ftn.contract()
+    bra_tid = bra.get_fermion_info()[0]
+    bra = ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
+    data = ftn['grad'].data
+    if term_key!='norm':
+        scal,data = scal*H[term_key][-1],data*H[term_key][-1]
+    return key,scal,data
+def compute_site_components(site_tag,data_map):
     H0,H1 = 0.0,0.0 # scalar/tsr H
-    for key in ['norm']+list(H.keys()):
-        ftn = load_ftn_from_disc(plq_envs[key,site_tag])
-        ftn.select((site_tag,'BRA'),which='!all').add_tag('grad')
-        bra = ftn[site_tag,'BRA']
-        ftn.contract_tags('grad',which='any',inplace=True,output_inds=bra.inds[::-1])
-        assert ftn.num_tensors==2
-        scal = ftn.contract()
-        bra_tid = bra.get_fermion_info()[0]
-        bra = ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
-        data = ftn['grad'].data
-        if key=='norm':
-            N0,N1 = scal,data
-        else:
-            H0,H1 = H0+scal*H[key][-1],H1+data*H[key][-1]
+    for (term_key,site_tag_),(scal,data) in data_map.items():
+        if site_tag_==site_tag:
+            if term_key=='norm':
+                N0,N1 = scal,data
+            else:
+                H0,H1 = H0+scal,H1+data
     return site_tag,H1,N1,H0,N0
-def compute_grad(H,psi_fname,directory,l=None,layer_tags=('KET','BRA'),
+def compute_components(H,psi_fname,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
     compress_opts['max_bond'] = max_bond
@@ -254,75 +256,367 @@ def compute_grad(H,psi_fname,directory,l=None,layer_tags=('KET','BRA'),
     Lx,Ly = psi.Lx,psi.Ly
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    norm_benvs = norm.compute_col_environments(**compress_opts)
-    for key in norm_benvs.keys():
-        fname = directory+'norm_'+key[0]+'_'+norm.col_tag(key[1])
-        write_ftn_to_disc(norm_benvs[key],fname)
-        norm_benvs[key] = fname
+    ftn_dict = norm.compute_col_environments(**compress_opts)
+    benvs = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+'_norm_'+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        benvs['norm',side,j] = fname
     # get term cols
     fxn = apply_term
     iterate_over = list(H.keys())
     args = [H,psi_fname,directory]
     kwargs = dict()
-    terms = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
     # get terms col envs
-    benvs = {'norm':norm_benvs}
+    iterate_over = list(H.keys())
+    args = [benvs,directory]
+    kwargs = compress_opts
 
     fxn = compute_left_envs_wrapper
-    iterate_over = terms
-    args = [norm_benvs,directory]
-    kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for (term_key,term_benvs) in ls:
-        benvs[term_key] = term_benvs
-
+    for fname_dict in ls:
+        benvs.update(fname_dict)
     fxn = compute_right_envs_wrapper
-    iterate_over = terms
-    args = [norm_benvs,directory]
-    kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for (term_key,term_benvs) in ls:
-        benvs[term_key].update(term_benvs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
     # get terms & norm plq_envs
-    plq_envs = dict()
     fxn = compute_plq_envs_wrapper
-    iterate_over = [(term_key,term_benvs,j) \
-                    for term_key,term_benvs in benvs.items() for j in range(Ly)]
-    args = [norm_benvs,directory]
+    iterate_over = [(term_key,j) for term_key in H.keys() for j in range(Ly)]
+    iterate_over += [('norm',j) for j in range(Ly)]
+    args = [benvs,directory]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    plq_envs = dict()
     for plq_envs_term in ls:
         plq_envs.update(plq_envs_term)
-    # compute grad
+    # compute site components
+    fxn = contract_site
+    iterate_over = list(plq_envs.keys())
+    args = [plq_envs,H]
+    kwargs = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    data_map = dict()
+    for (key,scal,data) in ls:
+        data_map[key] = scal,data
     fxn = compute_site_components
     iterate_over = [norm.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
-    args = [H,plq_envs]
+    args = [data_map]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     site00 = norm.site_tag(0,0)
+    H1_dict,N1_dict = dict(),dict()
     for (site_tag,H1,N1,H0,N0) in ls:
         if site_tag == site00:
             H00,N00 = H0,N0
-    E = H00/N00
-    grad = dict()
-    for (site_tag,H1,N1,H0,N0) in ls:
-        # f = <psi|H|psi>/<psi|psi>
-        grad[site_tag] = (H1-N1*E)/N0
-        # f = <psi|H|psi>/<psi|psi>+lambda*(<psi|psi>-1)**2
-#        grad[site_tag] = (H1-N1*E)/N0+2.0*l*(N00-1.0)*N1
+        H1_dict[site_tag] = H1
+        N1_dict[site_tag] = N1 
     # delete files 
-    for _,fname in norm_benvs.items():
-        delete_ftn_from_disc(fname) 
-    for (_,term_dict) in terms:
-        for _,fname in term_dict.items():
-            delete_ftn_from_disc(fname)
-    for _,term_benvs in benvs.items():
-        for _,fname in term_benvs.items():
-            delete_ftn_from_disc(fname)
     for _,fname in plq_envs.items():
         delete_ftn_from_disc(fname)
-    return grad,H00,N00,E
+    return H00,N00,H1_dict,N1_dict,benvs
+def compute_site_grad(site_tag,H0,N0,H1,N1,l=None):
+    E = H0/N0
+    # f = <psi|H|psi>/<psi|psi>
+    grad = (H1[site_tag]-N1[site_tag]*E)/N0
+    if l is not None:
+        # L = f+lambda*(<psi|psi>-1)**2
+        grad = grad + 2.0*l*(N0-1.0)*N1[site_tag]
+    return site_tag,grad,E 
+def compute_grad(H,psi_fname,directory,l=None,layer_tags=('KET','BRA'),
+    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
+    compress_opts = dict()
+    compress_opts['max_bond'] = max_bond
+    compress_opts['cutoff'] = cutoff
+    compress_opts['canonize'] = canonize
+    compress_opts['mode'] = mode
+    compress_opts['layer_tags'] = layer_tags
+    H0,N0,H1,N1,benvs = compute_components(H,psi_fname,directory,**compress_opts)
+    fxn = compute_site_grad
+    iterate_over = list(H1.keys())
+    args = [H0,N0,H1,N1]
+    kwargs = {'l':l}
+    grad = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for (site_tag,site_grad,E) in ls:
+        grad[site_tag] = site_grad
+    # delete files 
+    for _,fname in benvs.items():
+        delete_ftn_from_disc(fname)
+    return grad,H0,N0,E
+##################### hessp ############################
+def compute_p_norm_left_envs_wrapper(site,pfname,xbenvs,directory,**compress_opts):
+    # FIX ME
+    psip = load_ftn_from_disc(pfname)
+    Lx,Ly = psip.Lx,psip.Ly
+    ls = [xbenvs['norm','left',site[1]]]
+    ls += [xbenvs['norm','mid',j] for j in range(site[1],Ly)]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=psip)
+    site_tag = psip.site_tag(*site)
+    data = match_phase(psip[site_tag],ftn[site_tag,'KET'])
+    ftn[site_tag,'KET'].modify(data=data)
+    jmin = max(site[1]-1,0)
+    ftn_dict = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
+    term_str = '_'+site_tag+'_norm_'
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict['norm',site_tag,side,j] = fname
+    return fname_dict
+def compute_p_norm_right_envs_wrapper(site,pfname,xbenvs,directory,**compress_opts):
+    # FIX ME
+    psip = load_ftn_from_disc(pfname)
+    Lx,Ly = psip.Lx,psip.Ly
+    ls = [xbenvs['norm','mid',j] for j in range(0,site[1]+1)]
+    ls += [xbenvs['norm','right',site[1]]] 
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=psip)
+    site_tag = psip.site_tag(*site)
+    data = match_phase(psip[site_tag],ftn[site_tag,'KET'])
+    ftn[site_tag,'KET'].modify(data=data)
+    jmax = min(site[1]+1,Ly-1)
+    ftn_dict = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts) 
+    term_str = '_'+site_tag+'_norm_'
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict['norm',site_tag,side,j] = fname
+    return fname_dict 
+def compute_p_term_left_envs_wrapper(info,H,pfname,pbenvs,xbenvs,directory,
+                                     **compress_opts):
+    # FIX ME
+    site,term_key = info
+    psip = load_ftn_from_disc(pfname)
+    Lx,Ly = psip.Lx,psip.Ly
+    cols = list(set([op_site[-1] for op_site in term_key[0]]))
+    cols.sort()
+    site_tag = psip.site_tag(*site)
+    if site[1]<cols[0]:
+        ls = [pbenvs['norm',site_tag,side,site[1]] for side in ['left','mid']]
+        ls += [xbenvs['norm','mid',j] for j in range(site[1]+1,cols[0])]
+        ls += [xbenvs[term_key,'mid',j] for j in range(cols[0],cols[-1]+1)]
+        ls += [xbenvs['norm','mid',j] for j in range(cols[-1]+1,Ly)]
+    elif site[1]>cols[-1]:
+        ls = [xbenvs[term_key,'left',site[1]]]
+        ls += [xbenvs['norm','mid',j] for j in range(site[1],Ly)]
+    else:
+        ls = [xbenvs[term_key,'left',site[1]]] 
+        ls += [xbenvs[term_key,'mid',j] for j in range(site[1],cols[-1]+1)]
+        ls += [xbenvs['norm','mid',j] for j in range(cols[-1]+1,Ly)]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=psip)
+    if site[1]>=cols[0]:
+        if site in term_key[0]:
+            op = H[term_key][0][term_key[0].index(site)]
+            ket = psip[site_tag]
+            ket_site = ket.get_fermion_info()[1]
+            pix = ket.inds[-1]
+            TG = FermionTensor(op.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
+                               tags=ket.tags)
+            ket.reindex_({pix:pix+'_'})
+            psip = insert(psip,ket_site+1,TG)
+            psip.contract_tags(ket.tags,which='all',inplace=True)
+        data = match_phase(psip[site_tag],ftn[site_tag,'KET'])
+        ftn[site_tag,'KET'].modify(data=data)
+    jmin = max(site[1]-1,0)
+    ftn_dict = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
+    term_str = '_'+site_tag+'_'+str(term_key)+'_'
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict[term_key,site_tag,side,j] = fname
+    return fname_dict
+def compute_p_term_right_envs_wrapper(info,H,pfname,pbenvs,xbenvs,directory,
+                                     **compress_opts):
+    # FIX ME
+    site,term_key = info
+    psip = load_ftn_from_disc(pfname)
+    Lx,Ly = psip.Lx,psip.Ly
+    cols = list(set([op_site[-1] for op_site in term_key[0]]))
+    cols.sort()
+    site_tag = psip.site_tag(*site)
+    if site[1]>cols[-1]:
+        ls = [xbenvs['norm','mid',j] for j in range(cols[0])]
+        ls += [xbenvs[term_key,'mid',j] for j in range(cols[0],cols[-1]+1)]
+        ls += [xbenvs['norm','mid',j] for j in range(cols[-1]+1,site[1])]
+        ls += [pbenvs['norm',site_tag,side,site[1]] for side in ['mid','right']]
+    elif site[1]<cols[0]:
+        ls = [xbenvs['norm','mid',j] for j in range(site[1]+1)]
+        ls += [xbenvs[term_key,'right',site[1]]]
+    else:
+        ls = [xbenvs['norm','mid',j] for j in range(cols[0])]
+        ls += [xbenvs[term_key,'mid',j] for j in range(cols[0],site[1]+1)]
+        ls += [xbenvs[term_key,'right',site[1]]] 
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+          ).view_as_(FermionTensorNetwork2D,like=psip)
+    if site[1]<=cols[-1]:
+        if site in term_key[0]:
+            op = H[term_key][0][term_key[0].index(site)]
+            ket = psip[site_tag]
+            ket_site = ket.get_fermion_info()[1]
+            pix = ket.inds[-1]
+            TG = FermionTensor(op.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
+                               tags=ket.tags)
+            ket.reindex_({pix:pix+'_'})
+            psip = insert(psip,ket_site+1,TG)
+            psip.contract_tags(ket.tags,which='all',inplace=True)
+        data = match_phase(psip[site_tag],ftn[site_tag,'KET'])
+        ftn[site_tag,'KET'].modify(data=data)
+    jmax = min(site[1]+1,Ly-1)
+    ftn_dict = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts) 
+    term_str = '_'+site_tag+'_'+str(term_key)+'_'
+    fname_dict = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+term_str+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        fname_dict[term_key,site_tag,side,j] = fname
+    return fname_dict
+def compute_p_plq_envs_wrapper(info,pbenvs,xbenvs,directory,**compress_opts):
+    # FIX ME
+    term_key,site,j = info
+    like = load_ftn_from_disc(xbenvs['norm','mid',0])
+    Lx,Ly = like.Lx,like.Ly
+    psite_tag = like.site_tag(*site)
+    if term_key=='norm':
+        cols = [j]
+    else:
+        cols = list(set([op_site[1] for op_site in term_key[0]]))
+        cols.sort()
+    l = term_key if j>cols[0] else 'norm'
+    l = pbenvs[l,psite_tag,'left',j] if site[1]<j else xbenvs[l,'left',j]
+    m = term_key if j in cols else 'norm'
+    m = pbenvs[m,psite_tag,'mid',j] if site[1]==j else xbenvs[m,'mid',j]
+    r = term_key if j<cols[-1] else 'norm'
+    r = pbenvs[r,psite_tag,'right',j] if site[1]>j else xbenvs[r,'right',j]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in [l,m,r]]
+          ).view_as_(FermionTensorNetwork2D,like=like)
+    row_envs = ftn.compute_row_environments(yrange=(max(j-1,0),min(j+1,Ly-1)),
+                                            **compress_opts)
+    term_str = '_'+psite_tag+'_'+str(term_key)+'_'
+    plq_envs = dict()
+    for i in range(Lx):
+        ftn = FermionTensorNetwork(
+              [row_envs[side,i] for side in ['bottom','mid','top']],
+              check_collisions=False)
+        xsite_tag = like.site_tag(i,j)
+        fname = directory+term_str+xsite_tag
+        write_ftn_to_disc(ftn,fname)
+        plq_envs[term_key,xsite_tag,psite_tag] = fname
+    return plq_envs
+def compute_p_site_components(site_tag,data_map):
+    # FIX ME
+    H0,H1,N0,N1 = 0.0,0.0,0.0,0.0 
+    for (term_key,xsite_tag,psite_tag),(scal,data) in data_map.items():
+        if xsite_tag == site_tag:
+            if term_key=='norm':
+                N0,N1 = N0+scal,N1+data
+            else:
+                H0,H1 = H0+scal,H1+data
+    return site_tag,H1,N1,H0,N0
+def compute_site_hessp(site_tag,H0x,N0x,H1x,N1x,H0p,N0p,H1p,N1p):
+    # FIX ME
+    E = H0x/N0x
+    hp = (H1p[site_tag]-E*N1p[site_tag])/N0x
+    hp = hp - (H1x[site_tag]*N0p+N1x[site_tag]*H0p)/N0x**2
+    hp = hp + 2.0*E*N0p*N1x[site_tag]/N0x**2
+    return site_tag,hp
+def compute_hessp(H,xfname,pfname,directory,layer_tags=('KET','BRA'),
+    # FIX ME
+    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
+    compress_opts = dict()
+    compress_opts['max_bond'] = max_bond
+    compress_opts['cutoff'] = cutoff
+    compress_opts['canonize'] = canonize
+    compress_opts['mode'] = mode
+    compress_opts['layer_tags'] = layer_tags
+    H0x,N0x,H1x,N1x,xbenvs = compute_components(H,xfname,directory,**compress_opts)
+    psip = load_ftn_from_disc(pfname)
+    Lx,Ly = psip.Lx,psip.Ly
+    # get psite norm col envs
+    pbenvs = dict()
+    iterate_over = [(i,j) for i in range(Lx) for j in range(Ly)]
+    args = [pfname,xbenvs,directory]
+    kwargs = compress_opts
+
+    fxn = compute_p_norm_left_envs_wrapper
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        pbenvs.update(fname_dict)
+    fxn = compute_p_norm_right_envs_wrapper
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        pbenvs.update(fname_dict)
+    # get psite term col envs
+    iterate_over = [(site,term_key) for site in iterate_over \
+                                    for term_key in H.keys()] 
+    args = [H,pfname,pbenvs,xbenvs,directory]
+    kwargs = compress_opts
+
+    fxn = compute_p_term_left_envs_wrapper
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        pbenvs.update(fname_dict)
+    fxn = compute_p_term_right_envs_wrapper
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        pbenvs.update(fname_dict)
+    # compute plq envs
+    fxn = compute_p_plq_envs_wrapper
+    iterate_over = [(term_key,site,j) for term_key in list(H.keys())+['norm']
+                    for site in [(i,j) for i in range(Lx) for j in range(Ly)] \
+                    for j in range(Ly)]
+    args = [pbenvs,xbenvs,directory]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    plq_envs = dict()
+    for plq_envs_term in ls:
+        plq_envs.update(plq_envs_term)
+    # compute site components
+    fxn = contract_site
+    iterate_over = list(plq_envs.keys())
+    args = [plq_envs,H]
+    kwargs = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    data_map = dict()
+    for (key,scal,data) in ls:
+        data_map[key] = scal,data
+
+    fxn = compute_p_site_components
+    iterate_over = [psip.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
+    args = [data_map]
+    kwargs = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    site00 = psip.site_tag(0,0)
+    H1p,N1p = dict(),dict()
+    for (site_tag,H1,N1,H0,N0) in ls:
+        if site_tag==site00:
+            H0p,N0p = H0,N0
+        H1p[site_tag] = H1
+        N1p[site_tag] = N1
+    
+    fxn = compute_site_hessp
+    iterate_over = list(H1x.keys())
+    args = [H0x,N0x,H1x,N1x,H0p,N0p,H1p,N1p]
+    kwargs = dict()
+    hessp = dict()
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for (site_tag,hp) in ls:
+        hessp[site_tag] = hp
+    # delete files 
+    for _,fname in xbenvs.items():
+        delete_ftn_from_disc(fname)
+    for _,fname in pbenvs.items():
+        delete_ftn_from_disc(fname)
+    return hessp 
 def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
+    # REDUNDANT
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
     compress_opts['max_bond'] = max_bond
@@ -334,24 +628,24 @@ def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
     Lx,Ly = psi.Lx,psi.Ly
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    right_envs = norm.compute_right_environments(**compress_opts)
+    ftn_dict = norm.compute_right_environments(**compress_opts)
 
     ftn = FermionTensorNetwork(
-          (norm.select(norm.col_tag(0)).copy(),right_envs['right',0])
+          (norm.select(norm.col_tag(0)).copy(),ftn_dict['right',0])
           ).view_as_(FermionTensorNetwork2D,like=norm)
     ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
     top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
     ftn = FermionTensorNetwork(
           (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
     return ftn.contract() 
-def compute_energy_term(info,norm_benvs,directory,**compress_opts):
-    term_key,term_dict = info
-    like = load_ftn_from_disc(norm_benvs['mid',0])
+def compute_energy_term(term_key,benvs,directory,**compress_opts):
+    like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
 
-    _,right_envs = compute_right_envs_wrapper(info,norm_benvs,directory,**compress_opts) 
-    col0 = term_dict[0] if 0 in term_dict else norm_benvs['mid',0]
-    ls = col0,right_envs['right',0]
+    right_envs = compute_right_envs_wrapper(term_key,benvs,directory,**compress_opts) 
+    cols = list(set([site[1] for site in term_key[0]]))
+    term_ = term_key if min(cols)==0 else 'norm' 
+    ls = benvs[term_,'mid',0],right_envs[term_key,'right',0]
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
           ).view_as_(FermionTensorNetwork2D,like=like)
     ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
@@ -374,21 +668,24 @@ def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
     Lx,Ly = psi.Lx,psi.Ly
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    norm_benvs = norm.compute_col_environments(**compress_opts)
-    for key in norm_benvs.keys():
-        fname = directory+'norm_'+key[0]+'_'+norm.col_tag(key[1])
-        write_ftn_to_disc(norm_benvs[key],fname)
-        norm_benvs[key] = fname
+    ftn_dict = norm.compute_col_environments(**compress_opts)
+    benvs = dict()
+    for (side,j),ftn in ftn_dict.items():
+        fname = directory+'_norm_'+side+str(j)
+        write_ftn_to_disc(ftn,fname)
+        benvs['norm',side,j] = fname
     # get term cols
     fxn = apply_term
     iterate_over = list(H.keys())
     args = [H,psi_fname,directory]
     kwargs = dict()
-    terms = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
     # compute energy numerator  
     fxn = compute_energy_term
-    iterate_over = terms
-    args = [norm_benvs,directory]
+    iterate_over = list(H.keys()) 
+    args = [benvs,directory]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     E = 0.0
@@ -396,8 +693,8 @@ def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
         Ei *= H[term_key][-1]
         E += Ei
     # compute norm
-    ls = norm_benvs['mid',0],norm_benvs['right',0]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
+    ftn = FermionTensorNetwork(
+          (norm.select(norm.col_tag(0)).copy(),ftn_dict['right',0])
           ).view_as_(FermionTensorNetwork2D,like=norm)
     ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
     top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
@@ -405,20 +702,21 @@ def compute_energy(H,psi_fname,directory,layer_tags=('KET','BRA'),
           (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
     N = ftn.contract() 
     # delete files
-    for _,fname in norm_benvs.items():
+    for _,fname in benvs.items():
         delete_ftn_from_disc(fname) 
-    for (_,term_dict) in terms:
-        for _,fname in term_dict.items():
-            delete_ftn_from_disc(fname)
     return E/N
 class GlobalGrad():
-    def __init__(self,H,peps,D,chi,directory):
+    def __init__(self,H,peps,D,chi,directory,
+                 sep_energy_grad=False,has_lambda=False):
         self.H = H
         self.D = D
         self.chi = chi
         self.directory = directory
+        self.sep_energy_grad = sep_energy_grad
+        self.has_lambda = has_lambda
 
         self.psi = directory+'psi'
+        peps.normalize_(max_bond=chi,balance_bonds=True,equalize_norms=True)
         write_ftn_to_disc(peps,self.psi)
         self.skeleton = directory+'skeleton'
         write_ftn_to_disc(peps,self.skeleton)
@@ -432,6 +730,9 @@ class GlobalGrad():
                               for ax in range(data.ndim)]
                 cons = Constructor.from_bond_infos(bond_infos,data.pattern)
                 self.constructors[site_tag] = cons,data.dq
+        self.ngrad = 0
+        self.ne = 0
+        self.niter = 0
     def fpeps2vec(self,psi):
         ls = []
         for i in range(psi.Lx):
@@ -453,20 +754,37 @@ class GlobalGrad():
                 start = stop
         return psi
     def compute_energy(self,x_):
-        if self.has_lambda:
-            x,l = x_[:len(x)-1],x_[-1]
-        else:
-            x,l = x_,None 
+        x = x_[:len(x_)-1] if self.has_lambda else x_
+        l = x_[-1] if self.has_lambda else None
         psi = self.vec2fpeps(x) 
-        write_ftn_to_disc(psi,self.tmp) 
-        return compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi)
+        write_ftn_to_disc(psi,self.tmp)
+        E = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi,
+                           cutoff=1e-15)
+        print('ne={},E={}'.format(self.ne,E))
+        self.ne += 1
+        return E
+    def compute_hessp(self,x,p):
+        psi_x = self.vec2fpeps(x)
+        write_ftn_to_disc(psi_x,self.tmp)
+        psi_p = self.vec2fpeps(p)
+        write_ftn_to_disc(psi_p,self.directory+'psi_p')
+        hessp = compute_hessp(self.H,self.tmp,self.directory+'psi_p',self.directory,
+                      max_bond=self.chi,cutoff=1e-15)
+        hp = []
+        for i in range(psi_x.Lx):
+            for j in range(psi_x.Ly):
+                site_tag = psi_x.site_tag(i,j)
+                cons = self.constructors[site_tag][0]
+                hp.append(cons.tensor_to_vector(hessp[site_tag]))
+        hp = np.concatenate(hp)
+        return hp
     def compute_grad(self,x_):
         x = x_[:len(x_)-1] if self.has_lambda else x_
         l = x_[-1] if self.has_lambda else None
         psi = self.vec2fpeps(x) 
         write_ftn_to_disc(psi,self.tmp) 
-        grad,H00,N00,E = compute_grad(self.H,self.tmp,self.directory,l=l,
-                                  max_bond=self.chi)
+        grad,H0,N0,E = compute_grad(self.H,self.tmp,self.directory,l=l,
+                                      max_bond=self.chi,cutoff=1e-15)
 
         g = []
         for i in range(psi.Lx):
@@ -476,21 +794,22 @@ class GlobalGrad():
                 g.append(cons.tensor_to_vector(grad[site_tag]))
         g = np.concatenate(g)
         gmax = np.amax(abs(g))
-        gl = (N00-1.0)**2 if self.has_lambda else None
+        gl = (N0-1.0)**2 if self.has_lambda else None
         if self.has_lambda:
             g = np.concatenate([g,np.ones(1)*gl])
-        f = E+l*(N00-1.0)**2 if self.has_lambda else E
+        f = E+l*(N0-1.0)**2 if self.has_lambda else E
 
 #        E_ = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi)
 #        print(abs((E-E_)/E))
         if self.chi is None:
-            print('eval={},E={},N={},gmax={},l={},gl={}'.format(
-                  self.k,E,N00,gmax,l,gl))
+            print('ngrad={},e={},E={},N={},gmax={},l={},gl={}'.format(
+                  self.ngrad,E/(psi.Lx*psi.Ly),E,N0,gmax,l,gl))
         else:
-            E_ = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi//2)
-            print('eval={},E={},N={},Eerr={},gmax={},l={},gl={}'.format(
-                  self.k,E,N00,abs((E-E_)/E),gmax,l,gl))
-        self.k += 1
+            E_ = compute_energy(self.H,self.tmp,self.directory,max_bond=self.chi//2,
+                                cutoff=1e-15)
+            print('ngrad={},e={},E={},N={},Eerr={},gmax={},l={},gl={}'.format(
+                  self.ngrad,E/(psi.Lx*psi.Ly),E,N0,abs((E-E_)/E),gmax,l,gl))
+        self.ngrad += 1
         if self.sep_energy_grad:
             return g
         else:
@@ -499,18 +818,16 @@ class GlobalGrad():
         psi = self.vec2fpeps(x)
         write_ftn_to_disc(psi,self.psi)
         delete_ftn_from_disc(self.tmp)
-        print('iter=',self.it)
-        self.it += 1
+        print('niter=',self.niter)
+        self.niter += 1
     def kernel(self,method='BFGS',options={'maxiter':100,'gtol':1e-5}):
-        self.sep_energy_grad = False
-        self.has_lambda = False
+        self.ngrad = 0
+        self.ne = 0
         fun = self.compute_energy if self.sep_energy_grad else self.compute_grad
         jac = self.compute_grad if self.sep_energy_grad else True
         x0 = self.fpeps2vec(load_ftn_from_disc(self.psi))
         if self.has_lambda:
             x0 = np.concatenate([x0,1.0*np.ones(1)])
-        self.it = 0
-        self.k = 0
         result = scipy.optimize.minimize(fun=fun,jac=jac,method=method,x0=x0,
                  callback=self.callback,options=options)
         x = result.x[:len(result.x)-1] if self.has_lambda else result.x
@@ -702,349 +1019,3 @@ def kernel_vec(H,psi_name,directory,chi,maxiter=50,gtol=1e-5,t0=0.5):
         x = x - t*g  
     print('end iteration')
     return
-def custom(fun,x0,jac=None,callback=None,gtol=1e-5,maxiter=50,t0=0.5,**options):
-    print('using scipy.optimize custom')
-    fun,grad = fun,jac
-    t = t0
-    print('t=',t)
-    x = x0
-    fold = 0.0
-    nit = 0
-    while nit < maxiter:
-        f,g = fun(x),grad(x) 
-        if f-fold>0.0:
-            break
-        if np.amax(abs(g))<gtol:
-            break
-        x = x - t*g
-        if callback is not None:
-            callback(x)
-        fold = f
-        nit += 1
-    return scipy.optimize.OptimizeResult(fun=f,jac=g,x=x,nit=nit,message='')
-def _minimize_bfgs(fun, x0, args=(), jac=None, callback=None, maxiter=None,
-                   gtol=1e-5, norm=np.Inf, eps=np.sqrt(np.finfo(float).eps), 
-                   disp=False, return_all=False, finite_diff_rel_step=None,
-                   hess=None,hessp=None,bounds=None,constraints=(),
-                   **unknown_options):
-    """
-    Minimization of scalar function of one or more variables using the
-    BFGS algorithm.
-    Options
-    -------
-    disp : bool
-        Set to True to print convergence messages.
-    maxiter : int
-        Maximum number of iterations to perform.
-    gtol : float
-        Gradient norm must be less than `gtol` before successful
-        termination.
-    norm : float
-        Order of norm (Inf is max, -Inf is min).
-    eps : float or ndarray
-        If `jac is None` the absolute step size used for numerical
-        approximation of the jacobian via forward differences.
-    return_all : bool, optional
-        Set to True to return a list of the best solution at each of the
-        iterations.
-    finite_diff_rel_step : None or array_like, optional
-        If `jac in ['2-point', '3-point', 'cs']` the relative step size to
-        use for numerical approximation of the jacobian. The absolute step
-        size is computed as ``h = rel_step * sign(x) * max(1, abs(x))``,
-        possibly adjusted to fit into the bounds. For ``method='3-point'``
-        the sign of `h` is ignored. If None (default) then step is selected
-        automatically.
-    """
-    from scipy.optimize import optimize
-    optimize._check_unknown_options(unknown_options)
-    retall = return_all
-
-    x0 = np.asarray(x0).flatten()
-    if x0.ndim == 0:
-        x0.shape = (1,)
-    if maxiter is None:
-        maxiter = len(x0) * 200
-
-    sf = optimize._prepare_scalar_function(fun, x0, jac, args=args, epsilon=eps,
-                                  finite_diff_rel_step=finite_diff_rel_step)
-
-    f = sf.fun
-    myfprime = sf.grad
-
-    old_fval = f(x0)
-    gfk = myfprime(x0)
-
-    k = 0
-    N = len(x0)
-    I = np.eye(N, dtype=int)
-    Hk = I
-
-    # Sets the initial step guess to dx ~ 1
-    old_old_fval = old_fval + np.linalg.norm(gfk) / 2
-
-    xk = x0
-    if retall:
-        allvecs = [x0]
-    warnflag = 0
-    gnorm = optimize.vecnorm(gfk, ord=norm)
-    while (gnorm > gtol) and (k < maxiter):
-        pk = -np.dot(Hk, gfk)
-        try:
-            alpha_k, fc, gc, old_fval, old_old_fval, gfkp1 = \
-                     optimize._line_search_wolfe12(f, myfprime, xk, pk, gfk,
-                         old_fval, old_old_fval, amin=1e-100, amax=1e100)
-        except optimize._LineSearchError:
-            # Line search failed to find a better solution.
-            warnflag = 2
-            break
-
-        xkp1 = xk + alpha_k * pk
-        if retall:
-            allvecs.append(xkp1)
-        sk = xkp1 - xk
-        nsk = np.linalg.norm(sk)
-        sk /= nsk
-        xk = xkp1
-        if gfkp1 is None:
-            gfkp1 = myfprime(xkp1)
-
-        yk = gfkp1 - gfk
-        yk /= nsk
-        gfk = gfkp1
-        if callback is not None:
-            callback(xk)
-        k += 1
-        gnorm = optimize.vecnorm(gfk, ord=norm)
-        if (gnorm <= gtol):
-            break
-
-        if not np.isfinite(old_fval):
-            # We correctly found +-Inf as optimal value, or something went
-            # wrong.
-            warnflag = 2
-            break
-
-        rhok_inv = np.dot(yk, sk)
-        print('rhok_inv={},nsk={},nyk={},alpha={}'.format(rhok_inv,nsk,np.linalg.norm(yk),alpha_k))
-        # this was handled in numeric, let it remaines for more safety
-        if rhok_inv == 0.:
-            rhok = 1000.0
-            if disp:
-                print("Divide-by-zero encountered: rhok assumed large")
-        else:
-            rhok = 1. / rhok_inv
-
-        A1 = I - sk[:, np.newaxis] * yk[np.newaxis, :] * rhok
-        A2 = I - yk[:, np.newaxis] * sk[np.newaxis, :] * rhok
-        Hk = np.dot(A1, np.dot(Hk, A2)) + (rhok * sk[:, np.newaxis] *
-                                                 sk[np.newaxis, :])
-
-    fval = old_fval
-
-    if warnflag == 2:
-        msg = optimize._status_message['pr_loss']
-    elif k >= maxiter:
-        warnflag = 1
-        msg = optimize._status_message['maxiter']
-    elif np.isnan(gnorm) or np.isnan(fval) or np.isnan(xk).any():
-        warnflag = 3
-        msg = optimize._status_message['nan']
-    else:
-        msg = optimize._status_message['success']
-
-    if disp:
-        print("%s%s" % ("Warning: " if warnflag != 0 else "", msg))
-        print("         Current function value: %f" % fval)
-        print("         Iterations: %d" % k)
-        print("         Function evaluations: %d" % sf.nfev)
-        print("         Gradient evaluations: %d" % sf.ngev)
-
-    result = optimize.OptimizeResult(fun=fval, jac=gfk, hess_inv=Hk, nfev=sf.nfev,
-                            njev=sf.ngev, status=warnflag,
-                            success=(warnflag == 0), message=msg, x=xk,
-                            nit=k)
-    if retall:
-        result['allvecs'] = allvecs
-    return result
-def _minimize_newtoncg(fun, x0, args=(), jac=None, hess=None, hessp=None,
-                       callback=None, xtol=1e-5, eps=np.sqrt(np.finfo(float).eps), 
-                       maxiter=None, disp=False, return_all=False,
-                       bounds=None,constraints=(),
-                       **unknown_options):
-    """
-    Minimization of scalar function of one or more variables using the
-    Newton-CG algorithm.
-    Note that the `jac` parameter (Jacobian) is required.
-    Options
-    -------
-    disp : bool
-        Set to True to print convergence messages.
-    xtol : float
-        Average relative error in solution `xopt` acceptable for
-        convergence.
-    maxiter : int
-        Maximum number of iterations to perform.
-    eps : float or ndarray
-        If `hessp` is approximated, use this value for the step size.
-    return_all : bool, optional
-        Set to True to return a list of the best solution at each of the
-        iterations.
-    """
-    from scipy.optimize import optimize
-    optimize._check_unknown_options(unknown_options)
-    if jac is None:
-        raise ValueError('Jacobian is required for Newton-CG method')
-    fhess_p = hessp
-    fhess = hess
-    avextol = xtol
-    epsilon = eps
-    retall = return_all
-
-    x0 = np.asarray(x0).flatten()
-    # TODO: add hessp (callable or FD) to ScalarFunction?
-    sf = optimize._prepare_scalar_function(
-        fun, x0, jac, args=args, epsilon=eps, hess=hess
-    )
-    f = sf.fun
-    fprime = sf.grad
-    _h = sf.hess(x0)
-
-    # Logic for hess/hessp
-    # - If a callable(hess) is provided, then use that
-    # - If hess is a FD_METHOD, or the output fom hess(x) is a LinearOperator
-    #   then create a hessp function using those.
-    # - If hess is None but you have callable(hessp) then use the hessp.
-    # - If hess and hessp are None then approximate hessp using the grad/jac.
-
-    if (hess in optimize.FD_METHODS or isinstance(_h, scipy.sparse.linalg.LinearOperator)):
-        fhess = None
-
-        def _hessp(x, p, *args):
-            return sf.hess(x).dot(p)
-
-        fhess_p = _hessp
-
-    def terminate(warnflag, msg):
-        if disp:
-            print(msg)
-            print("         Current function value: %f" % old_fval)
-            print("         Iterations: %d" % k)
-            print("         Function evaluations: %d" % sf.nfev)
-            print("         Gradient evaluations: %d" % sf.ngev)
-            print("         Hessian evaluations: %d" % hcalls)
-        fval = old_fval
-        result = optimize.OptimizeResult(fun=fval, jac=gfk, nfev=sf.nfev,
-                                njev=sf.ngev, nhev=hcalls, status=warnflag,
-                                success=(warnflag == 0), message=msg, x=xk,
-                                nit=k)
-        if retall:
-            result['allvecs'] = allvecs
-        return result
-
-    hcalls = 0
-    if maxiter is None:
-        maxiter = len(x0)*200
-    cg_maxiter = 20*len(x0)
-
-    xtol = len(x0) * avextol
-    update = [2 * xtol]
-    xk = x0
-    if retall:
-        allvecs = [xk]
-    k = 0
-    gfk = None
-    old_fval = f(x0)
-    old_old_fval = None
-    float64eps = np.finfo(np.float64).eps
-#    while np.add.reduce(np.abs(update)) > xtol:
-    b = np.ones(len(x0))
-    while np.amax(np.abs(b)) > avextol:
-        if k >= maxiter:
-            msg = "Warning: " + _status_message['maxiter']
-            return terminate(1, msg)
-        # Compute a search direction pk by applying the CG method to
-        #  del2 f(xk) p = - grad f(xk) starting from 0.
-        b = -fprime(xk)
-        maggrad = np.add.reduce(np.abs(b))
-        eta = np.min([0.5, np.sqrt(maggrad)])
-        termcond = eta * maggrad
-        xsupi = np.zeros(len(x0), dtype=x0.dtype)
-        ri = -b
-        psupi = -ri
-        i = 0
-        dri0 = np.dot(ri, ri)
-
-        if fhess is not None:             # you want to compute hessian once.
-            A = sf.hess(xk)
-            hcalls = hcalls + 1
-
-        for k2 in range(cg_maxiter):
-            if np.add.reduce(np.abs(ri)) <= termcond:
-                break
-            if np.amax(abs(ri)) < avextol:
-                break
-            if fhess is None:
-                if fhess_p is None:
-                    Ap = optimize.approx_fhess_p(xk, psupi, fprime, epsilon)
-                else:
-                    Ap = fhess_p(xk, psupi, *args)
-                    hcalls = hcalls + 1
-            else:
-                if isinstance(A, HessianUpdateStrategy):
-                    # if hess was supplied as a HessianUpdateStrategy
-                    Ap = A.dot(psupi)
-                else:
-                    Ap = np.dot(A, psupi)
-            # check curvature
-            Ap = np.asarray(Ap).squeeze()  # get rid of matrices...
-            curv = np.dot(psupi, Ap)
-            print('curv={},npi={},rmax={}'.format(curv/np.dot(psupi,psupi),np.linalg.norm(psupi),np.amax(abs(ri))))
-            if 0 <= curv <= 3 * float64eps:
-                break
-            elif curv < 0:
-                if (i > 0):
-                    break
-                else:
-                    # fall back to steepest descent direction
-                    xsupi = dri0 / (-curv) * b
-                    break
-            alphai = dri0 / curv
-            xsupi = xsupi + alphai * psupi
-            ri = ri + alphai * Ap
-            dri1 = np.dot(ri, ri)
-            betai = dri1 / dri0
-            psupi = -ri + betai * psupi
-            i = i + 1
-            dri0 = dri1          # update np.dot(ri,ri) for next time.
-        else:
-            # curvature keeps increasing, bail out
-            msg = ("Warning: CG iterations didn't converge. The Hessian is not "
-                   "positive definite.")
-            return terminate(3, msg)
-
-        pk = xsupi  # search direction is solution to system.
-        gfk = -b    # gradient at xk
-
-        try:
-            alphak, fc, gc, old_fval, old_old_fval, gfkp1 = \
-                     optimize._line_search_wolfe12(f, fprime, xk, pk, gfk,
-                                          old_fval, old_old_fval)
-        except optimize._LineSearchError:
-            # Line search failed to find a better solution.
-            msg = "Warning: " + _status_message['pr_loss']
-            return terminate(2, msg)
-
-        update = alphak * pk
-        xk = xk + update        # upcast if necessary
-        if callback is not None:
-            callback(xk)
-        if retall:
-            allvecs.append(xk)
-        k += 1
-    else:
-        if np.isnan(old_fval) or np.isnan(update).any():
-            return terminate(3, _status_message['nan'])
-
-        msg = optimize._status_message['success']
-        return terminate(0, msg)
-

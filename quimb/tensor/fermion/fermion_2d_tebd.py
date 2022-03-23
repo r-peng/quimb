@@ -86,6 +86,25 @@ def get_half_filled_product_state(Lx,Ly,symmetry=None):
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)
     return ftn
+def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
+    cre = creation(spin='sum',symmetry=symmetry,flat=True) 
+    des = cre.dagger
+    ftn = get_half_filled_product_state(Lx,Ly,symmetry=symmetry)
+    n = int(Lx*Ly*doping+1e-6)
+    sites = [(i,j) for i in range(Lx) for j in range(Ly)]
+    for i in range(n):
+        site = sites[np.random.randint(low=0,high=len(sites))]
+        sites.remove(site)
+        site_tag = ftn.site_tag(*site)
+        ket = ftn[ftn.site_tag(*site)]
+        pix = ket.inds[-1]
+        TG = FermionTensor(data=des.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
+                           tags=ket.tags) 
+        ket.reindex_({pix:pix+'_'})
+        ket_tid,ket_site = ket.get_fermion_info()
+        ftn = insert(ftn,ket_site+1,TG)
+        ftn.contract_tags(ket.tags,which='all',inplace=True)
+    return ftn
 def write_ftn_to_disc(tn,tmpdir):
     fname = tmpdir
 #    print('saving to ', fname)
