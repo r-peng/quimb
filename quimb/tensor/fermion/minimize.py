@@ -609,8 +609,7 @@ def _minimize_bfgs(fun, x0, args=(), jac=None, callback=None, maxiter=None,
             # Line search failed to find a better solution.
             warnflag = 2
             break
-        print('iter={},fval={},alpha={},rhok_inv={}'.format(
-              k,old_fval,alpha_k,rhok_inv))
+        print('iter={},alpha={},rhok_inv={}'.format(k,alpha_k,rhok_inv))
 
         xkp1 = xk + alpha_k * pk
         if retall:

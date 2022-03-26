@@ -446,6 +446,7 @@ def compute_norm(psi,layer_tags=('KET','BRA'),
     return ftn.contract() 
 class GlobalGrad():
     def __init__(self,H,peps,D,chi,directory,psi_fname):
+        self.start_time = time.time()
         self.H = H
         self.D = D
         self.chi = chi
@@ -493,7 +494,8 @@ class GlobalGrad():
         psi = self.vec2fpeps(x)
         e,N = compute_energy(self.H,psi,self.directory,
                            max_bond=self.chi,cutoff=1e-15)
-        print('ne={},e={},N={}'.format(self.ne,e,N))
+        print('    ne={},time={}'.format(self.ne,time.time()-self.start_time))
+        print('        e={},N={}'.format(e,N))
         self.ne += 1
         return e,N
     def compute_grad(self,x):
@@ -518,8 +520,9 @@ class GlobalGrad():
         gmax = np.amax(abs(g))
         gl = 2.0*x[-1]*(N-1.0)**2
         g = np.concatenate([g,np.ones(1)*gl])
-        print('ng={},e={},N={},e_err={},n_err={},gmax={},l={},gl={}'.format(
-              self.ng,e,N,abs((e-e_)/e_),abs((N-N_)/N_),gmax,x[-1],gl))
+        print('    ng={},time={}'.format(self.ng,time.time()-self.start_time))
+        print('        e={},N={},gmax={},l={},gl={}'.format(e,N,gmax,x[-1],gl))
+        print('        e_err={},n_err={}'.format(abs((e-e_)/e_),abs((N-N_)/N_)))
         self.ng += 1
         return f,g
     def callback(self,x):
