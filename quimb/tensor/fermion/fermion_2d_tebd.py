@@ -105,8 +105,7 @@ def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
         ftn = insert(ftn,ket_site+1,TG)
         ftn.contract_tags(ket.tags,which='all',inplace=True)
     return ftn
-def write_ftn_to_disc(tn,tmpdir):
-    fname = tmpdir
+def write_ftn_to_disc(tn,fname):
 #    print('saving to ', fname)
     # Create a generic dictionary to hold all information
     data = dict()

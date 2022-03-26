@@ -267,29 +267,6 @@ def compute_hessp(H,xfname,pfname,directory,layer_tags=('KET','BRA'),
     for _,fname in pbenvs.items():
         delete_ftn_from_disc(fname)
     return hessp 
-def compute_norm(psi_name,directory,layer_tags=('KET','BRA'),
-    # REDUNDANT
-    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
-    compress_opts = dict()
-    compress_opts['max_bond'] = max_bond
-    compress_opts['cutoff'] = cutoff
-    compress_opts['canonize'] = canonize
-    compress_opts['mode'] = mode
-    compress_opts['layer_tags'] = layer_tags
-    psi = load_ftn_from_disc(psi_fname)
-    Lx,Ly = psi.Lx,psi.Ly
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
-    norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    ftn_dict = norm.compute_right_environments(**compress_opts)
-
-    ftn = FermionTensorNetwork(
-          (norm.select(norm.col_tag(0)).copy(),ftn_dict['right',0])
-          ).view_as_(FermionTensorNetwork2D,like=norm)
-    ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
-    return ftn.contract() 
 ################### some naive numerical methods #####################
 def conjugate_grad(grad,d_old,gnormsq_old):
     gnormsq = sum([np.dot(g.data,g.data) for g in grad.values()])
