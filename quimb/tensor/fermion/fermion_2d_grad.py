@@ -260,7 +260,7 @@ def contract_plq(key,plq_envs,H):
     if term_key!='norm':
         scal,data = scal*H[term_key][-1],data*H[term_key][-1]
     return key,scal,data
-def compute_site_grad(site_tag,data_map,l,Nsites):
+def compute_site_grad(site_tag,data_map):
     H0,H1 = 0.0,0.0 # scalar/tsr H
     for (term_key,site_tag_),(scal,data) in data_map.items():
         if site_tag_==site_tag:
@@ -268,12 +268,10 @@ def compute_site_grad(site_tag,data_map,l,Nsites):
                 N0,N1 = scal,data
             else:
                 H0,H1 = H0+scal,H1+data
-    H0,H1 = H0/Nsites,H1/Nsites
-    e = H0/N0 
-    # f = (<psi|H|psi>/Nsite)/<psi|psi>+(l**2+1)*(<psi|psi>-1)**2
-    g = (H1-N1*e)/N0 + (l**2+1.0)*2.0*(N0-1.0)*N1
-    return site_tag,2.0*g,e,N0
-def compute_grad(H,psi,l,directory,layer_tags=('KET','BRA'),
+    E = H0/N0
+    g = (H1-N1*E)/N0
+    return site_tag,g,E,N0
+def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
     compress_opts['max_bond'] = max_bond
@@ -333,15 +331,15 @@ def compute_grad(H,psi,l,directory,layer_tags=('KET','BRA'),
     # sum site grad
     fxn = compute_site_grad
     iterate_over = [psi.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
-    args = [data_map,l,float(Lx*Ly)]
+    args = [data_map]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     site00 = psi.site_tag(0,0)
     g = dict()
-    for (site_tag,site_g,site_e,site_N) in ls:
+    for (site_tag,site_g,site_E,site_N) in ls:
         g[site_tag] = site_g
         if site_tag==site00:
-            e = site_e
+            E = site_E
             N = site_N
     # delete files 
     delete_ftn_from_disc(norm_fname) 
@@ -349,7 +347,7 @@ def compute_grad(H,psi,l,directory,layer_tags=('KET','BRA'),
         delete_ftn_from_disc(fname)
     for _,fname in plq_envs.items():
         delete_ftn_from_disc(fname)
-    return g,e,N 
+    return g,E,N 
 def compute_energy_term(term_key,benvs,directory,**compress_opts):
     like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
@@ -422,7 +420,7 @@ def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
     delete_ftn_from_disc(norm_fname) 
     for _,fname in benvs.items():
         delete_ftn_from_disc(fname) 
-    return E/float(Lx*Ly),N
+    return E,N
 def compute_norm(psi,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -456,6 +454,7 @@ class GlobalGrad():
         peps = peps.multiply_each(N**(-1.0/(2.0*peps.num_tensors)),inplace=True)
         peps.balance_bonds_()
         peps.equalize_norms_()
+        self.fac = 1.0
 
         self.psi = directory+psi_fname
         write_ftn_to_disc(peps,self.psi)
@@ -492,23 +491,23 @@ class GlobalGrad():
         return psi
     def compute_energy(self,x):
         psi = self.vec2fpeps(x)
-        e,N = compute_energy(self.H,psi,self.directory,
+        E,N = compute_energy(self.H,psi,self.directory,
                            max_bond=self.chi,cutoff=1e-15)
         print('    ne={},time={}'.format(self.ne,time.time()-self.start_time))
-        print('        e={},N={}'.format(e,N))
+        print('        E={},N={}'.format(E,N))
         self.ne += 1
-        return e,N
+        self.fac = N**(-1.0/(2.0*psi.Lx*psi.Ly))
+        return E,N
     def compute_grad(self,x):
         psi = self.vec2fpeps(x) 
-        grad,e,N = compute_grad(self.H,psi,x[-1],self.directory,
+        grad,E,N = compute_grad(self.H,psi,self.directory,
                                 max_bond=self.chi,cutoff=1e-15)
-#        e_,N_ = compute_energy(self.H,psi,self.directory,
+#        E_,N_ = compute_energy(self.H,psi,self.directory,
 #                            max_bond=self.chi,cutoff=1e-15)
-#        print(abs((e-e_)/e_),abs((N-N_)/N_))
-        e_,N_ = (e,N) if self.chi is None else \
+#        print(abs((E-E_)/E_),abs((N-N_)/N_))
+        E_,N_ = (E,N) if self.chi is None else \
              compute_energy(self.H,psi,self.directory,
                             max_bond=self.chi+5,cutoff=1e-15)
-        f = e+(x[-1]**2+1.0)*(N-1.0)**2  
 
         g = []
         for i in range(psi.Lx):
@@ -518,21 +517,22 @@ class GlobalGrad():
                 g.append(cons.tensor_to_vector(grad[site_tag]))
         g = np.concatenate(g)
         gmax = np.amax(abs(g))
-        gl = 2.0*x[-1]*(N-1.0)**2
-        g = np.concatenate([g,np.ones(1)*gl])
         print('    ng={},time={}'.format(self.ng,time.time()-self.start_time))
-        print('        e={},N={},gmax={},l={},gl={}'.format(e,N,gmax,x[-1],gl))
-        print('        e_err={},n_err={}'.format(abs((e-e_)/e_),abs((N-N_)/N_)))
+        print('        E={},N={},gmax={}'.format(E,N,gmax))
+        print('        E_err={},n_err={}'.format(abs((E-E_)/E_),abs((N-N_)/N_)))
         self.ng += 1
-        return f,g
-    def callback(self,x):
+        self.fac = N**(-1.0/(2.0*psi.Lx*psi.Ly))
+        return E,g
+    def callback(self,x,g):
+        x *= self.fac
+        g /= self.fac
         psi = self.vec2fpeps(x)
         write_ftn_to_disc(psi,self.psi)
+        return x,g
     def kernel(self,method=_minimize_bfgs,options={'maxiter':200,'gtol':1e-5}):
         self.ng = 0
         self.ne = 0
         x0 = self.fpeps2vec(load_ftn_from_disc(self.psi))
-        x0 = np.concatenate([x0,np.ones(1)])
         scipy.optimize.minimize(fun=self.compute_grad,jac=True,
                  method=method,x0=x0,
                  callback=self.callback,options=options)

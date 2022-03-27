@@ -612,20 +612,16 @@ def _minimize_bfgs(fun, x0, args=(), jac=None, callback=None, maxiter=None,
         print('iter={},alpha={},rhok_inv={}'.format(k,alpha_k,rhok_inv))
 
         xkp1 = xk + alpha_k * pk
-        if retall:
-            allvecs.append(xkp1)
-        sk = xkp1 - xk
-        nsk = np.linalg.norm(sk)
-        sk /= nsk
-        xk = xkp1
         if gfkp1 is None:
             gfkp1 = myfprime(xkp1)
-
-        yk = gfkp1 - gfk
-        yk /= nsk
-        gfk = gfkp1
         if callback is not None:
-            callback(xk)
+            xkp1,gfkp1 = callback(xkp1,gfkp1) # rescal by norm(xk)
+        if retall:
+            allvecs.append(xkp1)
+        sk, yk = xkp1 - xk, gfkp1 - gfk
+        nsk = np.linalg.norm(sk)
+        sk, yk = sk / nsk, yk / nsk
+        xk, gfk = xkp1, gfkp1
         k += 1
         gnorm = opt.vecnorm(gfk, ord=norm)
         if (gnorm <= gtol):
