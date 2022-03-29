@@ -838,7 +838,12 @@ class TensorNetwork2D(TensorNetwork):
                     self.contract_((tag1, tag2), which='any')
                 else:
                     # contract a specific pair (i.e. only one 'inner' layer)
-                    self.contract_between(tag1, (tag2, layer_tag))
+#                    self.contract_between(tag1, (tag2, layer_tag))
+                    try:
+                        if len(self._get_tids_from_tags((tag2, layer_tag), which='all')) > 0:
+                            self.contract_between(tag1, (tag2, layer_tag))
+                    except KeyError:
+                        pass
 
             if canonize:
                 #

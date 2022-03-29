@@ -2927,7 +2927,8 @@ def _make_promote_array_func(op, meth_name):
     def _promote_array_func(self, other):
         """Use standard array func, but make sure Tensor inds match.
         """
-        if isinstance(other, Tensor):
+#        if isinstance(other, Tensor):
+        if isinstance(other, type(self)):
 
             if set(self.inds) != set(other.inds):
                 raise ValueError("The indicies of these two tensors do not "
@@ -2935,11 +2936,13 @@ def _make_promote_array_func(op, meth_name):
 
             otherT = other.transpose(*self.inds)
 
-            return Tensor(
+#            return Tensor(
+            return type(self)(
                 data=op(self.data, otherT.data), inds=self.inds,
                 tags=self.tags | other.tags)
         else:
-            return Tensor(data=op(self.data, other),
+#            return Tensor(data=op(self.data, other),
+            return type(self)(data=op(self.data, other),
                           inds=self.inds, tags=self.tags)
 
     return _promote_array_func
@@ -2959,7 +2962,8 @@ def _make_rhand_array_promote_func(op, meth_name):
     def _rhand_array_promote_func(self, other):
         """Right hand operations -- no need to check ind equality first.
         """
-        return Tensor(data=op(other, self.data),
+#        return Tensor(data=op(other, self.data),
+        return type(self)(data=op(other, self.data),
                       inds=self.inds, tags=self.tags)
 
     return _rhand_array_promote_func

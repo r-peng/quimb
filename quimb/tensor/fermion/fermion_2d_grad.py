@@ -585,7 +585,7 @@ def UEG(g,N,L,Ne,symmetry='u1',flat=True,maxdist=np.inf):
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     ann_a = cre_a.dagger
     ann_b = cre_b.dagger
-    u = onsite_U(u=1.0,symmetry=symmetry)
+#    u = onsite_U(u=1.0,symmetry=symmetry)
     pn = ParticleNumber(spin='sum',symmetry=symmetry,flat=flat)
     ham = dict()
     def get_onsite(site):
