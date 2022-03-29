@@ -576,6 +576,68 @@ def Hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
             if j+1 != Ly:
                 get_hopping(((i,j),(i,j+1)))
     return ham
+def UEG(g,N,L,Ne,symmetry='u1',flat=True,maxdist=np.inf):
+    from .block_interface import creation,onsite_U,ParticleNumber
+    eps = L/(N+2.0)
+    spacing = L/(N+1.0)
+    sites = [(i,j) for i in range(N) for j in range(N)]
+    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
+    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+    ann_a = cre_a.dagger
+    ann_b = cre_b.dagger
+    u = onsite_U(u=1.0,symmetry=symmetry)
+    pn = ParticleNumber(spin='sum',symmetry=symmetry,flat=flat)
+    ham = dict()
+    def get_onsite(site):
+        # electron-charge
+        fac = 0.0
+        for site_ in sites:
+            if site_ != site:
+                r = spacing*(np.array(site)-np.array(site_))
+                fac += 1.0/np.linalg.norm(r)
+        # KE
+        if site in [(0,0),(0,N-1),(N-1,0),(N-1,N-1)]: # corner
+            fac += 58.0/(24.0*eps**2)
+        elif (site[0] in [0,N-1]) or (site[1] in [0,N-1]): # border
+            fac += 59.0/(24.0*eps**2)
+        else:
+            fac += 60.0/(24.0*eps**2)
+        op = fac*pn
+        # onsite U
+        fac = g/eps
+        op = op + fac*u
+        ham[(site,),'onsite'] = (op,),1.0
+        return
+    def get_nn(sites):
+        site0,site1 = sites
+        assert site0[0]<=site1[0]
+        assert site0[1]<=site1[1]
+        # electron-electron
+        r = spacing*(np.array(site0)-np.array(site1))
+        dist = np.linalg.norm(r)
+        if dist <= maxdist:
+            fac = 1.0/dist
+            ham[sites,'ee'] = (pn.copy(),pn.copy()),fac
+        # NN
+        if dist <= spacing * (1.0+1e-6):
+            fac = -16.0/(24.0*eps**2)
+            # cre0,ann1 = (-1)**S ann1,cre0
+            ops = cre_a.copy(),ann_a.copy()
+            phase (-1)**(cre_a.parity*ann_a.parity)
+            ham[sites,'nn1a'] = ops,fac*phase
+            # cre1,ann0
+            ops = ann_a.copy(),cre_a.copy()
+            phase = 1.0
+            ham[sites,'nn2a'] = ops,fac*phase
+            # cre0,ann1 = (-1)**S ann1,cre0 
+            ops = cre_b.copy(),ann_b.copy()
+            phase = (-1)**(cre_b.parity*ann_b.parity)
+            ham[sites,'nn1b'] = ops,fac*phase
+            # cre1,ann0
+            ops = ann_b.copy(),cre_b.copy()
+            phase = 1.0
+            ham[sites,'nn2b'] = ops,fac*phase
+        # 3rd-NN
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
     from .spinless import creation
     cre = creation(symmetry=symmetry)

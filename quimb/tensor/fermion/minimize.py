@@ -609,7 +609,15 @@ def _minimize_bfgs(fun, x0, args=(), jac=None, callback=None, maxiter=None,
             # Line search failed to find a better solution.
             warnflag = 2
             break
-        print('iter={},f={},alpha={},rhok_inv={}'.format(k,old_fval,alpha_k,rhok_inv))
+        gnorm = opt.vecnorm(gfkp1, ord=norm)
+        if (gnorm <= gtol):
+            break
+        if not np.isfinite(old_fval):
+            # We correctly found +-Inf as optimal value, or something went
+            # wrong.
+            warnflag = 2
+            break
+        print('iter={},f={},g={},alpha={},rhok_inv={}'.format(k,old_fval,gnorm,alpha_k,rhok_inv))
 
         xkp1 = xk + alpha_k * pk
         if gfkp1 is None:
@@ -623,15 +631,6 @@ def _minimize_bfgs(fun, x0, args=(), jac=None, callback=None, maxiter=None,
         sk, yk = sk / nsk, yk / nsk
         xk, gfk = xkp1, gfkp1
         k += 1
-        gnorm = opt.vecnorm(gfk, ord=norm)
-        if (gnorm <= gtol):
-            break
-
-        if not np.isfinite(old_fval):
-            # We correctly found +-Inf as optimal value, or something went
-            # wrong.
-            warnflag = 2
-            break
 
         rhok_inv = np.dot(yk, sk)
         # this was handled in numeric, let it remaines for more safety
