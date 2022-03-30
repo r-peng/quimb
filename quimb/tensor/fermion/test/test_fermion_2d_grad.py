@@ -7,7 +7,7 @@ from scipy.optimize import optimize
 import numpy as np
 set_options(symmetry="u1", use_cpp=True)
 
-Lx = Ly = 4
+Lx = Ly = 3
 t,u = 1.0,8.0
 D = 3
 chi = 128
@@ -31,19 +31,19 @@ if RANK==0:
     x *= (np.random.rand()+1.0)**(1./(Lx*Ly))
     E,N = gg.compute_energy(x)
 
-#    x = np.random.rand(len(x)) 
-#    f,g = gg.compute_grad(x)
-#    print('f=',f)
-#    g *= 2.0
-#    def _f(x):
-#        E,N = gg.compute_energy(x)
-#        return E
-#    for epsilon in [1e-8]:
-#        sf = optimize._prepare_scalar_function(
-#             _f,x0=x,jac=None,epsilon=epsilon,
-#             finite_diff_rel_step=epsilon) 
-#        g_ = sf.grad(x)
-#        print(epsilon,np.linalg.norm(g),np.linalg.norm(g_-g)/np.linalg.norm(g))
+    x = np.random.rand(len(x)) 
+    f,g = gg.compute_grad(x)
+    print('f=',f)
+    g *= 2.0
+    def _f(x):
+        E,N = gg.compute_energy(x)
+        return E
+    for epsilon in [1e-6]:
+        sf = optimize._prepare_scalar_function(
+             _f,x0=x,jac=None,epsilon=epsilon,
+             finite_diff_rel_step=epsilon) 
+        g_ = sf.grad(x)
+        print(epsilon,np.linalg.norm(g),np.linalg.norm(g_-g)/np.linalg.norm(g))
     delete_ftn_from_disc(gg.psi)
     for complete_rank in range(1, SIZE):
         COMM.send('finished', dest=complete_rank)

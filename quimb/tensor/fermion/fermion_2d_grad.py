@@ -112,22 +112,17 @@ def worker_execution():
 def compute_norm_col_envs_wrapper(side,norm_fname,directory,**compress_opts):
     norm = load_ftn_from_disc(norm_fname)
     fname_dict = dict()
-    term_str = directory+'_norm_'+side
-    if side == 'mid':
-        norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-        for j in range(norm.Ly):
-            fname = term_str+str(j)
-            write_ftn_to_disc(norm.select(norm.col_tag(j)).copy(),fname)
-            fname_dict['norm','mid',j] = fname
-    else: 
-        if side == 'left':
-            ftn_dict = norm.compute_left_environments(**compress_opts)
-        else:
-            ftn_dict = norm.compute_right_environments(**compress_opts)
-        for j in range(norm.Ly):
-            fname = term_str+str(j)
-            write_ftn_to_disc(ftn_dict[side,j],fname)
-            fname_dict['norm',side,j] = fname
+    term_str = directory+'_norm_'
+    if side == 'left':
+        ftn_dict = norm.compute_left_environments(**compress_opts)
+    else:
+        ftn_dict = norm.compute_right_environments(**compress_opts)
+    for (side_,j),ftn in ftn_dict.items():
+        skip = (side_=='mid') and (side=='left') and (j>0)
+        if not skip:
+            fname = term_str+side_+str(j)
+            write_ftn_to_disc(ftn,fname)
+            fname_dict['norm',side_,j] = fname
     return fname_dict
 def apply_term(info,norm_fname,directory):
     sites,typ,ops = info
@@ -156,6 +151,7 @@ def apply_term(info,norm_fname,directory):
         ket_tid,ket_site = ket.get_fermion_info()
         ftn = insert(ftn,ket_site+1,TG)
         ftn.contract_tags(ket.tags,which='all',inplace=True)
+    term_key = sites,typ
     term_str = directory+'_'+str(term_key)+'_mid'
     fname_dict = dict()
     cols = list(set([site[1] for site in sites]))
@@ -216,8 +212,8 @@ def compute_col_envs_wrapper(info,benvs,directory,**compress_opts):
     fxn = compute_left_envs_wrapper if side=='left' else \
           compute_right_envs_wrapper
     return fxn(term_key,benvs,directory,**compress_opts)
-def compute_plq_envs_wrapper(info,benvs,directory,**compress_opts):
-    term_key,j = info
+def compute_row_envs_wrapper(info,benvs,directory,**compress_opts):
+    side,term_key,j = info
     like = load_ftn_from_disc(benvs['norm','mid',0])
     Lx,Ly = like.Lx,like.Ly
     if term_key=='norm':
@@ -230,23 +226,28 @@ def compute_plq_envs_wrapper(info,benvs,directory,**compress_opts):
     r = benvs[term_key,'right',j] if j<cols[-1] else benvs['norm','right',j]
     ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in [l,m,r]]
           ).view_as_(FermionTensorNetwork2D,like=like)
-    row_envs = ftn.compute_row_environments(yrange=(max(j-1,0),min(j+1,Ly-1)),
-                                            **compress_opts)
-    term_str = directory+'_'+str(term_key)+'_'
-    plq_envs = dict()
-    for i in range(Lx):
-        ftn = FermionTensorNetwork(
-              [row_envs[side,i] for side in ['bottom','mid','top']],
-              check_collisions=False)
-        site_tag = like.site_tag(i,j)
-        fname = term_str+site_tag
-        write_ftn_to_disc(ftn,fname)
-        plq_envs[term_key,site_tag] = fname
-    return plq_envs
-def contract_plq(key,plq_envs,H):
-    term_key,site_tag = key
-    fname = plq_envs[key] 
-    ftn = load_ftn_from_disc(fname)
+    fname_dict = dict()
+    term_str = directory+'_'+str(term_key)+'_'+ftn.col_tag(j)+'_'
+    if side=='top':
+        ftn_dict = ftn.compute_top_environments(
+                   yrange=(max(j-1,0),min(j+1,Ly-1)),**compress_opts)
+    else:
+        ftn_dict = ftn.compute_bottom_environments(
+                   yrange=(max(j-1,0),min(j+1,Ly-1)),**compress_opts)
+    for (side_,i),ftn in ftn_dict.items():
+        skip = (side_=='mid') and (side=='bottom') and (i>0)
+        if not skip:
+            fname = term_str+side_+str(i)
+            write_ftn_to_disc(ftn,fname)
+            fname_dict[term_key,j,side_,i] = fname
+    return fname_dict
+def contract_plq(info,envs):
+    term_key,i,j,fac = info
+    like = load_ftn_from_disc(envs['norm',0,'mid',0])
+    ls = [envs[term_key,j,side,i] for side in ['bottom','mid','top']]
+    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls],
+          check_collisions=False)
+    site_tag = like.site_tag(i,j)
     ftn.select((site_tag,'BRA'),which='!all').add_tag('grad')
     bra = ftn[site_tag,'BRA']
     ftn.contract_tags('grad',which='any',inplace=True,
@@ -256,20 +257,18 @@ def contract_plq(key,plq_envs,H):
     bra_tid = bra.get_fermion_info()[0]
     bra = ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
     data = ftn['grad'].data
-    if term_key!='norm':
-        scal,data = scal*H[term_key][-1],data*H[term_key][-1]
-    return key,scal,data
-def compute_site_grad(site_tag,data_map):
+    return (i,j),term_key,scal*fac,data*fac
+def compute_site_grad(info):
+    site,site_data_map = info
     H0,H1 = 0.0,0.0 # scalar/tsr H
-    for (term_key,site_tag_),(scal,data) in data_map.items():
-        if site_tag_==site_tag:
-            if term_key=='norm':
-                N0,N1 = scal,data
-            else:
-                H0,H1 = H0+scal,H1+data
+    for term_key,(scal,data) in site_data_map.items():
+        if term_key=='norm':
+            N0,N1 = scal,data
+        else:
+            H0,H1 = H0+scal,H1+data
     E = H0/N0
     g = (H1-N1*E)/N0
-    return site_tag,g,E,N0
+    return site,g,E,N0
 def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -284,7 +283,7 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     write_ftn_to_disc(norm,norm_fname)
     # get norm col envs
     fxn = compute_norm_col_envs_wrapper
-    iterate_over = ['left','mid','right']
+    iterate_over = ['left','right']
     args = [norm_fname,directory]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -308,43 +307,46 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for fname_dict in ls:
         benvs.update(fname_dict)
-    # get terms & norm plq_envs
-    fxn = compute_plq_envs_wrapper
-    iterate_over = [(term_key,j) for term_key in H.keys() for j in range(Ly)]
-    iterate_over += [('norm',j) for j in range(Ly)]
+    # get terms & norm row envs
+    fxn = compute_row_envs_wrapper
+    iterate_over = [(side,term_key,j) for side in ['top','bottom']\
+                     for term_key in list(H.keys())+['norm'] for j in range(Ly)]
     args = [benvs,directory]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    plq_envs = dict()
-    for plq_envs_term in ls:
-        plq_envs.update(plq_envs_term)
+    envs = dict()
+    for fname_dict in ls:
+        envs.update(fname_dict)
     # compute components
     fxn = contract_plq
-    iterate_over = list(plq_envs.keys())
-    args = [plq_envs,H]
+    iterate_over = [(term_key,i,j,fac) for term_key,(_,fac) in H.items()\
+                     for i in range(Lx) for j in range(Ly)]
+    iterate_over += [('norm',i,j,1.0) for i in range(Lx) for j in range(Ly)] 
+    args = [envs]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     data_map = dict()
-    for (key,scal,data) in ls:
-        data_map[key] = scal,data
+    for (site,term_key,scal,data) in ls:
+        if site not in data_map:
+            data_map[site] = dict()
+        data_map[site][term_key] = scal,data
     # sum site grad
     fxn = compute_site_grad
-    iterate_over = [psi.site_tag(i,j) for i in range(Lx) for j in range(Ly)]
-    args = [data_map]
+    iterate_over = [(key,val) for key,val in data_map.items()]
+    args = []
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    site00 = psi.site_tag(0,0)
     g = dict()
-    for (site_tag,site_g,site_E,site_N) in ls:
-        g[site_tag] = site_g
-        if site_tag==site00:
+    for (site,site_g,site_E,site_N) in ls:
+        g[psi.site_tag(*site)] = site_g
+        if site==(0,0):
             E = site_E
             N = site_N
     # delete files 
     delete_ftn_from_disc(norm_fname) 
     for _,fname in benvs.items():
         delete_ftn_from_disc(fname)
-    for _,fname in plq_envs.items():
+    for _,fname in envs.items():
         delete_ftn_from_disc(fname)
     return g,E,N 
 def compute_energy_term(term_key,benvs,directory,**compress_opts):
@@ -396,8 +398,8 @@ def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
     benvs['norm','mid',0] = fname
     # get term cols
     fxn = apply_term
-    iterate_over = list(H.keys())
-    args = [H,norm_fname,directory]
+    iterate_over = [(sites,typ,ops) for (sites,typ),(ops,_) in H.items()]
+    args = [norm_fname,directory]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for fname_dict in ls:
@@ -577,25 +579,25 @@ def Hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
     return ham
 def UEG(g,N,L,Ne,symmetry='u1',flat=True,maxdist=np.inf):
     from .block_interface import creation,onsite_U,ParticleNumber
+    # parameters
     eps = L/(N+2.0) # 4th order discretization parameter
     spacing = L/(N+1.0) # spacing
     n = N2/N**2 # background charge density
-    sites = [(i,j) for i in range(N) for j in range(N)]
+    # operators
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     ann_a = cre_a.dagger
     ann_b = cre_b.dagger
     nanb = onsite_U(u=1.0,symmetry=symmetry)
     pn = ParticleNumber(spin='sum',symmetry=symmetry,flat=flat)
-    ham = dict()
     def get_onsite(site):
         # electron-charge
         fac = 0.0
         for site_ in sites:
             r = np.array(site)-np.array(site_)
             dsq = np.dot(r,r) # lattice distance square
-            fac += 1.0/np.linalg.norm(spacing*np.sqrt(dsq+1.0))
-        fac /= -n 
+            fac += 1.0/(spacing*np.sqrt(dsq+1.0))
+        fac *= -n 
         # KE
         if site in [(0,0),(0,N-1),(N-1,0),(N-1,N-1)]: # corner
             fac += 58.0/(24.0*eps**2)
@@ -618,28 +620,47 @@ def UEG(g,N,L,Ne,symmetry='u1',flat=True,maxdist=np.inf):
         dist = spacing*np.sqrt(dsq+1.0)
         if dist <= maxdist:
             fac = 1.0/dist
-            ham[sites,'ee'] = (pn.copy(),pn.copy()),fac
-        # NN
-        if dsq < 1.1:
-            fac = -16.0/(24.0*eps**2)
+            ham[sites,'lr'] = (pn.copy(),pn.copy()),fac
+        # NN or 3rd NN:
+        if abs(dsq-1.0)<1e-3: # dsq==1
+            fac,typ,include = -16.0/(24.0*eps**2),'nn',True
+        elif abs(dsq-9.0)<1e-3: # dsq==9 
+            fac,typ,include = -1.0/(24.0*eps**2),'3nn',True
+        else:
+            include = False
+        if include:
             # cre0,ann1 = (-1)**S ann1,cre0
             ops = cre_a.copy(),ann_a.copy()
             phase (-1)**(cre_a.parity*ann_a.parity)
-            ham[sites,'nn1a'] = ops,fac*phase
+            ham[sites,typ+'1a'] = ops,fac*phase
             # cre1,ann0
             ops = ann_a.copy(),cre_a.copy()
             phase = 1.0
-            ham[sites,'nn2a'] = ops,fac*phase
+            ham[sites,typ+'2a'] = ops,fac*phase
             # cre0,ann1 = (-1)**S ann1,cre0 
             ops = cre_b.copy(),ann_b.copy()
             phase = (-1)**(cre_b.parity*ann_b.parity)
-            ham[sites,'nn1b'] = ops,fac*phase
+            ham[sites,typ+'1b'] = ops,fac*phase
             # cre1,ann0
             ops = ann_b.copy(),cre_b.copy()
             phase = 1.0
-            ham[sites,'nn2b'] = ops,fac*phase
-        # 3rd-NN
-#        if 
+            ham[sites,typ+'2b'] = ops,fac*phase
+        return
+    sites = [(i,j) for i in range(N) for j in range(N)]
+    ham = dict()
+    for i in range(len(sites)):
+        get_insite(sites[i])
+        for j in range(i+1,len(sites)):
+            get_pair((sites[i],sites[j]))
+    # const
+    const = 0.0
+    for site in sites:
+        for site_ in sites:
+            r = np.array(site)-np.array(site_)
+            dsq = np.dot(r,r) # lattice distance square
+            const += 1.0/(spacing*np.sqrt(dsq+1.0))
+        const *= 0.5*n**2 
+    return ham,const
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
     from .spinless import creation
     cre = creation(symmetry=symmetry)
