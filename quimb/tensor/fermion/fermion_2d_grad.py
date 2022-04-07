@@ -13,7 +13,12 @@ from .fermion_2d_tebd import (
 )
 from .fermion_core import FermionTensor,FermionTensorNetwork
 from .fermion_2d import FermionTensorNetwork2D
-from .block_interface import Constructor
+from .block_interface import (
+    Constructor,
+    creation,
+    onsite_U,
+    ParticleNumber,
+)
 #####################################################################################
 # MPI STUFF
 #####################################################################################
@@ -109,145 +114,348 @@ def worker_execution():
                                           *args, **kwargs)
         COMM.send(results, dest=0)
 ##################################################################
-def compute_norm_col_envs_wrapper(side,norm_fname,directory,**compress_opts):
+# Hamiltonians
+##################################################################
+class UEG:
+    def __init__(self,Nx,Ny,Lx,Ly,Ne,maxdist=1000,symmetry='u1',flat=True):
+        self.Lx = Lx
+        self.Ly = Ly
+        self.Nx = Nx
+        self.Ny = Ny
+        self.max_dy = Ly if maxdist>Ly else int(maxdist)
+        self.n_dict,ke1,ee1 = self.compute_fac1()
+
+        cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
+        cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+        ann_a = cre_a.dagger
+        ann_b = cre_b.dagger
+        pn = ParticleNumber(spin='sum',symmetry=symmetry,flat=flat)
+        nanb = onsite_U(u=1.0,symmetry=symmetry)
+        onsite = pn*ke1 + nanb*ee1
+        self.op_dict = dict()
+        self.op_dict['cre_a'] = cre_a
+        self.op_dict['ann_a'] = ann_a
+        self.op_dict['cre_b'] = cre_b
+        self.op_dict['ann_b'] = ann_b
+        self.op_dict['pn'] = pn
+        self.op_dict['onsite'] = onsite
+
+        # useful 2col info
+        self._op_tags = ['cre_a','ann_a','cre_b','ann_b','pn']
+        self._sites = set()
+
+        self._1col_terms = []
+        self._2col_terms = []
+        sites = [(x,y) for y in range(Ny) for x in range(Nx)]
+        sign_a = (-1)**(cre_a.parity*ann_a.parity)
+        sign_b = (-1)**(cre_b.parity*ann_b.parity)
+        maxdist = maxdist**2
+        for i,site1 in enumerate(sites):
+            self._1col_terms.append(([site1],['onsite'],1.0))
+            x1,y1 = site1
+            for j in range(i+1,len(sites)):
+                site2 = sites[j]
+                x2,y2 = site2
+                if (x1-x2)**2+(y1-y2)**2<=maxdist:
+                    assert y1<=y2
+                    if y1==y2:
+                        assert x1<x2
+                    ke2,ee2 = self.compute_fac2(site1,site2)
+                    where = site1,site2
+
+                    tmp = [(where,['cre_a','ann_a'],ke2*sign_a),\
+                           (where,['ann_a','cre_a'],ke2),\
+                           (where,['cre_b','ann_b'],ke2*sign_b),\
+                           (where,['ann_b','cre_b'],ke2),\
+                           (where,['pn','pn'],ee2)]
+                    if y1==y2:
+                        self._1col_terms += tmp
+                    else:
+                        self._2col_terms += tmp
+                        self._sites.update({site1,site2})
+
+#                        lix_old = self._ix_dict[y1]['left']
+#                        lix = y2 if lix_old is None else max(lix_old,y2)
+#                        self._ix_dict[y1]['left'] = lix
+#
+#                        rix_old = self._ix_dict[y2]['right']
+#                        rix = y1 if rix_old is None else min(rix_old,y1)
+#                        self._ix_dict[y2]['right'] = rix
+        self._sites = list(self._sites)
+#        for y in self._ix_dict:
+#            print(y,self._ix_dict[y])
+#        exit()
+        print('number of 1 col terms=',len(self._1col_terms))
+        print('number of 2 col terms=',len(self._2col_terms))
+    def compute_fac1(self):
+        imax = self.Nx//2
+        jmax = self.Ny//2
+        n_dict = dict()
+        for nx in range(-imax,-imax+self.Nx):
+            for ny in range(-jmax,-jmax+self.Ny):
+                kn = 2.0*np.pi*np.array([nx/self.Lx,ny/self.Ly])
+                normsq = np.dot(kn,kn)
+                norm = np.sqrt(normsq)
+                n_dict[nx,ny] = {'k':kn,'norm':norm,'normsq':normsq}
+        print('imax={},jmax={}'.format(imax,jmax))
+        print('number of plane waves=',len(n_dict))
+        # kinetic onsite prefactor
+        ke1 = 0.0
+        for kn_dict in n_dict.values():
+            ke1 += kn_dict['normsq']
+        ke1 /= 2.0*len(n_dict)
+        # e-e onsite prefactor
+        ee1 = 0.0
+        for (nx,ny),kn_dict in n_dict.items():
+            if not (nx==0 and ny==0):
+                ee1 += 1.0/kn_dict['norm']
+        ee1 *= 2.0*2.0*np.pi/(self.Lx*self.Ly)
+        return n_dict,ke1,ee1
+    def compute_fac2(self,site1,site2):
+        (x1,y1),(x2,y2) = site1,site2
+        dx,dy = x1-x2,y1-y2
+        r = np.array([dx*self.Lx/self.Nx,dy*self.Ly/self.Ny])
+        for key in self.n_dict:
+            kn_dict = self.n_dict[key]
+            kn_dict['cos'] = np.cos(np.dot(kn_dict['k'],r))
+        # kinetic
+        ke2 = 0.0
+        for kn_dict in self.n_dict.values():
+            ke2 += kn_dict['normsq']*kn_dict['cos']
+        ke2 /= 2.0*len(self.n_dict) 
+        # e-e
+        ee2 = 0.0
+        for (nx,ny),kn_dict in self.n_dict.items():
+            if not (nx==0 and ny==0):
+                ee2 += kn_dict['cos']/kn_dict['norm']
+        ee2 *= 2.0*2.0*np.pi/(self.Lx*self.Ly)
+        return ke2,ee2
+#############################################################
+# gradient functions
+#############################################################
+def _norm_benvs(side_,norm_fname,directory,**compress_opts):
     norm = load_ftn_from_disc(norm_fname)
-    fname_dict = dict()
-    term_str = directory+'_norm_'
-    if side == 'left':
+    if side_ == 'left':
         ftn_dict = norm.compute_left_environments(**compress_opts)
     else:
         ftn_dict = norm.compute_right_environments(**compress_opts)
-    for (side_,j),ftn in ftn_dict.items():
-        skip = (side_=='mid') and (side=='left') and (j>0)
+    fname_dict = dict()
+    str_ = directory+'_norm_'
+    for (side,j),ftn in ftn_dict.items():
+        skip = (side_=='left') and (side=='mid') and (j>0)
         if not skip:
-            fname = term_str+side_+str(j)
+            fname = str_+side+str(j)
             write_ftn_to_disc(ftn,fname)
-            fname_dict['norm',side_,j] = fname
+            fname_dict['norm',side,j] = fname
     return fname_dict
-def apply_term(info,norm_fname,directory):
-    sites,typ,ops = info
+def _1col_mid(info,op_dict,norm_fname,directory):
+    op_tags,xs,y = info
     ftn = load_ftn_from_disc(norm_fname)
 
     N = ftn.num_tensors//2
     site_range = (N,max(ftn.fermion_space.sites)+1)
     tsrs = []
-    for op,site in zip(ops,sites):
-        ket = ftn[ftn.site_tag(*site),'KET']
+    for op_tag,x in zip(op_tags,xs):
+        ket = ftn[ftn.site_tag(x,y),'KET']
         pix = ket.inds[-1]
-        TG = FermionTensor(op.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
-                           tags=ket.tags)
+        TG = FermionTensor(op_dict[op_tag].copy(),inds=(pix,pix+'_'),
+                           left_inds=(pix,),tags=ket.tags)
         tsrs.append(ftn.fermion_space.move_past(TG,site_range))
 
     ftn.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    for TG,site in zip(tsrs,sites):
-        bra = ftn[ftn.site_tag(*site),'BRA']
+    for TG,x in zip(tsrs,xs):
+        bra = ftn[ftn.site_tag(x,y),'BRA']
         bra_tid,bra_site = bra.get_fermion_info()
         site_range = (bra_site,max(ftn.fermion_space.sites)+1)
         TG = ftn.fermion_space.move_past(TG,site_range)
 
-        ket = ftn[ftn.site_tag(*site),'KET']
+        ket = ftn[ftn.site_tag(x,y),'KET']
         pix = ket.inds[-1]
         ket.reindex_({pix:pix+'_'})
         ket_tid,ket_site = ket.get_fermion_info()
         ftn = insert(ftn,ket_site+1,TG)
         ftn.contract_tags(ket.tags,which='all',inplace=True)
-    term_key = sites,typ
-    term_str = directory+'_'+str(term_key)+'_mid'
-    fname_dict = dict()
-    cols = list(set([site[1] for site in sites]))
-    for j in cols:
-        fname = term_str+str(j)
-        write_ftn_to_disc(ftn.select(ftn.col_tag(j)).copy(),fname)
-        fname_dict[term_key,'mid',j] = fname
-    return fname_dict
-def compute_left_envs_wrapper(term_key,benvs,directory,**compress_opts):
-    cols = list(set([site[1] for site in term_key[0]]))
-    cols.sort()
-    like = load_ftn_from_disc(benvs['norm','mid',0])
-    Lx,Ly = like.Lx,like.Ly
-    fname_dict = dict()
-    if cols[0]<Ly-1:
-        ls = [benvs['norm','left',cols[0]]]
-        for idx,j1 in enumerate(cols):
-            j2 = Ly if idx==len(cols)-1 else cols[idx+1]
-            ls += [benvs[term_key,'mid',j1]]
-            ls += [benvs['norm','mid',j] for j in range(j1+1,j2)]
-        ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
-              ).view_as_(FermionTensorNetwork2D,like=like)
-        jmin = max(cols[0]-1,0)
-        ftn_dict = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
 
-        term_str = directory+'_'+str(term_key)+'_left' 
-        for j in range(cols[0]+1,Ly):
-            fname = term_str+str(j)
+    op_tags = '_'.join([op_tag+'{},{}'.format(x,y) for op_tag,x in zip(op_tags,xs)])
+    fname = '_'.join([directory,op_tags,'mid{}'.format(y)])
+    write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),fname)
+    return {(op_tags,'mid',y):fname}
+def _1col_left(info,benvs,directory,Ly,**compress_opts):
+    op_tags,xs,y,ix = info
+    fname_dict = dict()
+    if y<Ly-1:
+        op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                            for op_tag,x in zip(op_tags,xs)])
+        ls = [benvs['norm','left',y],benvs[op_tags,'mid',y]]
+        ls += [benvs['norm','mid',j] for j in range(y+1,ix+1)]
+        ls = [load_ftn_from_disc(fname) for fname in ls]
+        like = ls[0] if ls[0].num_tensors>0 else ls[1]
+        ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+
+        str_ = '_'.join([directory,op_tags,'left'])
+        first_col = ftn.col_tag(0)
+        if y==0:
+            j = y+1
+            fname = str_+str(j)
+            write_ftn_to_disc(ftn.select(first_col).copy(),fname)
+            fname_dict[op_tags,'left',j] = fname
+            j0 = y+2
+        else:
+            j0 = y+1
+        for j in range(j0,ix+1):
+            ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),
+                                             **compress_opts) 
+
+            fname = str_+str(j)
+            write_ftn_to_disc(ftn.select(first_col).copy(),fname)
+            fname_dict[op_tags,'left',j] = fname
+    return fname_dict
+def _1col_right(info,benvs,directory,Ly,**compress_opts):
+    op_tags,xs,y,ix = info
+    fname_dict = dict()
+    if y>0:
+        op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                            for op_tag,x in zip(op_tags,xs)])
+        ls = [benvs['norm','mid',j] for j in range(ix,y)]
+        ls += [benvs[op_tags,'mid',y],benvs['norm','right',y]]
+        ls = [load_ftn_from_disc(fname) for fname in ls]
+        like = ls[0] if ls[0].num_tensors>0 else ls[1]
+        ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+
+        last_col = ftn.col_tag(Ly-1)
+        str_ = '_'.join([directory,op_tags,'right']) 
+        if y==Ly-1:
+            j = y-1
+            fname = str_+str(j)
+            write_ftn_to_disc(ftn.select(last_col).copy(),fname)
+            fname_dict[op_tags,'right',j] = fname
+            j0 = y-2
+        else:
+            j0 = y-1
+        for j in range(j0,ix-1,-1):
+            ftn.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,ftn.Lx-1),
+                                             **compress_opts) 
+            fname = str_+str(j)
+            write_ftn_to_disc(ftn.select(last_col).copy(),fname)
+            fname_dict[op_tags,'right',j] = fname
+    return fname_dict
+def _1col_benvs(info,benvs,directory,Ly,**compress_opts):
+    fxn = _1col_left if info[0]=='left' else _1col_right
+    return fxn(info[1:],benvs,directory,Ly,**compress_opts)
+def _2col_left(info,benvs,directory,Ly,**compress_opts):
+    [op_tag1,op_tag2],[(x1,y1),(x2,y2)] = info
+    op_tag1 += '{},{}'.format(x1,y1)
+    op_tag2 += '{},{}'.format(x2,y2)
+    ls = [benvs[op_tag1,'left',y2],benvs[op_tag2,'mid',y2]]
+    ls += [benvs['norm','mid',j] for j in range(y2+1,Ly)]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    jmin = max(y2-1,0)
+    ftn_dict = ftn.compute_left_environments(yrange=(jmin,Ly-1),**compress_opts) 
+
+    fname_dict = dict()
+    op_tags = '_'.join([op_tag1,op_tag2])
+    str_ = '_'.join([directory,op_tags,'left']) 
+    for (side,j),ftn in ftn_dict.items():
+        if (side=='left') and (j>y2):
+            fname = str_+str(j)
             write_ftn_to_disc(ftn_dict['left',j],fname)
-            fname_dict[term_key,'left',j] = fname
+            fname_dict[op_tags,'left',j] = fname
     return fname_dict
-def compute_right_envs_wrapper(term_key,benvs,directory,**compress_opts): 
-    cols = list(set([site[1] for site in term_key[0]]))
-    cols.sort()
-    fname_dict = dict()
-    if cols[-1]>0:
-        like = load_ftn_from_disc(benvs['norm','mid',0])
-        Lx,Ly = like.Lx,like.Ly
-        ls = []
-        for idx,j2 in enumerate(cols):
-            j1 = -1 if idx==0 else cols[idx-1]
-            ls += [benvs['norm','mid',j] for j in range(j1+1,j2)]
-            ls += [benvs[term_key,'mid',j2]]
-        ls += [benvs['norm','right',cols[-1]]]
-        ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls]
-              ).view_as_(FermionTensorNetwork2D,like=like)
-        jmax = min(cols[-1]+1,Ly-1)
-        ftn_dict = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts)
+def _2col_right(info,benvs,directory,Ly,**compress_opts):
+    [op_tag1,op_tag2],[(x1,y1),(x2,y2)] = info
+    op_tag1 += '{},{}'.format(x1,y1)
+    op_tag2 += '{},{}'.format(x2,y2)
+    ls = [benvs['norm','mid',j] for j in range(y1)]
+    ls += [benvs[op_tag1,'mid',y1],benvs[op_tag2,'right',y1]]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    jmax = min(y1+1,Ly-1)
+    ftn_dict = ftn.compute_right_environments(yrange=(0,jmax),**compress_opts) 
 
-        term_str = directory+'_'+str(term_key)+'_right' 
-        for j in range(cols[-1]):
-            fname = term_str+str(j)
-            write_ftn_to_disc(ftn_dict['right',j],fname)
-            fname_dict[term_key,'right',j] = fname
-    return fname_dict
-def compute_col_envs_wrapper(info,benvs,directory,**compress_opts):
-    side,term_key = info
-    fxn = compute_left_envs_wrapper if side=='left' else \
-          compute_right_envs_wrapper
-    return fxn(term_key,benvs,directory,**compress_opts)
-def compute_row_envs_wrapper(info,benvs,directory,**compress_opts):
-    side,term_key,j = info
-    like = load_ftn_from_disc(benvs['norm','mid',0])
-    Lx,Ly = like.Lx,like.Ly
-    if term_key=='norm':
-        cols = [j]
-    else:
-        cols = list(set([site[1] for site in term_key[0]]))
-        cols.sort()
-    l = benvs[term_key,'left',j] if j>cols[0] else benvs['norm','left',j]
-    m = benvs[term_key,'mid',j] if j in cols else benvs['norm','mid',j]
-    r = benvs[term_key,'right',j] if j<cols[-1] else benvs['norm','right',j]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in [l,m,r]]
-          ).view_as_(FermionTensorNetwork2D,like=like)
     fname_dict = dict()
-    term_str = directory+'_'+str(term_key)+'_'+ftn.col_tag(j)+'_'
-    if side=='top':
+    op_tags = '_'.join([op_tag1,op_tag2])
+    str_ = '_'.join([directory,op_tags,'right']) 
+    for (side,j),ftn in ftn_dict.items():
+        if (side=='right') and (j<y1):
+            fname = str_+str(j)
+            write_ftn_to_disc(ftn_dict['right',j],fname)
+            fname_dict[op_tags,'right',j] = fname
+    return fname_dict
+def _2col_benvs(info,benvs,directory,Ly,**compress_opts):
+    fxn = _2col_left if info[0]=='left' else _2col_right
+    return fxn(info[1:],benvs,directory,Ly,**compress_opts)
+def _row_envs(info,benvs,directory,**compress_opts):
+    side_,op_tags,sites,j = info
+    if sites is None: # norm term
+        ls = [benvs['norm',side,j] for side in ['left','mid','right']]
+    else: # H terms
+        if (len(sites)==2) and (sites[0][1]<sites[1][1]): # 2col terms 
+            op_tag1,op_tag2 = op_tags
+            (x1,y1),(x2,y2) = sites
+            op_tag1 += '{},{}'.format(x1,y1)
+            op_tag2 += '{},{}'.format(x2,y2)
+            op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                                for op_tag,(x,y) in zip(op_tags,sites)])
+            if j<y1:
+                ls = benvs['norm','left',j],benvs['norm','mid',j],\
+                     benvs[op_tags,'right',j]
+            elif j==y1:
+                ls = benvs['norm','left',j],benvs[op_tag1,'mid',j],\
+                     benvs[op_tag2,'right',j]
+            elif j<y2:
+                ls = benvs[op_tag1,'left',j],benvs['norm','mid',j],\
+                     benvs[op_tag2,'right',j]
+            elif j==y2:
+                ls = benvs[op_tag1,'left',j],benvs[op_tag2,'mid',j],\
+                     benvs['norm','right',j]
+            else: # j>y2
+                ls = benvs[op_tags,'left',j],benvs['norm','mid',j],\
+                     benvs['norm','right',j]
+        else: # 1col terms
+            y = sites[0][1]
+            op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                                for op_tag,(x,y) in zip(op_tags,sites)])
+            if j<y:
+                ls = benvs['norm','left',j],benvs['norm','mid',j],\
+                     benvs[op_tags,'right',j]
+            elif j==y:
+                ls = benvs['norm','left',j],benvs[op_tags,'mid',j],\
+                     benvs['norm','right',j]
+            else: # j>y
+                ls = benvs[op_tags,'left',j],benvs['norm','mid',j],\
+                     benvs['norm','right',j]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    if side_=='top':
         ftn_dict = ftn.compute_top_environments(
-                   yrange=(max(j-1,0),min(j+1,Ly-1)),**compress_opts)
+                   yrange=(max(j-1,0),min(j+1,ftn.Ly-1)),**compress_opts)
     else:
         ftn_dict = ftn.compute_bottom_environments(
-                   yrange=(max(j-1,0),min(j+1,Ly-1)),**compress_opts)
-    for (side_,i),ftn in ftn_dict.items():
-        skip = (side_=='mid') and (side=='bottom') and (i>0)
+                   yrange=(max(j-1,0),min(j+1,ftn.Ly-1)),**compress_opts)
+
+    fname_dict = dict()
+    str_ = '_'.join([directory,op_tags,ftn.col_tag(j)])
+    for (side,i),ftn in ftn_dict.items():
+        skip = (side_=='bottom') and (side=='mid') and (i>0)
         if not skip:
-            fname = term_str+side_+str(i)
+            fname = str_+side+str(i)
             write_ftn_to_disc(ftn,fname)
-            fname_dict[term_key,j,side_,i] = fname
+            fname_dict[op_tags,j,side,i] = fname
     return fname_dict
-def contract_plq(info,envs):
-    term_key,i,j,fac = info
-    like = load_ftn_from_disc(envs['norm',0,'mid',0])
-    ls = [envs[term_key,j,side,i] for side in ['bottom','mid','top']]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in ls],
-          check_collisions=False)
-    site_tag = like.site_tag(i,j)
+def _contract_plq(info,envs):
+    op_tags,sites,i,j,fac = info
+    if sites is not None:
+        op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                            for op_tag,(x,y) in zip(op_tags,sites)])
+    ls = [envs[op_tags,j,side,i] for side in ['bottom','mid','top']]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    site_tag = ftn.site_tag(i,j)
     ftn.select((site_tag,'BRA'),which='!all').add_tag('grad')
     bra = ftn[site_tag,'BRA']
     ftn.contract_tags('grad',which='any',inplace=True,
@@ -257,8 +465,8 @@ def contract_plq(info,envs):
     bra_tid = bra.get_fermion_info()[0]
     bra = ftn._pop_tensor(bra_tid,remove_from_fermion_space='end')
     data = ftn['grad'].data
-    return (i,j),term_key,scal*fac,data*fac
-def compute_site_grad(info):
+    return (i,j),op_tags,scal*fac,data*fac
+def _site_grad(info):
     site,site_data_map = info
     H0,H1 = 0.0,0.0 # scalar/tsr H
     for term_key,(scal,data) in site_data_map.items():
@@ -281,8 +489,8 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm_fname = directory+'_norm'
     write_ftn_to_disc(norm,norm_fname)
-    # get norm col envs
-    fxn = compute_norm_col_envs_wrapper
+
+    fxn = _norm_benvs
     iterate_over = ['left','right']
     args = [norm_fname,directory]
     kwargs = compress_opts
@@ -290,38 +498,59 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
     benvs = dict()
     for fname_dict in ls:
         benvs.update(fname_dict)
-    # get term mid col envs
-    fxn = apply_term
-    iterate_over = [(sites,typ,ops) for (sites,typ),(ops,_) in H.items()] 
-    args = [norm_fname,directory]
+
+    fxn = _1col_mid
+    ls1 = [(op_tags,[x for (x,_) in sites],sites[0][1]) \
+           for (sites,op_tags,_) in H._1col_terms]
+    ls2 = [([op_tag],[x],y) for op_tag in H._op_tags for (x,y) in H._sites]
+    iterate_over = ls1 + ls2 
+    args = [H.op_dict,norm_fname,directory]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for fname_dict in ls:
         benvs.update(fname_dict)
-    # get terms l&r col envs
-    fxn = compute_col_envs_wrapper
-    iterate_over = [(side,term_key) for side in ['left','right'] \
-                    for term_key in H.keys()]
-    args = [benvs,directory]
+
+    fxn = _1col_benvs
+    ix_dict = {'left':Ly-1,'right':0}
+    ls1 = [(side,op_tags,xs,y,ix_dict[side]) for side in ['left','right']\
+           for (op_tags,xs,y) in ls1]
+    ls2_ = [('left',op_tags,xs,y,min(Ly-1,y+H.max_dy)) for (op_tags,xs,y) in ls2]
+    ls2_ += [('right',op_tags,xs,y,max(0,y-H.max_dy)) for (op_tags,xs,y) in ls2]
+    iterate_over = ls1 + ls2_ 
+    args = [benvs,directory,Ly]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for fname_dict in ls:
         benvs.update(fname_dict)
-    # get terms & norm row envs
-    fxn = compute_row_envs_wrapper
-    iterate_over = [(side,term_key,j) for side in ['top','bottom']\
-                     for term_key in list(H.keys())+['norm'] for j in range(Ly)]
+
+    fxn = _2col_benvs
+    iterate_over = [(side,op_tags,sites) for (sites,op_tags,_) in H._2col_terms\
+                    for side in ['left','right']]
+    args = [benvs,directory,Ly]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
+
+    fxn = _row_envs
+    iterate_over = [(side,op_tags,sites,j) \
+                     for side in ['top','bottom'] for j in range(Ly)\
+                     for (sites,op_tags,_) in H._1col_terms + H._2col_terms ]
+    iterate_over += [(side,'norm',None,j) for side in ['top','bottom']\
+                     for j in range(Ly)]
     args = [benvs,directory]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     envs = dict()
     for fname_dict in ls:
         envs.update(fname_dict)
-    # compute components
-    fxn = contract_plq
-    iterate_over = [(term_key,i,j,fac) for term_key,(_,fac) in H.items()\
+
+    fxn = _contract_plq
+    iterate_over = []
+    iterate_over = [(op_tags,sites,i,j,fac) \
+                     for (sites,op_tags,fac) in H._1col_terms + H._2col_terms \
                      for i in range(Lx) for j in range(Ly)]
-    iterate_over += [('norm',i,j,1.0) for i in range(Lx) for j in range(Ly)] 
+    iterate_over += [('norm',None,i,j,1.0) for i in range(Lx) for j in range(Ly)] 
     args = [envs]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -330,8 +559,8 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
         if site not in data_map:
             data_map[site] = dict()
         data_map[site][term_key] = scal,data
-    # sum site grad
-    fxn = compute_site_grad
+
+    fxn = _site_grad
     iterate_over = [(key,val) for key,val in data_map.items()]
     args = []
     kwargs = dict()
@@ -342,36 +571,54 @@ def compute_grad(H,psi,directory,layer_tags=('KET','BRA'),
         if site==(0,0):
             E = site_E
             N = site_N
-    # delete files 
+
     delete_ftn_from_disc(norm_fname) 
     for _,fname in benvs.items():
         delete_ftn_from_disc(fname)
     for _,fname in envs.items():
         delete_ftn_from_disc(fname)
     return g,E,N 
-def compute_energy_term(term_key,benvs,directory,**compress_opts):
-    like = load_ftn_from_disc(benvs['norm','mid',0])
-    Lx,Ly = like.Lx,like.Ly
-    if term_key=='norm':
-        m,r = [benvs['norm',side,0] for side in ['mid','right']]
-    else:
-        right_envs = compute_right_envs_wrapper(term_key,benvs,directory,
-                                                **compress_opts) 
-        cols = list(set([site[1] for site in term_key[0]]))
-        term = term_key if min(cols)==0 else 'norm' 
-        m = benvs[term_key,'mid',0] if 0 in cols else benvs['norm','mid',0]
-        r = right_envs[term_key,'right',0] if cols[-1]>0 else \
-            benvs['norm','right',0]
-    ftn = FermionTensorNetwork([load_ftn_from_disc(fname) for fname in [m,r]]
-          ).view_as_(FermionTensorNetwork2D,like=like)
+def _energy_term(info,benvs,**compress_opts):
+    sites,op_tags,fac = info
+    j = 0 
+    if sites is None: # norm term
+        ls = [benvs['norm',side,j] for side in ['mid','right']]
+    else: # H terms
+        if (len(sites)==2) and (sites[0][1]<sites[1][1]): # 2col terms 
+            op_tag1,op_tag2 = op_tags
+            (x1,y1),(x2,y2) = sites
+            op_tag1 += '{},{}'.format(x1,y1)
+            op_tag2 += '{},{}'.format(x2,y2)
+            op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                                for op_tag,(x,y) in zip(op_tags,sites)])
+            if j<y1:
+                ls = benvs['norm','mid',j],benvs[op_tags,'right',j]
+            elif j==y1:
+                ls = benvs[op_tag1,'mid',j],benvs[op_tag2,'right',j]
+            elif j<y2:
+                ls = benvs['norm','mid',j],benvs[op_tag2,'right',j]
+            elif j==y2:
+                ls = benvs[op_tag2,'mid',j],benvs['norm','right',j]
+            else: # j>y2
+                ls = benvs['norm','mid',j],benvs['norm','right',j]
+        else: # 1col terms
+            y = sites[0][1]
+            op_tags = '_'.join([op_tag+'{},{}'.format(x,y) \
+                                for op_tag,(x,y) in zip(op_tags,sites)])
+            if j<y:
+                ls = benvs['norm','mid',j],benvs[op_tags,'right',j]
+            elif j==y:
+                ls = benvs[op_tags,'mid',j],benvs['norm','right',j]
+            else: # j>y
+                ls = benvs['norm','mid',j],benvs['norm','right',j]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
     ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
     top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
     ftn = FermionTensorNetwork(
           (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
-    if term_key!='norm':
-        for _,fname in right_envs.items():
-            delete_ftn_from_disc(fname)
-    return term_key,ftn.contract()
+    return op_tags,ftn.contract()*fac
 def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -384,7 +631,7 @@ def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm_fname = directory+'_norm'
     write_ftn_to_disc(norm,norm_fname)
-    # get norm col envs
+
     ftn_dict = norm.compute_right_environments(**compress_opts)
     benvs = dict()
     for (side,j),ftn in ftn_dict.items():
@@ -396,18 +643,39 @@ def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
     fname = directory+'_norm_mid0'
     write_ftn_to_disc(ftn,fname)
     benvs['norm','mid',0] = fname
-    # get term cols
-    fxn = apply_term
-    iterate_over = [(sites,typ,ops) for (sites,typ),(ops,_) in H.items()]
-    args = [norm_fname,directory]
+
+    fxn = _1col_mid
+    ls1 = [(op_tags,[x for (x,_) in sites],sites[0][1]) \
+           for (sites,op_tags,_) in H._1col_terms]
+    ls2 = [([op_tag],[x],y) for op_tag in H._op_tags for (x,y) in H._sites]
+    iterate_over = ls1 + ls2 
+    args = [H.op_dict,norm_fname,directory]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for fname_dict in ls:
         benvs.update(fname_dict)
-    # compute energy numerator  
-    fxn = compute_energy_term
-    iterate_over = list(H.keys())+['norm'] 
-    args = [benvs,directory]
+
+    fxn = _1col_right
+    ls1 = [(op_tags,xs,y,0) for (op_tags,xs,y) in ls1]
+    ls2 = [(op_tags,xs,y,max(0,y-H.max_dy)) for (op_tags,xs,y) in ls2]
+    iterate_over = ls1 + ls2 
+    args = [benvs,directory,Ly]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
+
+    fxn = _2col_right
+    iterate_over = [(op_tags,sites) for (sites,op_tags,_) in H._2col_terms]
+    args = [benvs,directory,Ly]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for fname_dict in ls:
+        benvs.update(fname_dict)
+
+    fxn = _energy_term
+    iterate_over =  H._1col_terms + H._2col_terms + [(None,'norm',1.0)]
+    args = [benvs]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     E = 0.0
@@ -415,13 +683,12 @@ def compute_energy(H,psi,directory,layer_tags=('KET','BRA'),
         if term_key=='norm':
             N = scal
         else:
-            E += scal*H[term_key][-1]
-    E /= N
-    # delete files
+            E += scal
+
     delete_ftn_from_disc(norm_fname) 
     for _,fname in benvs.items():
         delete_ftn_from_disc(fname) 
-    return E,N
+    return E/N,N
 def compute_norm(psi,layer_tags=('KET','BRA'),
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -434,7 +701,6 @@ def compute_norm(psi,layer_tags=('KET','BRA'),
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
     ftn_dict = norm.compute_right_environments(**compress_opts)
-
     ftn = FermionTensorNetwork(
           (norm.select(norm.col_tag(0)).copy(),ftn_dict['right',0])
           ).view_as_(FermionTensorNetwork2D,like=norm)
@@ -483,11 +749,10 @@ class GlobalGrad():
         start = 0
         for i in range(psi.Lx):
             for j in range(psi.Ly):
-                site_tag = psi.site_tag(i,j) 
-                ket = psi[site_tag]
-                stop = start+len(ket.data.data)
+                site_tag = psi.site_tag(i,j)
                 cons,dq = self.constructors[site_tag]
-                ket.modify(data=cons.vector_to_tensor(x[start:stop],dq))
+                stop = int(start+cons.get_info(dq)[-1][-1]+1e-6)
+                psi[site_tag].modify(data=cons.vector_to_tensor(x[start:stop],dq))
                 start = stop
         return psi
     def compute_energy(self,x):
@@ -538,153 +803,3 @@ class GlobalGrad():
                  method=method,x0=x0,
                  callback=self.callback,options=options)
         return
-############## Hamiltonians ##############################
-def Hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
-    from .block_interface import creation,onsite_U
-    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-    ann_a = cre_a.dagger
-    ann_b = cre_b.dagger
-    nanb = onsite_U(u=1.0,symmetry=symmetry)
-    ham = dict()
-    def get_on_site(site):
-        ham[(site,),'u'] = (nanb.copy(),),u
-        return
-    def get_hopping(sites):
-        # cre0,ann1 = (-1)**S ann1,cre0 
-        ops = cre_a.copy(),ann_a.copy()
-        phase = (-1)**(cre_a.parity*ann_a.parity)
-        ham[sites,'t1a'] = ops,-t*phase
-        # cre1,ann0
-        ops = ann_a.copy(),cre_a.copy()
-        phase = 1.0
-        ham[sites,'t2a'] = ops,-t*phase
-        # cre0,ann1 = (-1)**S ann1,cre0 
-        ops = cre_b.copy(),ann_b.copy()
-        phase = (-1)**(cre_b.parity*ann_b.parity)
-        ham[sites,'t1b'] = ops,-t*phase
-        # cre1,ann0
-        ops = ann_b.copy(),cre_b.copy()
-        phase = 1.0
-        ham[sites,'t2b'] = ops,-t*phase
-        return
-    ham = dict()
-    for i in range(Lx):
-        for j in range(Ly):
-            get_on_site((i,j))
-            if i+1 != Lx:
-                get_hopping(((i,j),(i+1,j)))
-            if j+1 != Ly:
-                get_hopping(((i,j),(i,j+1)))
-    return ham
-def UEG(g,N,L,Ne,symmetry='u1',flat=True,maxdist=np.inf):
-    from .block_interface import creation,onsite_U,ParticleNumber
-    # parameters
-    eps = L/(N+2.0) # 4th order discretization parameter
-    spacing = L/(N+1.0) # spacing
-    n = N2/N**2 # background charge density
-    # operators
-    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-    ann_a = cre_a.dagger
-    ann_b = cre_b.dagger
-    nanb = onsite_U(u=1.0,symmetry=symmetry)
-    pn = ParticleNumber(spin='sum',symmetry=symmetry,flat=flat)
-    def get_onsite(site):
-        # electron-charge
-        fac = 0.0
-        for site_ in sites:
-            r = np.array(site)-np.array(site_)
-            dsq = np.dot(r,r) # lattice distance square
-            fac += 1.0/(spacing*np.sqrt(dsq+1.0))
-        fac *= -n 
-        # KE
-        if site in [(0,0),(0,N-1),(N-1,0),(N-1,N-1)]: # corner
-            fac += 58.0/(24.0*eps**2)
-        elif (site[0] in [0,N-1]) or (site[1] in [0,N-1]): # border
-            fac += 59.0/(24.0*eps**2)
-        else:
-            fac += 60.0/(24.0*eps**2) # bulk
-        op = fac*pn
-        # onsite e-e
-        op = op + 1.0/spacing*nanb
-        ham[(site,),'onsite'] = (op,),1.0
-        return
-    def get_pair(sites):
-        site0,site1 = sites
-        assert site0[0]<=site1[0]
-        assert site0[1]<=site1[1]
-        # electron-electron
-        r = np.array(site0)-np.array(site1)
-        dsq = np.dot(r,r) # lattice distance square
-        dist = spacing*np.sqrt(dsq+1.0)
-        if dist <= maxdist:
-            fac = 1.0/dist
-            ham[sites,'lr'] = (pn.copy(),pn.copy()),fac
-        # NN or 3rd NN:
-        if abs(dsq-1.0)<1e-3: # dsq==1
-            fac,typ,include = -16.0/(24.0*eps**2),'nn',True
-        elif abs(dsq-9.0)<1e-3: # dsq==9 
-            fac,typ,include = -1.0/(24.0*eps**2),'3nn',True
-        else:
-            include = False
-        if include:
-            # cre0,ann1 = (-1)**S ann1,cre0
-            ops = cre_a.copy(),ann_a.copy()
-            phase (-1)**(cre_a.parity*ann_a.parity)
-            ham[sites,typ+'1a'] = ops,fac*phase
-            # cre1,ann0
-            ops = ann_a.copy(),cre_a.copy()
-            phase = 1.0
-            ham[sites,typ+'2a'] = ops,fac*phase
-            # cre0,ann1 = (-1)**S ann1,cre0 
-            ops = cre_b.copy(),ann_b.copy()
-            phase = (-1)**(cre_b.parity*ann_b.parity)
-            ham[sites,typ+'1b'] = ops,fac*phase
-            # cre1,ann0
-            ops = ann_b.copy(),cre_b.copy()
-            phase = 1.0
-            ham[sites,typ+'2b'] = ops,fac*phase
-        return
-    sites = [(i,j) for i in range(N) for j in range(N)]
-    ham = dict()
-    for i in range(len(sites)):
-        get_insite(sites[i])
-        for j in range(i+1,len(sites)):
-            get_pair((sites[i],sites[j]))
-    # const
-    const = 0.0
-    for site in sites:
-        for site_ in sites:
-            r = np.array(site)-np.array(site_)
-            dsq = np.dot(r,r) # lattice distance square
-            const += 1.0/(spacing*np.sqrt(dsq+1.0))
-        const *= 0.5*n**2 
-    return ham,const
-def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
-    from .spinless import creation
-    cre = creation(symmetry=symmetry)
-    ann = cre.dagger
-    pn = np.tensordot(cre,ann,axes=((1,),(0,)))
-    def get_terms(sites):
-        # cre0,ann1 = (-1)**S ann1,cre0 
-        ops = cre.copy(),ann.copy()
-        phase = (-1)**(cre.parity*ann.parity)
-        ham[sites,'t1'] = ops,-t*phase
-        # cre1,ann0
-        ops = ann.copy(),cre.copy()
-        phase = 1.0
-        ham[sites,'t2'] = ops,-t*phase
-        # pn1,pn2
-        ops = pn.copy(),pn.copy()
-        phase = 1.0
-        ham[sites,'v'] = ops,v*phase
-        return 
-    ham = dict()
-    for i in range(Lx):
-        for j in range(Ly):
-            if i+1 != Lx:
-                get_terms(((i,j),(i+1,j)))
-            if j+1 != Ly:
-                get_terms(((i,j),(i,j+1)))
-    return ham

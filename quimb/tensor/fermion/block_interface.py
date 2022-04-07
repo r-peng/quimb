@@ -56,3 +56,5 @@ measure_SZ = fermion_ops.measure_SZ
 ParticleNumber = fermion_ops.ParticleNumber
 creation = fermion_ops.creation
 annihilation = fermion_ops.annihilation
+ueg = fermion_ops.ueg
+ueg1 = fermion_ops.ueg1

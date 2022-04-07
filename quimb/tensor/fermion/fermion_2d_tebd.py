@@ -31,7 +31,7 @@ from ..tensor_2d import (
     PEPS
 )
 
-from .block_interface import eye, Hubbard
+from .block_interface import eye, Hubbard, ueg, ueg1
 from . import block_tools
 from .fermion_core import (
     _get_gauge_location,
@@ -211,6 +211,90 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
             ham[where] = uop
     return LocalHam2D(Lx, Ly, ham)
+
+def UEG2D(Nx, Ny, Lx, Ly, mu=0., symmetry=None):
+    """Create a LocalHam2D object for 2D UEG Model in plane wave dual basis
+
+    Parameters
+    ----------
+    Nx : int
+        number of grid in x 
+    Ny : int
+        number of grid in y
+    Lx: scalar
+        Box length in x direction
+    Ly: scalar
+        Box length in y direction
+    mu: scalar, optional
+        Chemical potential
+    symmetry: {"z2",'u1', 'z22', 'u11'}, optional
+        Symmetry in the backend
+
+    Returns
+    -------
+    a LocalHam2D object
+    """
+    imax = Nx//2
+    jmax = Ny//2
+    n_dict = dict()
+    for nx in range(-imax,-imax+Nx):
+        for ny in range(-jmax,-jmax+Ny):
+            kn = 2.0*np.pi*np.array([nx/Lx,ny/Ly])
+            normsq = np.dot(kn,kn)
+            norm = np.sqrt(normsq)
+            n_dict[nx,ny] = {'k':kn,'norm':norm,'normsq':normsq}
+    print('imax={},jmax={}'.format(imax,jmax))
+    print('number of plane waves=',len(n_dict))
+    # kinetic onsite prefactor
+    ke1 = 0.0
+    for kn_dict in n_dict.values():
+        ke1 += kn_dict['normsq']
+    ke1 /= 2.0*len(n_dict)
+    # e-e onsite prefactor
+    ee1 = 0.0
+    for (nx,ny),kn_dict in n_dict.items():
+        if not (nx==0 and ny==0):
+            ee1 += 1.0/kn_dict['norm']
+    ee1 *= 2.0*2.0*np.pi/(Lx*Ly)
+    def get_pair_fac(sites):
+        site0,site1 = sites
+        assert site0[0]<=site1[0]
+        assert site0[1]<=site1[1]
+        r = [site0[i]-site1[i] for i in [0,1]]
+        r = np.array([r[0]*Lx/Nx,r[1]*Ly/Ny])
+        for key in n_dict:
+            kn_dict = n_dict[key]
+            kn_dict['cos'] = np.cos(np.dot(kn_dict['k'],r))
+        # kinetic
+        ke2 = 0.0
+        for kn_dict in n_dict.values():
+            ke2 += kn_dict['normsq']*kn_dict['cos']
+        ke2 /= 2.0*len(n_dict) 
+        # e-e
+        ee2 = 0.0
+        for (nx,ny),kn_dict in n_dict.items():
+            if not (nx==0 and ny==0):
+                ee2 += kn_dict['cos']/kn_dict['norm']
+        ee2 *= 2.0*2.0*np.pi/(Lx*Ly)
+        return ke2, ee2
+    ham = dict()
+    def count_neighbour(i, j):
+        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
+    for i, j in product(range(Nx), range(Ny)):
+        count_ij = count_neighbour(i,j)
+        if i+1 != Nx:
+            where = ((i,j), (i+1,j))
+            count_b = count_neighbour(i+1,j)
+            ke2, ee2 = get_pair_fac(where)
+            uop = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+            ham[where] = uop
+        if j+1 != Ny:
+            where = ((i,j), (i,j+1))
+            count_b = count_neighbour(i,j+1)
+            ke2, ee2 = get_pair_fac(where)
+            uop = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+            ham[where] = uop
+    return LocalHam2D(Nx, Ny, ham)
 
 class LocalHam2D(LocalHamGen):
     """A 2D Fermion Hamiltonian represented as local terms. Different from
