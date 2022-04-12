@@ -608,6 +608,12 @@ def gate_string_reduce_split_(TG, where, string, original_ts, bonds_along,
         # split the blob!
         inner_ts[j], *maybe_svals, blob = blob.split(
             left_inds=lix, get='tensors', bond_ind=bix, **compress_opts)
+        # inner_ts[j] will have bix while blob will have a rand_uuid
+        # reindex inner_tj and blob
+        # no need to index s, since only data is used 
+        _rand_ix = blob.inds[0]
+        inner_ts[j].reindex_({bix:_rand_ix})
+        blob.reindex_({_rand_ix:bix})
         # if singular values are returned (``absorb=None``) check if we should
         #     return them via ``info``, e.g. for ``SimpleUpdate`
         if maybe_svals and info is not None:
@@ -747,8 +753,9 @@ class FermionTensorNetwork2DVector(FermionTensorNetwork2D,
         psi.fermion_space.add_tensor(TG, virtual=True)
         # check if we are not nearest neighbour and need to swap first  
 
-        string = tuple(gen_long_range_path(
-                 *where, sequence=long_range_path_sequence))
+#        string = tuple(gen_long_range_path(
+#                 *where, sequence=long_range_path_sequence))
+        string = long_range_path_sequence
 
         # the tensors along this string, which will be updated
         original_ts = [psi[coo] for coo in string]

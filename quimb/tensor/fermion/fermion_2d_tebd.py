@@ -19,7 +19,7 @@ from ..tensor_2d_tebd import (
     LocalHam2D
 )
 from ..tensor_2d import (
-    gen_long_range_path, 
+#    gen_long_range_path, 
     nearest_neighbors, 
     gen_long_range_swap_path, 
     swap_path_to_long_range_path, 
@@ -90,7 +90,12 @@ def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
     cre = creation(spin='sum',symmetry=symmetry,flat=True) 
     des = cre.dagger
     ftn = get_half_filled_product_state(Lx,Ly,symmetry=symmetry)
-    n = int(Lx*Ly*doping+1e-6)
+    if doping>0.0: # add hole
+        n = int(Lx*Ly*doping+1e-6)
+        op = des
+    else: # add particle
+        n = int(-Lx*Ly*doping+1e-6)
+        op = creation(spin='a',symmetry=symmetry,flat=True)
     sites = [(i,j) for i in range(Lx) for j in range(Ly)]
     for i in range(n):
         site = sites[np.random.randint(low=0,high=len(sites))]
@@ -98,7 +103,7 @@ def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
         site_tag = ftn.site_tag(*site)
         ket = ftn[ftn.site_tag(*site)]
         pix = ket.inds[-1]
-        TG = FermionTensor(data=des.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
+        TG = FermionTensor(data=op.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
                            tags=ket.tags) 
         ket.reindex_({pix:pix+'_'})
         ket_tid,ket_site = ket.get_fermion_info()
@@ -106,7 +111,6 @@ def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
         ftn.contract_tags(ket.tags,which='all',inplace=True)
     return ftn
 def write_ftn_to_disc(tn,fname):
-#    print('saving to ', fname)
     # Create a generic dictionary to hold all information
     data = dict()
     # Save which type of tn this is
@@ -121,19 +125,33 @@ def write_ftn_to_disc(tn,fname):
     for ten in tn.tensors:
         ten_info = dict()
         ten_info['fermion_info'] = ten.get_fermion_info()
-        ten_info['phase'] = ten.phase
-        ten_info['tensor'] = ten
+        ten_info['global_flip'] = ten.phase.get('global_flip',False)
+        ten_info['local_inds'] = tuple(ten.phase.get('local_inds',[]))
+        if fname is None:
+            ten_info['tensor_data'] = ten.data.copy()
+        else:
+            ten_info['tensor_data'] = ten.data
+        ten_info['tensor_inds'] = ten.inds
+        ten_info['tensor_tags'] = ten.tags
         data['tensors'].append(ten_info)
         ntensors += 1
     data['ntensors'] = ntensors
     # Write to a file
-    with open(fname, 'wb') as f:
-        pickle.dump(data, f)
-    return fname 
+    if fname is None:
+        return data
+    else:
+        with open(fname, 'wb') as f:
+            pickle.dump(data, f)
+        return fname 
 def load_ftn_from_disc(fname, delete_file=False):
     # Open up the file
-    with open(fname, 'rb') as f:
-        data = pickle.load(f)
+    if isinstance(fname,str):
+        with open(fname, 'rb') as f:
+            data = pickle.load(f)
+        copy_data = False
+    else:
+        data = fname
+        copy_data = True
     # Set up a dummy fermionic tensor network
     tn = FermionTensorNetwork([])
     # Put the tensors into the ftn
@@ -141,14 +159,21 @@ def load_ftn_from_disc(fname, delete_file=False):
     for i in range(data['ntensors']):
         # Get the tensor
         ten_info = data['tensors'][i]
-        ten = ten_info['tensor']
-        ten = FermionTensor(ten.data, inds=ten.inds, tags=ten.tags)
+        ten_data = ten_info['tensor_data']
+        inds = ten_info['tensor_inds']
+        tags = ten_info['tensor_tags']
+        global_flip = ten_info['global_flip']
+        local_inds  = ten_info['local_inds']
+        if copy_data:
+            ten = FermionTensor(ten_data.copy(), inds=inds, tags=tags)
+        else:
+            ten = FermionTensor(ten_data, inds=inds, tags=tags)
         # Get/set tensor info
         tid, site = ten_info['fermion_info']
         ten.fermion_owner = None
         ten._avoid_phase = False
         # Add the required phase
-        ten.phase = ten_info['phase']
+        ten.phase = {'global_flip':global_flip,'local_inds':list(local_inds)}
         # Add to tensor list
         tensors[site] = (tid, ten)
     # Add tensors to the tn
@@ -172,7 +197,20 @@ def delete_ftn_from_disc(fname):
         os.remove(fname)
     except:
         pass
-
+def gen_long_range_path(ija,ijb):
+    (ia,ja),(ib,jb) = ija,ijb
+    step_i = 1 if ib>ia else -1
+    step_j = 1 if jb>ja else -1
+    ls = [ija]
+    ls += [(i,ja) for i in range(ia+step_i,ib+step_i,step_i)] # first vertical
+    ls += [(ib,j) for j in range(ja+step_j,jb+step_j,step_j)] # then horizontal
+    return tuple(ls)
+def remove_phase(peps):
+    for i in range(peps.Lx):
+        for j in range(peps.Ly):
+            peps[i,j].phase = dict()
+    return peps
+######################## Hamiltonians ########################################3
 def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
     """Create a LocalHam2D object for 2D Hubbard Model
 
@@ -212,7 +250,7 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             ham[where] = uop
     return LocalHam2D(Lx, Ly, ham)
 
-def UEG2D(Nx, Ny, Lx, Ly, mu=0., symmetry=None):
+def UEG2D(Nx, Ny, Lx, Ly, mu=0., maxdist=1, symmetry=None):
     """Create a LocalHam2D object for 2D UEG Model in plane wave dual basis
 
     Parameters
@@ -258,8 +296,8 @@ def UEG2D(Nx, Ny, Lx, Ly, mu=0., symmetry=None):
     ee1 *= 2.0*2.0*np.pi/(Lx*Ly)
     def get_pair_fac(sites):
         site0,site1 = sites
-        assert site0[0]<=site1[0]
-        assert site0[1]<=site1[1]
+#        assert site0[0]<=site1[0]
+#        assert site0[1]<=site1[1]
         r = [site0[i]-site1[i] for i in [0,1]]
         r = np.array([r[0]*Lx/Nx,r[1]*Ly/Ny])
         for key in n_dict:
@@ -280,20 +318,33 @@ def UEG2D(Nx, Ny, Lx, Ly, mu=0., symmetry=None):
     ham = dict()
     def count_neighbour(i, j):
         return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
+    # onsite and NN terms
     for i, j in product(range(Nx), range(Ny)):
         count_ij = count_neighbour(i,j)
         if i+1 != Nx:
             where = ((i,j), (i+1,j))
             count_b = count_neighbour(i+1,j)
             ke2, ee2 = get_pair_fac(where)
-            uop = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
-            ham[where] = uop
+            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, 
+                             (1./count_ij, 1./count_b), symmetry=symmetry)
         if j+1 != Ny:
             where = ((i,j), (i,j+1))
             count_b = count_neighbour(i,j+1)
             ke2, ee2 = get_pair_fac(where)
-            uop = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
-            ham[where] = uop
+            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+    NN = len(ham)
+    print('number of nearest-neighbor terms=',NN)
+    # long range terms
+    sites = [(i,j) for i in range(Nx) for j in range(Ny)]
+    for i,site1 in enumerate(sites):
+        for j in range(i+1,len(sites)):
+            site2 = sites[j]
+            d = abs(site1[0]-site2[0])+abs(site1[1]-site2[1])
+            if (d>1) and (d<=maxdist):
+                where = site1,site2
+                ke2,ee2 = get_pair_fac(where)
+                ham[where] = ueg(0.0, 0.0, ke2, ee2, 0.0, None, symmetry=symmetry)
+    print('number of long range terms=',len(ham)-NN)
     return LocalHam2D(Nx, Ny, ham)
 
 class LocalHam2D(LocalHamGen):
@@ -411,19 +462,20 @@ class SimpleUpdate(SimpleUpdate):
         """
         ija, ijb = where
 
-        if callable(self.long_range_path_sequence):
-            long_range_path_sequence = self.long_range_path_sequence(ija, ijb)
-        else:
-            long_range_path_sequence = self.long_range_path_sequence
-
-        if self.long_range_use_swaps:
-            path = tuple(gen_long_range_swap_path(
-                ija, ijb, sequence=long_range_path_sequence))
-            string = swap_path_to_long_range_path(path, ija)
-        else:
-            # get the string linking the two sites
-            string = path = tuple(gen_long_range_path(
-                ija, ijb, sequence=long_range_path_sequence))
+#        if callable(self.long_range_path_sequence):
+#            long_range_path_sequence = self.long_range_path_sequence(ija, ijb)
+#        else:
+#            long_range_path_sequence = self.long_range_path_sequence
+#
+#        if self.long_range_use_swaps:
+#            path = tuple(gen_long_range_swap_path(
+#                ija, ijb, sequence=long_range_path_sequence))
+#            string = swap_path_to_long_range_path(path, ija)
+#        else:
+#            # get the string linking the two sites
+#            string = path = tuple(gen_long_range_path(
+#                ija, ijb, sequence=long_range_path_sequence))
+        string = path = gen_long_range_path(ija,ijb)
 
         def env_neighbours(i, j):
             return tuple(filter(

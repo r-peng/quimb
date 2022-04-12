@@ -74,7 +74,7 @@ def _launch_block_expression(
         del tmp_operands, new_view
     return tensors[0]
 
-def flip_pattern(pattern):
+def _flip_pattern(pattern):
     string_inv = {"+":"-", "-":"+"}
     return "".join([string_inv[ix] for ix in pattern])
 
@@ -377,7 +377,7 @@ class BlockTensor(Tensor):
             x = x.data
         if flip_pattern:
             x = x.copy()
-            x.pattern = flip_pattern(x.pattern)
+            x.pattern = _flip_pattern(x.pattern)
         if x.pattern[iax] == t.data.pattern[ax]:
             raise ValueError("Symmetry relations not compatible")
         if sqrt:

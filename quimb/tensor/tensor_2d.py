@@ -4238,6 +4238,7 @@ def gen_long_range_path(ij_a, ij_b, sequence=None):
     for move in poss_moves:
         if abs(di) + abs(dj) == 1:
             yield ij_b
+            print(ij_b)
             return
 
         if (move == 'v') and (di != 0):
@@ -4245,6 +4246,7 @@ def gen_long_range_path(ij_a, ij_b, sequence=None):
             istep = min(max(di, -1), +1)
             new_ij_a = (ia + istep, ja)
             yield new_ij_a
+            print(new_ij_a)
             ij_a = new_ij_a
             ia += istep
             di -= istep
@@ -4253,6 +4255,7 @@ def gen_long_range_path(ij_a, ij_b, sequence=None):
             jstep = min(max(dj, -1), +1)
             new_ij_a = (ia, ja + jstep)
             yield new_ij_a
+            print(new_ij_a)
             ij_a = new_ij_a
             ja += jstep
             dj -= jstep
