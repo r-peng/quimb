@@ -7,7 +7,19 @@ import numpy as np
 import pickle,os
 import scipy.sparse.linalg as spla
 
-from pyblock3.algebra.fermion_ops import creation,bonded_vaccum
+from pyblock3.algebra.fermion_ops import (
+    creation,
+    bonded_vaccum,
+    Hubbard,
+    _compute_swap_phase,
+    hop_map,
+    pn_dict,
+    cre_map,
+)
+from pyblock3.algebra.fermion_encoding import get_state_map
+from pyblock3.algebra.fermion import SparseFermionTensor
+from pyblock3.algebra.core import SubTensor
+from .block_interface import setting, eye
 
 from ...utils import pairwise
 from ...utils import progbar as Progbar
@@ -31,7 +43,6 @@ from ..tensor_2d import (
     PEPS
 )
 
-from .block_interface import eye, Hubbard, ueg, ueg1
 from . import block_tools
 from .fermion_core import (
     _get_gauge_location,
@@ -250,7 +261,63 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             ham[where] = uop
     return LocalHam2D(Lx, Ly, ham)
 
-def UEG2D(Nx, Ny, Lx, Ly, mu=0., maxdist=1, symmetry=None):
+def ueg_onsite(ke1, ee1, mu=0., symmetry=None, flat=None):
+    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
+    state_map = get_state_map(symmetry)
+    block_dict = dict()
+    for key, pn in pn_dict.items():
+        qlab, ind, dim = state_map[key]
+        irreps = (qlab, qlab)
+        if irreps not in block_dict:
+            block_dict[irreps] = np.zeros([dim, dim])
+        block_dict[irreps][ind, ind] += (pn==2) * ee1 + pn * (mu+ke1)
+    blocks = [SubTensor(reduced=dat, q_labels=q_lab) for q_lab, dat in block_dict.items()]
+    T = SparseFermionTensor(blocks=blocks, pattern="+-")
+    if flat:
+        return T.to_flat()
+    else:
+        return T
+
+def ueg(ke1, ee1, ke2, ee2, mu=0., fac=None, symmetry=None, flat=None):
+    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
+    if fac is None:
+        fac = (1, 1)
+    faca, facb = fac
+    state_map = get_state_map(symmetry)
+    block_dict = dict()
+    for s1, s2 in product(cre_map.keys(), repeat=2):
+        q1, ix1, d1 = state_map[s1]
+        q2, ix2, d2 = state_map[s2]
+        val = (pn_dict[s1]==2) * faca * ee1 + pn_dict[s1] * faca * (mu+ke1) +\
+              (pn_dict[s2]==2) * facb * ee1 + pn_dict[s2] * facb * (mu+ke1)
+        val += pn_dict[s1] * pn_dict[s2] * ee2
+        if (q1, q2, q1, q2) not in block_dict:
+            block_dict[(q1, q2, q1, q2)] = np.zeros([d1, d2, d1, d2])
+        dat = block_dict[(q1, q2, q1, q2)]
+        phase = _compute_swap_phase(s1, s2, s1, s2)
+        dat[ix1, ix2, ix1, ix2] += phase * val
+        # ke2
+        for s3 in hop_map[s1]:
+            q3, ix3, d3 = state_map[s3]
+            input_string = sorted(cre_map[s1]+cre_map[s2])
+            for s4 in hop_map[s2]:
+                q4, ix4, d4 = state_map[s4]
+                output_string = sorted(cre_map[s3]+cre_map[s4])
+                if input_string != output_string:
+                    continue
+                if (q1, q2, q3, q4) not in block_dict:
+                    block_dict[(q1, q2, q3, q4)] = np.zeros([d1, d2, d3, d4])
+                dat = block_dict[(q1, q2, q3, q4)]
+                phase = _compute_swap_phase(s1, s2, s3, s4)
+                dat[ix1, ix2, ix3, ix4] += phase * ke2
+    blocks = [SubTensor(reduced=dat, q_labels=qlab) for qlab, dat in block_dict.items()]
+    T = SparseFermionTensor(blocks=blocks, pattern="++--")
+    if flat:
+        return T.to_flat()
+    else:
+        return T
+
+def UEG2D(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry=None):
     """Create a LocalHam2D object for 2D UEG Model in plane wave dual basis
 
     Parameters
@@ -272,48 +339,27 @@ def UEG2D(Nx, Ny, Lx, Ly, mu=0., maxdist=1, symmetry=None):
     -------
     a LocalHam2D object
     """
-    imax = Nx//2
-    jmax = Ny//2
-    n_dict = dict()
-    for nx in range(-imax,-imax+Nx):
-        for ny in range(-jmax,-jmax+Ny):
-            kn = 2.0*np.pi*np.array([nx/Lx,ny/Ly])
-            normsq = np.dot(kn,kn)
-            norm = np.sqrt(normsq)
-            n_dict[nx,ny] = {'k':kn,'norm':norm,'normsq':normsq}
-    print('imax={},jmax={}'.format(imax,jmax))
-    print('number of plane waves=',len(n_dict))
-    # kinetic onsite prefactor
-    ke1 = 0.0
-    for kn_dict in n_dict.values():
-        ke1 += kn_dict['normsq']
-    ke1 /= 2.0*len(n_dict)
-    # e-e onsite prefactor
-    ee1 = 0.0
-    for (nx,ny),kn_dict in n_dict.items():
-        if not (nx==0 and ny==0):
-            ee1 += 1.0/kn_dict['norm']
-    ee1 *= 2.0*2.0*np.pi/(Lx*Ly)
-    def get_pair_fac(sites):
-        site0,site1 = sites
-#        assert site0[0]<=site1[0]
-#        assert site0[1]<=site1[1]
-        r = [site0[i]-site1[i] for i in [0,1]]
-        r = np.array([r[0]*Lx/Nx,r[1]*Ly/Ny])
-        for key in n_dict:
-            kn_dict = n_dict[key]
-            kn_dict['cos'] = np.cos(np.dot(kn_dict['k'],r))
-        # kinetic
-        ke2 = 0.0
-        for kn_dict in n_dict.values():
-            ke2 += kn_dict['normsq']*kn_dict['cos']
-        ke2 /= 2.0*len(n_dict) 
-        # e-e
-        ee2 = 0.0
-        for (nx,ny),kn_dict in n_dict.items():
-            if not (nx==0 and ny==0):
-                ee2 += kn_dict['cos']/kn_dict['norm']
-        ee2 *= 2.0*2.0*np.pi/(Lx*Ly)
+    Nx,Ny = 2*imax+1,2*jmax+1
+    N,Omega = Nx*Ny,Lx*Ly
+    g,g1,g2 = [],[],[]
+    for gx in range(-imax,-imax+Nx):
+        for gy in range(-jmax,-jmax+Ny):
+            g.append(2.0*np.pi*np.array([gx/Lx,gy/Ly]))
+            g2.append(np.dot(g[-1],g[-1]))
+            g1_inv = 0.0 if (gx==0 and gy==0) else 1.0/np.sqrt(g2[-1])
+            g1.append(g1_inv)
+    ke1 = sum(g2)/(2.0*N)
+    ee1 = sum(g1)*4.0*np.pi/Omega
+    ee1 /= 2.0
+    g1 = np.array(g1)
+    g2 = np.array(g2)
+    def get_pair_fac(site1,site2):
+        (x1,y1),(x2,y2) = site1,site2
+        dx,dy = x1-x2,y1-y2
+        r = np.array([dx*Lx/Nx,dy*Ly/Ny])
+        cos = np.array([np.cos(np.dot(g_,r)) for g_ in g])
+        ke2 = np.dot(cos,g2)/(2.0*N)
+        ee2 = np.dot(cos,g1)*4.0*np.pi/Omega
         return ke2, ee2
     ham = dict()
     def count_neighbour(i, j):
@@ -324,14 +370,17 @@ def UEG2D(Nx, Ny, Lx, Ly, mu=0., maxdist=1, symmetry=None):
         if i+1 != Nx:
             where = ((i,j), (i+1,j))
             count_b = count_neighbour(i+1,j)
-            ke2, ee2 = get_pair_fac(where)
+            ke2, ee2 = get_pair_fac(*where)
+            ee2 /= 2.0
             ham[where] = ueg(ke1, ee1, ke2, ee2, mu, 
                              (1./count_ij, 1./count_b), symmetry=symmetry)
         if j+1 != Ny:
             where = ((i,j), (i,j+1))
             count_b = count_neighbour(i,j+1)
-            ke2, ee2 = get_pair_fac(where)
-            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+            ke2, ee2 = get_pair_fac(*where)
+            ee2 /= 2.0
+            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, 
+                             (1./count_ij, 1./count_b), symmetry=symmetry)
     NN = len(ham)
     print('number of nearest-neighbor terms=',NN)
     # long range terms
@@ -342,7 +391,8 @@ def UEG2D(Nx, Ny, Lx, Ly, mu=0., maxdist=1, symmetry=None):
             d = abs(site1[0]-site2[0])+abs(site1[1]-site2[1])
             if (d>1) and (d<=maxdist):
                 where = site1,site2
-                ke2,ee2 = get_pair_fac(where)
+                ke2,ee2 = get_pair_fac(*where)
+                ee2 /= 2.0
                 ham[where] = ueg(0.0, 0.0, ke2, ee2, 0.0, None, symmetry=symmetry)
     print('number of long range terms=',len(ham)-NN)
     return LocalHam2D(Nx, Ny, ham)

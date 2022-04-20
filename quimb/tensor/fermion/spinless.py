@@ -173,7 +173,7 @@ def get_flat_exponential(T,x):
     datas = np.concatenate(datas)
     Texp = T.__class__(q_labels, shapes, datas, pattern=T.pattern, symmetry=T.symmetry)
     return Texp
-################# quimb operator class ####################
+################# quimb tebd operator class ####################
 def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'): 
     ham = dict()
     op = spinless_fermion(t,v,symmetry=symmetry)
@@ -259,6 +259,34 @@ class LocalHam2D(LocalHamGen_):
     
     draw = LocalHam2D.draw
     __repr__ = LocalHam2D.__repr__
+################### long-range op class ##################
+def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
+    from .spinless import creation
+    cre = creation(symmetry=symmetry)
+    ann = cre.dagger
+    pn = np.tensordot(cre,ann,axes=((1,),(0,)))
+    def get_terms(sites):
+        # cre0,ann1 = (-1)**S ann1,cre0 
+        ops = cre.copy(),ann.copy()
+        phase = (-1)**(cre.parity*ann.parity)
+        ham[sites,'t1'] = ops,-t*phase
+        # cre1,ann0
+        ops = ann.copy(),cre.copy()
+        phase = 1.0
+        ham[sites,'t2'] = ops,-t*phase
+        # pn1,pn2
+        ops = pn.copy(),pn.copy()
+        phase = 1.0
+        ham[sites,'v'] = ops,v*phase
+        return 
+    ham = dict()
+    for i in range(Lx):
+        for j in range(Ly):
+            if i+1 != Lx:
+                get_terms(((i,j),(i+1,j)))
+            if j+1 != Ly:
+                get_terms(((i,j),(i,j+1)))
+    return ham
 ################### wfn initialization ###################
 def get_product_state(Lx,Ly,n=0.5,symmetry='u1'):
     """
