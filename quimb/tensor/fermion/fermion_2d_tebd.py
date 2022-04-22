@@ -261,27 +261,31 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             ham[where] = uop
     return LocalHam2D(Lx, Ly, ham)
 
-def ueg_onsite(ke1, ee1, mu=0., symmetry=None, flat=None):
-    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
-    state_map = get_state_map(symmetry)
-    block_dict = dict()
-    for key, pn in pn_dict.items():
-        qlab, ind, dim = state_map[key]
-        irreps = (qlab, qlab)
-        if irreps not in block_dict:
-            block_dict[irreps] = np.zeros([dim, dim])
-        block_dict[irreps][ind, ind] += (pn==2) * ee1 + pn * (mu+ke1)
-    blocks = [SubTensor(reduced=dat, q_labels=q_lab) for q_lab, dat in block_dict.items()]
-    T = SparseFermionTensor(blocks=blocks, pattern="+-")
-    if flat:
-        return T.to_flat()
-    else:
-        return T
+def hopping_ham(Nx,Ny,ke1,ke3=None,symmetry='u1',flat=True):
+    ham = dict()
+    # NN terms
+    op = Hubbard(t=-ke1, u=0.0, mu=0., fac=(0.,0.), symmetry=symmetry) 
+    for i, j in product(range(Nx), range(Ny)):
+        if i+1 != Nx:
+            where = ((i,j), (i+1,j))
+            ham[where] = op.copy() 
+        if j+1 != Ny:
+            where = ((i,j), (i,j+1))
+            ham[where] = op.copy()
+    # 3rd-NN terms
+    if ke3 is not None:
+        op = Hubbard(t=-ke3, u=0.0, mu=0., fac=(0.,0.), symmetry=symmetry) 
+        for i, j in product(range(Nx), range(Ny)):
+            if i+3 < Nx:
+                where = ((i,j), (i+3,j))
+                ham[where] = op.copy() 
+            if j+3 < Ny:
+                where = ((i,j), (i,j+3))
+                ham[where] = op.copy()
+    return LocalHam2D(Nx, Ny, ham)
 
-def ueg(ke1, ee1, ke2, ee2, mu=0., fac=None, symmetry=None, flat=None):
+def ueg2(ke1, ee1, ke2, ee2, mu=0., fac=(0.,0.), symmetry='u1', flat=True):
     symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
-    if fac is None:
-        fac = (1, 1)
     faca, facb = fac
     state_map = get_state_map(symmetry)
     block_dict = dict()
@@ -316,8 +320,83 @@ def ueg(ke1, ee1, ke2, ee2, mu=0., fac=None, symmetry=None, flat=None):
         return T.to_flat()
     else:
         return T
+def ueg1(ke1,ee1,mu=0.,symmetry='u1', falt=True):
+    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
+    state_map = get_state_map(symmetry)
+    block_dict = dict()
+    for key, pn in pn_dict.items():
+        qlab, ind, dim = state_map[key]
+        irreps = (qlab, qlab)
+        if irreps not in block_dict:
+            block_dict[irreps] = np.zeros([dim, dim])
+        block_dict[irreps][ind, ind] += (pn==2) * ee1 + pn * (mu+ke1)
+    blocks = [SubTensor(reduced=dat, q_labels=q_lab) for q_lab, dat in block_dict.items()]
+    T = SparseFermionTensor(blocks=blocks, pattern="+-")
+    if flat:
+        return T.to_flat()
+    else:
+        return T
 
-def UEG2D(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry=None):
+def UEG2D_FD(Nx, Ny, Lx, Ly, Ne, mu=0., maxdist=1, symmetry='u1', flat=True):
+    eps = Lx/(Nx+2.)
+    h = Lx(Nx+1.)
+    sites = [(i,j) for i in range(Lx) for j in range(Ly)]
+    def count_neighbour(i, j):
+        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
+    def phys_dist(site1,site2,const=1.):
+        (x1,y1),(x2,y2) = site1,site2
+        dx,dy = x1-x2,y1-y2
+        return h*np.sqrt(dx**2+dy**2+const)
+    def compute_u(site1):
+        u = sum([1./phys_dist(site1,site2) for site2 in sites])
+        return - u * Ne / (Nx*Ny)
+    def compute_ke1(site):
+        x,y = site
+        if (x==0 and y==0) or (x==0 and y==Ny-1) or\
+           (x==Nx-1 and y==0) or (x==Nx-1 and y==Ny-1):
+            return 58./(24.*eps**2)
+        elif x==0 or x==Nx-1 or y==0 or y==Ny-1:
+            return 59./(24.*eps**2)
+        else:
+            return 60./(24.*eps**2)
+    def compute_lambda(site1):
+        return 1./phys_dist(site1,site1,const=1.)
+    ham = dict()
+    # onsite and NN terms
+    for (i,j) in sites:
+        count_ij = count_neighbour(i,j)
+        ke1 = compute_ke1((i,j)) + compute_u((i,j))
+        ee1 = compute_lambda((i,j))
+        ke2 = -16./(24.*eps**2)
+        ee2 = 1./(h*np.sqrt(1.+const)) 
+        if i+1 != Nx:
+            where = ((i,j), (i+1,j))
+            count_b = count_neighbour(i+1,j)
+            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), 
+                              symmetry=symmetry, flat=flat)
+        if j+1 != Ny:
+            where = ((i,j), (i,j+1))
+            count_b = count_neighbour(i,j+1)
+            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b),
+                              symmetry=symmetry, flat=flat)
+    NN = len(ham)
+    print('number of nearest-neighbor terms=',NN)
+    # long range terms
+    for i,site1 in enumerate(sites):
+        for site2 in sites[i+1:]:
+            dx,dy = abs(site1[0]-site2[0]),abs(site1[1]-site2[1])
+            d = dx+dy
+            ke2,ee2 = 0.0,0.0
+            if (d>1) and (d<=maxdist):
+                ee2 = 1./phys_dist(site1,site2)
+            if d==3 and (dx==0 or dy==0):
+                ke2 = 1./(24.*eps**2) 
+            if abs(ke2)+abs(ee2)>1e-12:
+                ham[where] = ueg2(0.,0., ke2, ee2, mu, (0.,0.), 
+                                  symmetry=symmetry, flat=flat) 
+    return LocalHam2D(Nx, Ny, ham)
+ 
+def UEG2D_PWDB(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry='u1', flat=True):
     """Create a LocalHam2D object for 2D UEG Model in plane wave dual basis
 
     Parameters
@@ -341,6 +420,8 @@ def UEG2D(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry=None):
     """
     Nx,Ny = 2*imax+1,2*jmax+1
     N,Omega = Nx*Ny,Lx*Ly
+    sites = [(i,j) for i in range(Nx) for j in range(Ny)]
+
     g,g1,g2 = [],[],[]
     for gx in range(-imax,-imax+Nx):
         for gy in range(-jmax,-jmax+Ny):
@@ -349,51 +430,49 @@ def UEG2D(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry=None):
             g1_inv = 0.0 if (gx==0 and gy==0) else 1.0/np.sqrt(g2[-1])
             g1.append(g1_inv)
     ke1 = sum(g2)/(2.0*N)
-    ee1 = sum(g1)*4.0*np.pi/Omega
-    ee1 /= 2.0
+    ee1 = sum(g1)*2.0*np.pi/Omega
     g1 = np.array(g1)
     g2 = np.array(g2)
+
+    def count_neighbour(i, j):
+        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
     def get_pair_fac(site1,site2):
         (x1,y1),(x2,y2) = site1,site2
         dx,dy = x1-x2,y1-y2
         r = np.array([dx*Lx/Nx,dy*Ly/Ny])
-        cos = np.array([np.cos(np.dot(g_,r)) for g_ in g])
+        cos = np.array([np.cos(np.dot(gi,r)) for gi in g])
         ke2 = np.dot(cos,g2)/(2.0*N)
-        ee2 = np.dot(cos,g1)*4.0*np.pi/Omega
+        ee2 = np.dot(cos,g1)*2.0*np.pi/Omega
         return ke2, ee2
+
     ham = dict()
-    def count_neighbour(i, j):
-        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
     # onsite and NN terms
-    for i, j in product(range(Nx), range(Ny)):
+    for (i,j) in sites: 
         count_ij = count_neighbour(i,j)
         if i+1 != Nx:
             where = ((i,j), (i+1,j))
             count_b = count_neighbour(i+1,j)
             ke2, ee2 = get_pair_fac(*where)
-            ee2 /= 2.0
-            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, 
-                             (1./count_ij, 1./count_b), symmetry=symmetry)
+            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), 
+                              symmetry=symmetry, flat=flat)
         if j+1 != Ny:
             where = ((i,j), (i,j+1))
             count_b = count_neighbour(i,j+1)
             ke2, ee2 = get_pair_fac(*where)
-            ee2 /= 2.0
-            ham[where] = ueg(ke1, ee1, ke2, ee2, mu, 
-                             (1./count_ij, 1./count_b), symmetry=symmetry)
+            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b),
+                              symmetry=symmetry, flat=flat)
     NN = len(ham)
     print('number of nearest-neighbor terms=',NN)
     # long range terms
-    sites = [(i,j) for i in range(Nx) for j in range(Ny)]
     for i,site1 in enumerate(sites):
-        for j in range(i+1,len(sites)):
-            site2 = sites[j]
+        for site2 in sites[i+1:]:
             d = abs(site1[0]-site2[0])+abs(site1[1]-site2[1])
             if (d>1) and (d<=maxdist):
                 where = site1,site2
                 ke2,ee2 = get_pair_fac(*where)
-                ee2 /= 2.0
-                ham[where] = ueg(0.0, 0.0, ke2, ee2, 0.0, None, symmetry=symmetry)
+                if abs(ke2)+abs(ee2)>1e-12:
+                    ham[where] = ueg2(0.,0., ke2, ee2, mu, (0.,0.), 
+                                      symmetry=symmetry, flat=flat) 
     print('number of long range terms=',len(ham)-NN)
     return LocalHam2D(Nx, Ny, ham)
 

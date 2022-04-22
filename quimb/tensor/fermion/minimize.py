@@ -51,7 +51,7 @@ def _line_search_wolfe12(f, fprime, xk, pk, gfk, old_fval, old_old_fval,
 def line_search_wolfe1(f, fprime, xk, pk, gfk=None,
                        old_fval=None, old_old_fval=None,
                        args=(), c1=1e-4, c2=0.9, amax=50, amin=1e-8,
-                       xtol=1e-14, maxiter=5, zoom_maxiter=None):
+                       xtol=1e-14, maxiter=3, zoom_maxiter=None):
     """
     As `scalar_search_wolfe1` but do a line search to direction `pk`
     Parameters
@@ -105,7 +105,7 @@ def line_search_wolfe1(f, fprime, xk, pk, gfk=None,
 
 def scalar_search_wolfe1(phi, derphi, phi0=None, old_phi0=None, derphi0=None,
                          c1=1e-4, c2=0.9,
-                         amax=50, amin=1e-8, xtol=1e-14, maxiter=5):
+                         amax=50, amin=1e-8, xtol=1e-14, maxiter=3):
     """
     Scalar function search for alpha that satisfies strong Wolfe conditions
     alpha > 0 is assumed to be a descent direction.
@@ -184,7 +184,7 @@ def scalar_search_wolfe1(phi, derphi, phi0=None, old_phi0=None, derphi0=None,
 
 def line_search_wolfe2(f, myfprime, xk, pk, gfk=None, old_fval=None,
                        old_old_fval=None, args=(), c1=1e-4, c2=0.9, amax=None,
-                       extra_condition=None, maxiter=5, zoom_maxiter=5):
+                       extra_condition=None, maxiter=3, zoom_maxiter=3):
     """Find alpha that satisfies strong Wolfe conditions.
     Parameters
     ----------
@@ -310,7 +310,7 @@ def line_search_wolfe2(f, myfprime, xk, pk, gfk=None, old_fval=None,
 def scalar_search_wolfe2(phi, derphi, phi0=None,
                          old_phi0=None, derphi0=None,
                          c1=1e-4, c2=0.9, amax=None,
-                         extra_condition=None, maxiter=5, zoom_maxiter=5):
+                         extra_condition=None, maxiter=3, zoom_maxiter=3):
     """Find alpha that satisfies strong Wolfe conditions.
     alpha > 0 is assumed to be a descent direction.
     Parameters
@@ -449,7 +449,7 @@ def scalar_search_wolfe2(phi, derphi, phi0=None,
     return alpha_star, phi_star, phi0, derphi_star
 
 def _zoom(a_lo, a_hi, phi_lo, phi_hi, derphi_lo,
-          phi, derphi, phi0, derphi0, c1, c2, extra_condition, maxiter=5):
+          phi, derphi, phi0, derphi0, c1, c2, extra_condition, maxiter=3):
     """Zoom stage of approximate linesearch satisfying strong Wolfe conditions.
     
     Part of the optimization algorithm in `scalar_search_wolfe2`.
