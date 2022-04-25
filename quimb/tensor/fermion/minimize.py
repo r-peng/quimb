@@ -444,7 +444,7 @@ def scalar_search_wolfe2(phi, derphi, phi0=None,
         alpha_star = alpha1
         phi_star = phi_a1
         derphi_star = None
-        warnings.warn('The line search algorithm did not converge', LineSearchWarning)
+        warnings.warn('The line search algorithm did not converge', opt.LineSearchWarning)
 
     return alpha_star, phi_star, phi0, derphi_star
 

@@ -404,19 +404,52 @@ class UEG_PWDB:
         elif self.dist_type=='site':
             return np.sqrt(dx**2+dy**2)
         else:
-            raise NotImplementedError('distant type {} not implemented'.format(
-                                       self.dist_type))
+            raise NotImplementedError(f'distance type {self.dist_type} not implemented')
+
 class UEG_FD:
-    def __init__(self,Nx,Ny,Lx,Ly,Ne,symmetry='u1',flat=True,
+    def __init__(self,Nx,Ny,Lx,Ly,Ne,scheme,symmetry='u1',flat=True,
                  maxdist=1000,dist_type='graph'):
         assert Nx==Ny
         self.Nx = Nx
         self.Ny = Ny
-        self.Ne = Ne
         self.eps = Lx/(Nx+2.) # spacing for ke terms
         self.h = Lx/(Nx+1.) # spacing for distance
         self.dist_type = dist_type
+        sites = [(x,y) for y in range(self.Ny) for x in range(self.Nx)]
+        den = (Ne+1e-15) / (Nx*Ny)
+        if scheme==1:
+            const = 1.
+            def compute_lambda(site):
+                return 1./self.h
+            def compute_u(site1):
+                u = sum([1./self.phys_dist(site1,site2,const=const) \
+                        for site2 in sites])
+                return - u * self.h**2 * den 
+            background = 0.0
+            for site1 in sites:
+                for site2 in sites:
+                    background += 1./self.phys_dist(site1,site2,const=const)
+            background *= self.h**4*den**2/2.
+        elif scheme==2:
+            const = 0. 
+            def compute_lambda(site):
+                return 1.4866/self.h
+            def compute_u(site1):
+                sites_ = sites.copy()
+                sites_.remove(site1)
+                u = sum([1./self.phys_dist(site1,site2,const=const) \
+                         for site2 in sites_])
+                return - u * self.h**2 * den
+            background = 0.0
+            for i,site1 in enumerate(sites):
+                for site2 in sites[i+1:]:
+                    background += 1./self.phys_dist(site1,site2,const=const)
+            background *= self.h**4*den**2
+        else:
+            raise NotImplementedError(f'scheme {scheme} not implemented')
 
+        print('background=',background)
+        print('analytical=',1.4866*Ne**2/Lx)
         cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
         cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
         ann_a = cre_a.dagger
@@ -430,15 +463,12 @@ class UEG_FD:
 
         self._1col_terms = []
         self._2col_terms = []
-        sites = [(x,y) for y in range(self.Ny) for x in range(self.Nx)]
-        self.sites = sites
-        const = []
         for i,site1 in enumerate(sites):
-            const.append(self.compute_u(site1))
-            pn1 = const[-1]+self.compute_ke1(site1)
-            ee1 = self.compute_lambda(site1)
+            pn1 = compute_u(site1)+self.compute_ke1(site1)
+            ee1 = compute_lambda(site1)
             opis = OPi({'pn':pn1,'nanb':ee1},site1),
             self._1col_terms.append((opis,1.))
+#            print(site1,pn1,ee1)
             for site2 in sites[i+1:]:
                 assert site1[1]<=site2[1]
                 if site1[1]==site2[1]:
@@ -447,7 +477,8 @@ class UEG_FD:
                 # long-range ee
                 if self.dist(site1,site2)<=maxdist:
                     opis = OPi({'pn':1.},site1),OPi({'pn':1.},site2)
-                    tmp.append((opis,1./self.phys_dist(site1,site2)))
+                    tmp.append((opis,1./self.phys_dist(site1,site2,const=const)))
+#                    print(site1,site2,'ee',1./self.phys_dist(site1,site2,const=const))
                 # NN/3rd-NN ke
                 ke2 = self.compute_ke2(site1,site2)
                 if ke2 is not None:
@@ -458,7 +489,8 @@ class UEG_FD:
                     opis = OPi({'cre_b':1.},site1),OPi({'ann_b':1.},site2)
                     tmp.append((opis,ke2*sign_b)) 
                     opis = OPi({'ann_b':1.},site1),OPi({'cre_b':1.},site2)
-                    tmp.append((opis,ke2)) 
+                    tmp.append((opis,ke2))
+#                    print(site1,site2,'ke',ke2)
                 if site1[1]==site2[1]:
                     self._1col_terms += tmp
                 else:
@@ -468,15 +500,10 @@ class UEG_FD:
         self.reuse += [(OPi({key:1.},site),3) for key in keys for site in sites] 
         print('number of 1 col terms=',len(self._1col_terms))
         print('number of 2 col terms=',len(self._2col_terms))
-        self.const = - sum(const) * Ne / (Nx*Ny)
-        print('const=',self.const)
     def phys_dist(self,site1,site2,const=1.):
         (x1,y1),(x2,y2) = site1,site2
         dx,dy = x1-x2,y1-y2
         return self.h*np.sqrt(dx**2+dy**2+const)
-    def compute_u(self,site1):
-        u = sum([1./self.phys_dist(site1,site2) for site2 in self.sites])
-        return - u * self.Ne / (self.Nx*self.Ny)
     def compute_ke1(self,site):
         x,y = site
         if (x==0 and y==0) or (x==0 and y==self.Ny-1) or\
@@ -486,8 +513,6 @@ class UEG_FD:
             return 59./(24.*self.eps**2)
         else:
             return 60./(24.*self.eps**2)
-    def compute_lambda(self,site1):
-        return 1./self.phys_dist(site1,site1,const=1.)
     def dist(self,site1,site2):
         (x1,y1),(x2,y2) = site1,site2
         dx,dy = x1-x2,y1-y2
@@ -496,8 +521,7 @@ class UEG_FD:
         elif self.dist_type=='site':
             return np.sqrt(dx**2+dy**2)
         else:
-            raise NotImplementedError('distant type {} not implemented'.format(
-                                       self.dist_type))
+            raise NotImplementedError(f'distance type {self.dist_type} not implemented')
     def compute_ke2(self,site1,site2):
         (x1,y1),(x2,y2) = site1,site2
         dx,dy = x1-x2,y1-y2
@@ -1012,7 +1036,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
-    print('nfile=',len(os.listdir(tmpdir)))
+#    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_right
     iterate_over  = [(opis,0)   for (opis,_) in H._1col_terms]
@@ -1022,7 +1046,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     for benvs_ in ls:
         if benvs_ is not None:
             benvs.update(benvs_)
-    print('nfile=',len(os.listdir(tmpdir)))
+#    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _energy_term
     iterate_over = H._1col_terms + [(None,1.)]
@@ -1041,7 +1065,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     for key in keys:
         fname = benvs.pop(key)
         delete_ftn_from_disc(fname)
-    print('nfile=',len(os.listdir(tmpdir)))
+#    print('nfile=',len(os.listdir(tmpdir)))
 
     # treat 2col terms
     fxn = _1col_mid
@@ -1052,7 +1076,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     for benvs_ in ls:
         benvs.update(benvs_)
     delete_ftn_from_disc(norm) 
-    print('nfile=',len(os.listdir(tmpdir)))
+#    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_right
     iterate_over = [((opi,),max(opi.site[1]-dy,0)) for (opi,dy) in H.reuse]
@@ -1070,7 +1094,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
-    print('nfile=',len(os.listdir(tmpdir)))
+#    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _energy_term
     iterate_over =  H._2col_terms
