@@ -1,5 +1,6 @@
 import numpy as np
-import time,scipy,uuid,os,atexit,shutil,pickle,resource
+import time,scipy,uuid,os,pickle,resource
+#import atexit,shutil
 
 from .minimize import (
     _minimize_bfgs
@@ -23,30 +24,31 @@ COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
-if RANK == 0:
-    TMPDIR = os.environ.get('TMPDIR','.')
-    if TMPDIR[-1] == '/':
-        TMPDIR = TMPDIR[:-1]
-    RANDTMPDIR = TMPDIR + '/' + str(uuid.uuid4()) + '/'
-    print(f'Saving temporary files in: {RANDTMPDIR}')
-    os.mkdir(RANDTMPDIR)
-
-def create_rand_tmpdir():
-    # This funciton is poorly named... it just returns the already created
-    # temporary directory for this calculation
-    return RANDTMPDIR
+#if RANK == 0:
+##    TMPDIR = os.environ.get('TMPDIR','.')
+##    if TMPDIR[-1] == '/':
+##        TMPDIR = TMPDIR[:-1]
+##    RANDTMPDIR = TMPDIR + '/' + str(uuid.uuid4()) + '/'
+#    RANDTMPDIR = './' + str(uuid.uuid4()) + '/'
+#    print(f'Saving temporary files in: {RANDTMPDIR}')
+#    os.mkdir(RANDTMPDIR)
+#
+#def create_rand_tmpdir():
+#    # This funciton is poorly named... it just returns the already created
+#    # temporary directory for this calculation
+#    return RANDTMPDIR
 
 def rand_fname():
     return str(uuid.uuid4())
 
-def clear_tmpdir(tmpdir):
-    try:
-        shutil.rmtree(tmpdir)
-    except OSError as e:
-        pass
-
-if RANK == 0:
-    atexit.register(clear_tmpdir, RANDTMPDIR)
+#def clear_tmpdir(tmpdir):
+#    try:
+#        shutil.rmtree(tmpdir)
+#    except OSError as e:
+#        pass
+#
+#if RANK == 0:
+#    atexit.register(clear_tmpdir, RANDTMPDIR)
 
 def parallelized_looped_function(func, iterate_over, args, kwargs):
     """
@@ -579,47 +581,67 @@ class Hubbard:
 #############################################################
 # gradient functions
 #############################################################
-def _norm_benvs(side,norm,tmpdir,profile,**compress_opts):
+def _norm_left(norm,tmpdir,profile,**compress_opts):
     norm = load_ftn_from_disc(norm)
-    if side == 'left':
-        benvs = norm.compute_left_environments(**compress_opts)
-    else:
-        benvs = norm.compute_right_environments(**compress_opts)
+    first_col = norm.col_tag(0)
     benvs_ = dict()
-    if side=='left':
-        for j in range(2,norm.Ly):
-            benvs_['norm','left',j] = write_ftn_to_disc(benvs['left',j],tmpdir)
-        for j in range(norm.Ly-1):
-            benvs_['norm','mid',j] = write_ftn_to_disc(benvs['mid',j],tmpdir)
-    else:
-        for j in range(norm.Ly-2):
-            benvs_['norm','right',j] = write_ftn_to_disc(benvs['right',j],tmpdir)
-        j = norm.Ly-1
-        benvs_['norm','mid',j] = write_ftn_to_disc(benvs['mid',j],tmpdir)
+    for j in range(2,norm.Ly):
+        norm.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,norm.Lx-1),
+                                          **compress_opts)
+        benvs_['norm','left',j] = write_ftn_to_disc(norm.select(first_col).copy(),
+                                                    tmpdir)
     if profile:
-        _profile('_norm_benvs')
+        _profile(f'_norm_left')
     return benvs_ 
-def _1col_mid(opis,data_map,norm,tmpdir,profile):
-    ftn = load_ftn_from_disc(norm)
+def _norm_right(norm,tmpdir,profile,**compress_opts):
+    norm = load_ftn_from_disc(norm)
+    last_col = norm.col_tag(norm.Ly-1)
+    benvs_ = dict()
+    for j in range(norm.Ly-3,-1,-1):
+        norm.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,norm.Lx-1),
+                                           **compress_opts)
+        benvs_['norm','right',j] = write_ftn_to_disc(norm.select(last_col).copy(),
+                                                    tmpdir)
+    if profile:
+        _profile(f'_norm_right')
+    return benvs_
+def _norm_mid(norm,tmpdir,profile):
+    norm = load_ftn_from_disc(norm)
+    benvs_ = dict()
+    for j in range(norm.Ly):
+        benvs_['norm','mid',j] = write_ftn_to_disc(
+                                     norm.select(norm.col_tag(j)).copy(),tmpdir)
+    if profile:
+        _profile(f'_norm_mid')
+    return benvs_
+def _norm_benvs(side,norm,tmpdir,profile,**compress_opts):
+    if side=='left':
+        return _norm_left(norm,tmpdir,profile,**compress_opts)
+    elif side=='right':
+        return _norm_right(norm,tmpdir,profile,**compress_opts)
+    else:
+        return _norm_mid(norm,tmpdir,profile)
+def _1col_mid(opis,data_map,psi,tmpdir,profile):
+    psi = load_ftn_from_disc(psi)
+    ftn,_,bra = psi.make_norm(return_all=True,layer_tags=('KET','BRA')) 
 
-    N = ftn.num_tensors//2
-    site_range = (N,max(ftn.fermion_space.sites)+1)
     tsrs = []
     for opi in opis:
         ket = ftn[ftn.site_tag(*opi.site),'KET']
         pix = ket.inds[-1] 
         TG = FermionTensor(data=opi.get_data(data_map),tags=ket.tags,
                            inds=(pix,pix+'_'),left_inds=(pix,))
-        tsrs.append(ftn.fermion_space.move_past(TG,site_range))
+        tsrs.append(bra.fermion_space.move_past(TG))
 
     ftn.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
     for TG,opi in zip(tsrs,opis):
-        bra = ftn[ftn.site_tag(*opi.site),'BRA']
+        site_tag = ftn.site_tag(*opi.site)
+        bra = ftn[site_tag,'BRA']
         bra_tid,bra_site = bra.get_fermion_info()
         site_range = (bra_site,max(ftn.fermion_space.sites)+1)
         TG = ftn.fermion_space.move_past(TG,site_range)
 
-        ket = ftn[ftn.site_tag(*opi.site),'KET']
+        ket = ftn[site_tag,'KET']
         pix = ket.inds[-1] 
         ket.reindex_({pix:pix+'_'})
         ket_tid,ket_site = ket.get_fermion_info()
@@ -632,7 +654,7 @@ def _1col_mid(opis,data_map,norm,tmpdir,profile):
     ftn = write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),tmpdir)
     if profile:
         _profile(f'_1col_mid')
-    return {(term,'mid',y):ftn}
+    return term,y,ftn
 def _1col_left(info,benvs,tmpdir,Ly,profile,**compress_opts):
     opis,ix = info
     y = opis[0].site[1]
@@ -703,12 +725,14 @@ def _2col_left(opis,benvs,tmpdir,Ly,profile,**compress_opts):
     ls = [load_ftn_from_disc(fname) for fname in ls]
     like = ls[0] if ls[0].num_tensors>0 else ls[1]
     ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
-    benvs = ftn.compute_left_environments(yrange=(y2-1,Ly-1),**compress_opts) 
 
     benvs_ = dict()
+    first_col = ftn.col_tag(0)
     term = tag1,tag2
     for j in range(y2+1,Ly):
-        benvs_[term,'left',j] = write_ftn_to_disc(benvs['left',j],tmpdir)
+        ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),
+                                         **compress_opts)
+        benvs_[term,'left',j] = write_ftn_to_disc(ftn.select(first_col).copy(),tmpdir)
     if profile:
         _profile(f'_2col_left')
     return benvs_
@@ -723,12 +747,14 @@ def _2col_right(opis,benvs,tmpdir,Ly,profile,**compress_opts):
     ls = [load_ftn_from_disc(fname) for fname in ls]
     like = ls[0] if ls[0].num_tensors>0 else ls[1]
     ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
-    benvs = ftn.compute_right_environments(yrange=(0,y1+1),**compress_opts) 
 
     benvs_ = dict()
+    last_col = ftn.col_tag(Ly-1)
     term = tag1,tag2
-    for j in range(0,y1):
-        benvs_[term,'right',j] = write_ftn_to_disc(benvs['right',j],tmpdir)
+    for j in range(y1-1,-1,-1):
+        ftn.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,ftn.Lx-1),
+                                          **compress_opts)
+        benvs_[term,'right',j] = write_ftn_to_disc(ftn.select(last_col).copy(),tmpdir)
     if profile:
         _profile(f'_2col_right')
     return benvs_
@@ -838,7 +864,6 @@ def _row_envs(info,benvs,tmpdir,Ly,profile,**compress_opts):
         data_map[(i,j),term] = scal*fac,data*fac
     if profile:
         _profile(f'_row_envs')
-    envs = None
     return data_map
 def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     layer_tags=('KET','BRA'),max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
@@ -848,34 +873,37 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     compress_opts['canonize'] = canonize
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
-
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
-    norm = write_ftn_to_disc(norm,tmpdir)
+    Lx,Ly = psi.Lx,psi.Ly
 
     fxn = _norm_benvs
-    iterate_over = ['left','right']
+    iterate_over = ['left','right','mid']
+    norm = psi.make_norm(layer_tags=('KET','BRA'))
+    norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
+    norm = write_ftn_to_disc(norm,tmpdir)
     args = [norm,tmpdir,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     benvs = dict()
     for benvs_ in ls:
         benvs.update(benvs_)
+    delete_ftn_from_disc(norm)
 #    print('nfile=',len(os.listdir(tmpdir)))
 
     # treate 1col terms
     fxn = _1col_mid
-    iterate_over  = [opis for (opis,_) in H._1col_terms]
-    args = [H.data_map,norm,tmpdir,profile]
+    iterate_over = [opis for (opis,_) in H._1col_terms]
+    psi = write_ftn_to_disc(psi,tmpdir) 
+    args = [H.data_map,psi,tmpdir,profile]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
+    for (term,y,ftn) in ls:
+        benvs[term,'mid',y] = ftn
 #    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_benvs
-    iterate_over  = [('left', opis,psi.Ly-1) for (opis,_) in H._1col_terms]
+    iterate_over  = [('left', opis,Ly-1) for (opis,_) in H._1col_terms]
     iterate_over += [('right',opis,0) for (opis,_) in H._1col_terms]
-    args = [benvs,tmpdir,psi.Ly,profile]
+    args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -884,15 +912,14 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
 #    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _row_envs
-    iterate_over  = [(None,j,1.0) for j in range(psi.Ly)]
-    iterate_over += [(opis,j,fac) for j in range(psi.Ly)
-                                  for (opis,fac) in H._1col_terms]
-    args = [benvs,tmpdir,psi.Ly,profile]
+    iterate_over  = [(None,j,1.0) for j in range(Ly)]
+    iterate_over += [(opis,j,fac) for j in range(Ly) for (opis,fac) in H._1col_terms]
+    args = [benvs,tmpdir,Ly,profile]
     compress_opts['dense'] = dense_row
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    H0 = {(i,j):0.0 for i in range(psi.Lx) for j in range(psi.Ly)}
-    H1 = {(i,j):0.0 for i in range(psi.Lx) for j in range(psi.Ly)}
+    H0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
+    H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
     N0 = dict() 
     N1 = dict()
     for data_map in ls:
@@ -913,19 +940,19 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     # treat 2col terms
     fxn = _1col_mid
     iterate_over = [(opi,) for (opi,_) in H.reuse]
-    args = [H.data_map,norm,tmpdir,profile]
+    args = [H.data_map,psi,tmpdir,profile]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-    delete_ftn_from_disc(norm) 
+    for (tag,y,ftn) in ls:
+        benvs[tag,'mid',y] = ftn
+    delete_ftn_from_disc(psi) 
 #    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_benvs
-    iterate_over  = [('left',(opi,),min(opi.site[1]+dy,psi.Ly-1)) \
+    iterate_over  = [('left',(opi,),min(opi.site[1]+dy,Ly-1)) \
                      for (opi,dy) in H.reuse]
     iterate_over += [('right',(opi,),max(opi.site[1]-dy,0)) for (opi,dy) in H.reuse]
-    args = [benvs,tmpdir,psi.Ly,profile]
+    args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -936,7 +963,7 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     fxn = _2col_benvs
     iterate_over = [(side,opis) for (opis,_) in H._2col_terms \
                                 for side in ['left','right']]
-    args = [benvs,tmpdir,psi.Ly,profile]
+    args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -944,9 +971,9 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
 #    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _row_envs
-    iterate_over = [(opis,j,fac) for j in range(psi.Ly)
+    iterate_over = [(opis,j,fac) for j in range(Ly)
                      for (opis,fac) in H._2col_terms]
-    args = [benvs,tmpdir,psi.Ly,profile]
+    args = [benvs,tmpdir,Ly,profile]
     compress_opts['dense'] = dense_row
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -959,10 +986,10 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
 
     g = dict()
     E = []
-    for i in range(psi.Lx):
-        for j in range(psi.Ly):
+    for i in range(Lx):
+        for j in range(Ly):
             E.append(H0[i,j]/N0[i,j])
-            g[psi.site_tag(i,j)] = (H1[i,j]-N1[i,j]*E[-1])/N0[i,j]
+            g[i,j] = (H1[i,j]-N1[i,j]*E[-1])/N0[i,j]
     dE = max(E)-min(E)
     E = sum(E)/len(E)
     N = N0[0,0]
@@ -1003,9 +1030,14 @@ def _energy_term(info,benvs,**compress_opts):
     like = ls[0] if ls[0].num_tensors>0 else ls[1]
     ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
     ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
+    dense = compress_opts.pop('dense')
+    if dense:
+        for i in range(ftn.Lx-3,-1,-1):
+            ftn ^= (ftn.row_tag(i+1),ftn.row_tag(i+2))
+    else:
+        for i in range(ftn.Lx-3,-1,-1):
+            ftn.contract_boundary_from_top_(yrange=(0,1),xrange=(i+1,i+2),
+                                            **compress_opts)
     return term,ftn.contract()*fac
 def compute_energy(H,psi,tmpdir,dense_row=True,
     layer_tags=('KET','BRA'),max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
@@ -1015,38 +1047,42 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     compress_opts['canonize'] = canonize
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
+    Lx,Ly = psi.Lx,psi.Ly
 
+    fxn = _norm_benvs
+    iterate_over = ['right','mid']
     norm = psi.make_norm(layer_tags=('KET','BRA'))
-    benvs_ = norm.compute_right_environments(**compress_opts)
-    benvs = dict()
-    for (side,j),ftn in benvs_.items():
-        benvs['norm',side,j] = write_ftn_to_disc(ftn,tmpdir)
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    benvs['norm','mid',0] = write_ftn_to_disc(norm.select(norm.col_tag(0)).copy(),
-                                              tmpdir)
-
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm = write_ftn_to_disc(norm,tmpdir)
+    args = [norm,tmpdir,False]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    benvs = dict()
+    for benvs_ in ls:
+        benvs.update(benvs_)
+    delete_ftn_from_disc(norm)
+    print('nfile=',len(os.listdir(tmpdir)))
 
     # treate 1col terms
     fxn = _1col_mid
     iterate_over  = [opis for (opis,_) in H._1col_terms]
-    args = [H.data_map,norm,tmpdir,False]
+    psi = write_ftn_to_disc(psi,tmpdir) 
+    args = [H.data_map,psi,tmpdir,False]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-#    print('nfile=',len(os.listdir(tmpdir)))
+    for (term,y,ftn) in ls:
+        benvs[term,'mid',y] = ftn
+    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_right
     iterate_over  = [(opis,0)   for (opis,_) in H._1col_terms]
-    args = [benvs,tmpdir,psi.Ly,False]
+    args = [benvs,tmpdir,Ly,False]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         if benvs_ is not None:
             benvs.update(benvs_)
-#    print('nfile=',len(os.listdir(tmpdir)))
+    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _energy_term
     iterate_over = H._1col_terms + [(None,1.)]
@@ -1065,22 +1101,22 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     for key in keys:
         fname = benvs.pop(key)
         delete_ftn_from_disc(fname)
-#    print('nfile=',len(os.listdir(tmpdir)))
+    print('nfile=',len(os.listdir(tmpdir)))
 
     # treat 2col terms
     fxn = _1col_mid
     iterate_over = [(opi,) for (opi,_) in H.reuse]
-    args = [H.data_map,norm,tmpdir,False]
+    args = [H.data_map,psi,tmpdir,False]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-    delete_ftn_from_disc(norm) 
-#    print('nfile=',len(os.listdir(tmpdir)))
+    for (tag,y,ftn) in ls:
+        benvs[tag,'mid',y] = ftn
+    delete_ftn_from_disc(psi) 
+    print('nfile=',len(os.listdir(tmpdir)))
 
     fxn = _1col_right
     iterate_over = [((opi,),max(opi.site[1]-dy,0)) for (opi,dy) in H.reuse]
-    args = [benvs,tmpdir,psi.Ly,False]
+    args = [benvs,tmpdir,Ly,False]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -1089,7 +1125,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
 
     fxn = _2col_right
     iterate_over = [opis for (opis,_) in H._2col_terms]
-    args = [benvs,tmpdir,psi.Ly,False]
+    args = [benvs,tmpdir,Ly,False]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -1107,34 +1143,7 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     for _,fname in benvs.items():
         delete_ftn_from_disc(fname) 
     return H0/N,N
-def _pn_site(info,envs,Lx):
-    (i,j),data = info
-    b = [] if i==0 else [envs['norm',j,'bottom',i]]
-    t = [] if i==Lx-1 else [envs['norm',j,'top',i]]
-    ls = b + [envs['norm',j,'mid',i]] + t
-    ls = [load_ftn_from_disc(fname) for fname in ls]
-    like = ls[0] if ls[0].num_tensors>0 else ls[1]
-    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
-
-    N = ftn.contract()
-    ket = ftn[ftn.site_tag(i,j),'KET']
-    pix = ket.inds[-1]
-    TG = FermionTensor(data=data.copy(),inds=(pix,pix+'_'),left_inds=(pix,))
-    ket.reindex_({pix:pix+'_'})
-    ftn.add_tensor(TG,virtual=True)
-    return ftn.contract()/N,N
-class PN:
-    def __init__(self,Nx,Ny,symmetry='u1',flat=True):
-        self.data_map = {'pn': ParticleNumber(symmetry=symmetry,flat=flat)}
-        self._2col_terms = []
-        self.reuse = []
-        self._1col_terms = []
-        for i in range(Nx):
-            for j in range(Ny):
-                opis = OPi({'pn':1.},(i,j)),
-                self._1col_terms.append((opis,1.))
-def compute_particle_number(psi,tmpdir,symmetry='u1',flat=True,
-    dense_row=True,layer_tags=('KET','BRA'),
+def compute_norm(psi,layer_tags=('KET','BRA'),dense_row=True,
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
     compress_opts['max_bond'] = max_bond
@@ -1142,48 +1151,39 @@ def compute_particle_number(psi,tmpdir,symmetry='u1',flat=True,
     compress_opts['canonize'] = canonize
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
-    H = PN(psi.Lx,psi.Ly,symmetry=symmetry,flat=flat)
-    return compute_energy(H,psi,tmpdir,dense_row=dense_row,**compress_opts)
-def compute_norm(psi,layer_tags=('KET','BRA'),
-    max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
-    compress_opts = dict()
-    compress_opts['max_bond'] = max_bond
-    compress_opts['cutoff'] = cutoff
-    compress_opts['canonize'] = canonize
-    compress_opts['mode'] = mode
-    compress_opts['layer_tags'] = layer_tags
-    Lx,Ly = psi.Lx,psi.Ly
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    ftn_dict = norm.compute_right_environments(**compress_opts)
-    ftn = FermionTensorNetwork(
-          (norm.select(norm.col_tag(0)).copy(),ftn_dict['right',0])
-          ).view_as_(FermionTensorNetwork2D,like=norm)
-    ftn.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    top_envs = ftn.compute_top_environments(yrange=(0,1),**compress_opts)
-    ftn = FermionTensorNetwork(
-          (ftn.select(ftn.row_tag(0)).copy(),top_envs['top',0]))
-    return ftn.contract() 
+    for j in range(norm.Ly-3,-1,-1):
+        norm.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,norm.Lx-1),
+                                           **compress_opts)
+    norm.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
+    if dense_row:
+        for i in range(norm.Lx-3,-1,-1):
+            norm ^= (norm.row_tag(i+1),norm.row_tag(i+2))
+    else:
+        for i in range(norm.Lx-3,-1,-1):
+            norm.contract_boundary_from_top_(yrange=(0,1),xrange=(i+1,i+2),
+                                            **compress_opts)
+    return norm.contract() 
 class GlobalGrad():
-    def __init__(self,H,peps,chi,psi_fname,profile=False,dense_row=True):
+    def __init__(self,H,peps,chi,psi_fname,tmpdir,profile=False,dense_row=True):
         self.start_time = time.time()
         self.H = H
         self.D = peps[peps.site_tag(0,0)].shape[0]
         self.chi = chi
         self.profile = profile
         self.dense_row = dense_row
-        self.tmpdir = RANDTMPDIR 
+        self.tmpdir = tmpdir 
         print(f'D={self.D},chi={self.chi}')
 
-        PN,N = compute_particle_number(peps,self.tmpdir,max_bond=128)  
-        print('PN=',PN)
+        N = compute_norm(peps,max_bond=chi,dense_row=dense_row)
         peps = peps.multiply_each(N**(-1.0/(2.0*peps.num_tensors)),inplace=True)
         peps.balance_bonds_()
         peps.equalize_norms_()
         self.fac = 1.0
 
-        self.psi_fname = psi_fname
-        write_ftn_to_disc(peps,self.psi_fname, provided_filename=True) # save state
+        self.psi = psi_fname
+        write_ftn_to_disc(peps,self.psi, provided_filename=True) # save state
         self.constructors = dict()
         for i in range(peps.Lx):
             for j in range(peps.Ly):
@@ -1192,26 +1192,24 @@ class GlobalGrad():
                 bond_infos = [data.get_bond_info(ax,flip=False) \
                               for ax in range(data.ndim)]
                 cons = Constructor.from_bond_infos(bond_infos,data.pattern)
-                self.constructors[site_tag] = cons,data.dq
+                self.constructors[i,j] = cons,data.dq
         self.ng = 0
         self.ne = 0
     def fpeps2vec(self,psi):
         ls = []
         for i in range(psi.Lx):
             for j in range(psi.Ly):
-                site_tag = psi.site_tag(i,j)
-                cons = self.constructors[site_tag][0]
-                ls.append(cons.tensor_to_vector(psi[site_tag].data))
+                cons = self.constructors[i,j][0]
+                ls.append(cons.tensor_to_vector(psi[i,j].data))
         return np.concatenate(ls)
     def vec2fpeps(self,x):
-        psi = load_ftn_from_disc(self.psi_fname)
+        psi = load_ftn_from_disc(self.psi)
         start = 0
         for i in range(psi.Lx):
             for j in range(psi.Ly):
-                site_tag = psi.site_tag(i,j)
-                cons,dq = self.constructors[site_tag]
+                cons,dq = self.constructors[i,j]
                 stop = int(start+cons.get_info(dq)[-1][-1]+1e-6)
-                psi[site_tag].modify(data=cons.vector_to_tensor(x[start:stop],dq))
+                psi[i,j].modify(data=cons.vector_to_tensor(x[start:stop],dq))
                 start = stop
         return psi
     def compute_energy(self,x):
@@ -1225,14 +1223,13 @@ class GlobalGrad():
         return E,N
     def compute_grad(self,x):
         psi = self.vec2fpeps(x)
-        grad,E,N,dE = compute_grad(self.H,psi,self.tmpdir,profile=self.profile,
+        gmap,E,N,dE = compute_grad(self.H,psi,self.tmpdir,profile=self.profile,
             dense_row=self.dense_row,max_bond=self.chi,cutoff=1e-15)
         g = []
         for i in range(psi.Lx):
             for j in range(psi.Ly):
-                site_tag = psi.site_tag(i,j)
-                cons = self.constructors[site_tag][0]
-                g.append(cons.tensor_to_vector(grad[site_tag]))
+                cons = self.constructors[i,j][0]
+                g.append(cons.tensor_to_vector(gmap[i,j]))
         g = np.concatenate(g)
         gmax = np.amax(abs(g))
         print('    ng={},time={}'.format(self.ng,time.time()-self.start_time))
@@ -1244,12 +1241,12 @@ class GlobalGrad():
         x *= self.fac
         g /= self.fac
         psi = self.vec2fpeps(x)
-        write_ftn_to_disc(psi,self.psi_fname,provided_filename=True)
+        write_ftn_to_disc(psi,self.psi,provided_filename=True)
         return x,g
     def kernel(self,method=_minimize_bfgs,options={'maxiter':200,'gtol':1e-5}):
         self.ng = 0
         self.ne = 0
-        x0 = self.fpeps2vec(load_ftn_from_disc(self.psi_fname))
+        x0 = self.fpeps2vec(load_ftn_from_disc(self.psi))
         scipy.optimize.minimize(fun=self.compute_grad,jac=True,
                  method=method,x0=x0,
                  callback=self.callback,options=options)
