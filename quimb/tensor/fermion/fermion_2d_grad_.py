@@ -12,11 +12,11 @@ from .fermion_2d import FermionTensorNetwork2D
 from .block_interface import (
     Constructor,
     creation,
+    annihilation,
     onsite_U,
     ParticleNumber,
 )
 from .utils import (
-    OPi,
     SumOpGrad,
     parallelized_looped_function,
     worker_execution,
@@ -26,36 +26,30 @@ from .utils import (
     _profile,
 )
 np.set_printoptions(suppress=True,linewidth=1000,precision=4)
+data_map = {'cre_a':creation(spin='a',flat=True),
+            'ann_a':annihilation(spin='a',flat=True),
+            'cre_b':creation(spin='b',flat=True),
+            'ann_b':annihilation(spin='b',flat=True),
+            'pn':ParticleNumber(flat=True),
+            'nanb':onsite_U(u=1.,flat=True)}
 
 ##################################################################
 # Hamiltonians
 ##################################################################
-def hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
-    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-    ann_a = cre_a.dagger
-    ann_b = cre_b.dagger
-    pn    = ParticleNumber(symmetry=symmetry,flat=flat)
-    nanb  = onsite_U(u=1.0,symmetry=symmetry)
-    sign_a = (-1)**(cre_a.parity*ann_a.parity)
-    sign_b = (-1)**(cre_b.parity*ann_b.parity)
-    data_map = {'cre_a':cre_a,'ann_a':ann_a,'cre_b':cre_b,'ann_b':ann_b,
-                'pn':pn,'onsite':nanb}
-    _1col_terms = []
+def hubbard(t,u,Lx,Ly):
+    sign_a = (-1)**(data_map['cre_a'].parity*data_map['ann_a'].parity)
+    sign_b = (-1)**(data_map['cre_b'].parity*data_map['ann_b'].parity)
+    _1col_terms = {j:[] for j in range(Ly)}
     _2col_terms = []
     for i in range(Lx):
         for j in range(Ly):
-            opis = OPi({'onsite':1.},(i,j)),
-            _1col_terms.append((opis,u)) 
+            _1col_terms[j].append(([i],[{'nanb':1.}],u)) 
             if i+1 != Lx:
-                opis = OPi({'cre_a':1.},(i,j)),OPi({'ann_a':1.},(i+1,j))
-                _1col_terms.append((opis,-t*sign_a)) 
-                opis = OPi({'ann_a':1.},(i,j)),OPi({'cre_a':1.},(i+1,j))
-                _1col_terms.append((opis,-t)) 
-                opis = OPi({'cre_b':1.},(i,j)),OPi({'ann_b':1.},(i+1,j))
-                _1col_terms.append((opis,-t*sign_b)) 
-                opis = OPi({'ann_b':1.},(i,j)),OPi({'cre_b':1.},(i+1,j))
-                _1col_terms.append((opis,-t)) 
+                xs = [i,i+1]
+                _1col_terms[j].append((xs,[{'cre_a':1.},{'ann_a':1.}],-t*sign_a)) 
+                _1col_terms[j].append((xs,[{'ann_a':1.},{'cre_a':1.}],-t)) 
+                _1col_terms[j].append((xs,[{'cre_b':1.},{'ann_b':1.}],-t*sign_b)) 
+                _1col_terms[j].append((xs,[{'ann_b':1.},{'cre_b':1.}],-t)) 
             if j+1 != Ly:
                 opis = OPi({'cre_a':1.},(i,j)),OPi({'ann_a':1.},(i,j+1))
                 _2col_terms.append((opis,-t*sign_a))             
@@ -72,106 +66,121 @@ def hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
 #############################################################
 # gradient functions
 #############################################################
-def _norm_left(norm,tmpdir,profile,**compress_opts):
-    norm = load_ftn_from_disc(norm)
-    first_col = norm.col_tag(0)
-    benvs_ = dict()
-    for j in range(2,norm.Ly):
-        norm.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,norm.Lx-1),
-                                          **compress_opts)
-        benvs_['norm','left',j] = write_ftn_to_disc(norm.select(first_col).copy(),
-                                                    tmpdir)
-    if profile:
-        _profile(f'_norm_left')
-    return benvs_ 
-def _norm_right(norm,tmpdir,profile,**compress_opts):
-    norm = load_ftn_from_disc(norm)
-    last_col = norm.col_tag(norm.Ly-1)
-    benvs_ = dict()
-    for j in range(norm.Ly-3,-1,-1):
-        norm.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,norm.Lx-1),
-                                           **compress_opts)
-        benvs_['norm','right',j] = write_ftn_to_disc(norm.select(last_col).copy(),
-                                                    tmpdir)
-    if profile:
-        _profile(f'_norm_right')
-    return benvs_
-def _norm_mid(norm,tmpdir,profile):
-    norm = load_ftn_from_disc(norm)
-    benvs_ = dict()
-    for j in range(norm.Ly):
-        benvs_['norm','mid',j] = write_ftn_to_disc(
-                                     norm.select(norm.col_tag(j)).copy(),tmpdir)
-    if profile:
-        _profile(f'_norm_mid')
-    return benvs_
-def _norm_benvs(side,norm,tmpdir,profile,**compress_opts):
-    if side=='left':
-        return _norm_left(norm,tmpdir,profile,**compress_opts)
-    elif side=='right':
-        return _norm_right(norm,tmpdir,profile,**compress_opts)
-    else:
-        return _norm_mid(norm,tmpdir,profile)
-def _1col_mid(opis,data_map,psi,tmpdir,profile):
-    psi = load_ftn_from_disc(psi)
-    ftn,_,bra = psi.make_norm(return_all=True,layer_tags=('KET','BRA')) 
-
-    tsrs = []
-    for opi in opis:
-        ket = ftn[ftn.site_tag(*opi.site),'KET']
-        pix = ket.inds[-1] 
-        TG = FermionTensor(data=opi.get_data(data_map),tags=ket.tags,
-                           inds=(pix,pix+'_'),left_inds=(pix,))
-        tsrs.append(bra.fermion_space.move_past(TG))
-
-    ftn.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    for TG,opi in zip(tsrs,opis):
-        site_tag = ftn.site_tag(*opi.site)
-        _,bra_site = ftn[site_tag,'BRA'].get_fermion_info()
-        site_range = bra_site,max(ftn.fermion_space.sites)+1
-        TG = ftn.fermion_space.move_past(TG,site_range)
-
-        inds = ftn[site_tag,'KET'].inds
-        pix = inds[-1] 
-        ftn[site_tag,'KET'].reindex_({pix:pix+'_'})
-        _,ket_site = ftn[site_tag,'KET'].get_fermion_info()
-        ftn = insert(ftn,ket_site+1,TG)
-        ftn.contract_tags(TG.tags,which='all',output_inds=inds,inplace=True)
-
-    y = opis[0].site[1]
-    term = tuple([opi.tag for opi in opis])
-    term = term[0] if len(term)==1 else term
-    ftn = write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),tmpdir)
-    if profile:
-        _profile(f'_1col_mid')
-    return {(term,'mid',y):ftn}
+#def _norm_left(norm,tmpdir,profile,**compress_opts):
+#    norm = load_ftn_from_disc(norm)
+#    first_col = norm.col_tag(0)
+#    benvs_ = dict()
+#    for j in range(2,norm.Ly):
+#        norm.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,norm.Lx-1),
+#                                          **compress_opts)
+#        benvs_['norm','left',j] = write_ftn_to_disc(norm.select(first_col).copy(),
+#                                                    tmpdir)
+#    if profile:
+#        _profile(f'_norm_left')
+#    return benvs_ 
+#def _norm_right(norm,tmpdir,profile,**compress_opts):
+#    norm = load_ftn_from_disc(norm)
+#    last_col = norm.col_tag(norm.Ly-1)
+#    benvs_ = dict()
+#    for j in range(norm.Ly-3,-1,-1):
+#        norm.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,norm.Lx-1),
+#                                           **compress_opts)
+#        benvs_['norm','right',j] = write_ftn_to_disc(norm.select(last_col).copy(),
+#                                                    tmpdir)
+#    if profile:
+#        _profile(f'_norm_right')
+#    return benvs_
+#def _norm_mid(norm,tmpdir,profile):
+#    norm = load_ftn_from_disc(norm)
+#    benvs_ = dict()
+#    for j in range(norm.Ly):
+#        benvs_['norm','mid',j] = write_ftn_to_disc(
+#                                     norm.select(norm.col_tag(j)).copy(),tmpdir)
+#    if profile:
+#        _profile(f'_norm_mid')
+#    return benvs_
+#def _norm_benvs(side,norm,tmpdir,profile,**compress_opts):
+#    if side=='left':
+#        return _norm_left(norm,tmpdir,profile,**compress_opts)
+#    elif side=='right':
+#        return _norm_right(norm,tmpdir,profile,**compress_opts)
+#    else:
+#        return _norm_mid(norm,tmpdir,profile)
+#def _1col_mid(opis,data_map,psi,tmpdir,profile):
+#    psi = load_ftn_from_disc(psi)
+#    ftn,_,bra = psi.make_norm(return_all=True,layer_tags=('KET','BRA')) 
+#
+#    tsrs = []
+#    for opi in opis:
+#        ket = ftn[ftn.site_tag(*opi.site),'KET']
+#        pix = ket.inds[-1] 
+#        TG = FermionTensor(data=opi.get_data(data_map),tags=ket.tags,
+#                           inds=(pix,pix+'_'),left_inds=(pix,))
+#        tsrs.append(bra.fermion_space.move_past(TG))
+#
+#    ftn.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
+#    for TG,opi in zip(tsrs,opis):
+#        site_tag = ftn.site_tag(*opi.site)
+#        _,bra_site = ftn[site_tag,'BRA'].get_fermion_info()
+#        site_range = bra_site,max(ftn.fermion_space.sites)+1
+#        TG = ftn.fermion_space.move_past(TG,site_range)
+#
+#        inds = ftn[site_tag,'KET'].inds
+#        pix = inds[-1] 
+#        ftn[site_tag,'KET'].reindex_({pix:pix+'_'})
+#        _,ket_site = ftn[site_tag,'KET'].get_fermion_info()
+#        ftn = insert(ftn,ket_site+1,TG)
+#        ftn.contract_tags(TG.tags,which='all',output_inds=inds,inplace=True)
+#
+#    y = opis[0].site[1]
+#    term = tuple([opi.tag for opi in opis])
+#    term = term[0] if len(term)==1 else term
+#    ftn = write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),tmpdir)
+#    if profile:
+#        _profile(f'_1col_mid')
+#    return {(term,'mid',y):ftn}
 def _1col_left(info,benvs,tmpdir,Ly,profile,**compress_opts):
-    # computes missing left envs: y,...,ix
-    opis,ix = info
-    y = opis[0].site[1]
+    y,stop,xs,ops,op_tags = info
+    ls = [] if y==0 else [benvs['norm','left',y]]
+    ls += [benvs['norm','mid',j] for j in range(y,stop)]
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    ftn = FermionTensorNetwork(ls).view_as_(FermonTensorNetwork2D,like=ls[0])
     benvs_ = dict()
-    if y<Ly-1:
-        term = tuple([opi.tag for opi in opis])
-        term = term[0] if len(term)==1 else term
-        ls = []
-        if y>0:
-            ls += [benvs['norm','mid',0]] if y==1 else [benvs['norm','left',y]]
-        ls += [benvs[term,'mid',y]]
-        ls += [benvs['norm','mid',j] for j in range(y+1,ix)]
-        j0 = y+2 if y==0 else y+1
+    if ops is None:
+        term = 'norm'
+    else:
+        term = tuple([f'{op_tag}_{x},{y}' for x,op_tag in zip(xs,op_tags)])
+        for x,op in zip(xs,ops):
+            ket = ftn[(x,y),'KET']
+            pix = ket.inds[-1] 
+            ket.reindex_({pix:pix+'_'})
+            TG = FermionTensor(data=op.copy(),tags=ket.tags,
+                               inds=(pix,pix+'_'),left_inds=(pix,))
 
-        ls = [load_ftn_from_disc(fname) for fname in ls]
-        like = ls[0] if ls[0].num_tensors>0 else ls[1]
-        ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+            isite = ftn[(x,y),'BRA'].get_fermion_info()[1]
+            site_range = isite,max(ftn.fermion_space.sites)+1
+            TG = ftn.fermion_space.move_past(TG,site_range)
+            
+            isite = ket.get_fermion_info()[1]
+            ftn = insert(ftn,isite+1,TG)
+            ftn.contract_tags(TG.tags,which='all',output_inds=inds,inplace=True)
+        benvs_[term,'mid',y] = \
+            write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),tmpdir)
 
-        first_col = ftn.col_tag(0)
-        for j in range(j0,ix+1):
-            ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),
-                                             **compress_opts) 
-            benvs_[term,'left',j] = write_ftn_to_disc(ftn.select(first_col).copy(),
-                                                      tmpdir)
-        if profile:
-            _profile(f'_1col_left')
+    first_col = ftn.col_tag(0)
+    if y==1:
+        benvs_[term,'left',1] = benvs['norm','mid',0]
+        j0 = 2
+    else:
+        j0 = y+1
+        benvs_.update({(term,'left',j):benvs['norm','left',j] for j in range(j0)})
+    for j in range(j0,stop+1):
+        ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),
+                                         **compress_opts) 
+        benvs_[term,'left',j] = write_ftn_to_disc(ftn.select(first_col).copy(),
+                                                  tmpdir)
+    if profile:
+        _profile(f'_1col_left')
     return benvs_
 def _1col_right(info,benvs,tmpdir,Ly,profile,**compress_opts):
     # computes missing right envs: ix,...,y-1
@@ -363,10 +372,13 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
     Lx,Ly = psi.Lx,psi.Ly
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
+    norm,_,bra = psi.make_norm(layer_tags=('KET','BRA'),return_all=True)
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    norm = write_ftn_to_disc(norm,tmpdir)
-    psi = write_ftn_to_disc(psi,tmpdir) 
+    benvs = {('norm','mid',j):
+             write_ftn_to_disc(norm.select(norm.col_tag(j)).copy(),tmpdir)}
+
+
+    for j in range(Ly):
 
     fxn = _norm_benvs
     iterate_over = ['left','right','mid']

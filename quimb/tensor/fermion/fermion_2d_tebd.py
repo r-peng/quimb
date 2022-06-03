@@ -4,23 +4,9 @@ from scipy.linalg import lstsq
 from autoray import do
 from opt_einsum import shared_intermediates
 import numpy as np
-import pickle,os
 import scipy.sparse.linalg as spla
 
-from pyblock3.algebra.fermion_ops import (
-    creation,
-    bonded_vaccum,
-    Hubbard,
-    _compute_swap_phase,
-    hop_map,
-    pn_dict,
-    cre_map,
-)
-from pyblock3.algebra.fermion_encoding import get_state_map
-from pyblock3.algebra.fermion import SparseFermionTensor
-from pyblock3.algebra.core import SubTensor
-from .block_interface import setting, eye
-
+from .block_interface import eye,Hubbard
 from ...utils import pairwise
 from ...utils import progbar as Progbar
 from ..tensor_core import contract_strategy,bonds
@@ -40,7 +26,6 @@ from ..tensor_2d import (
     calc_plaquette_map,
     Rotator2D,
     plaquette_to_sites,
-    PEPS
 )
 
 from . import block_tools
@@ -53,161 +38,13 @@ from .fermion_core import (
 )
 from .fermion_arbgeom_tebd import LocalHamGen
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
-######################### some helper fxns #######################
-def get_pattern(inds,ind_to_pattern_map):
-    """
-    make sure patterns match in input tensors, eg,
-    --->A--->B--->
-     i    j    k
-    pattern for A_ij = +-
-    pattern for B_jk = +-
-    the pattern of j index must be reversed in two operands
-    """
-    inv_pattern = {"+":"-", "-":"+"}
-    pattern = ""
-    for ix in inds[:-1]:
-        if ix in ind_to_pattern_map:
-            ipattern = inv_pattern[ind_to_pattern_map[ix]]
-        else:
-            nmin = pattern.count("-")
-            ipattern = "-" if nmin*2<len(pattern) else "+"
-            ind_to_pattern_map[ix] = ipattern
-        pattern += ipattern
-    pattern += "+" # assuming last index is the physical index
-    return pattern
-def get_half_filled_product_state(Lx,Ly,symmetry=None):
-    """
-    helper function to generate initial guess from regular PEPS
-    |psi> = \prod (|alpha> + |beta>) at each site
-    this function only works for half filled case with U1 symmetry
-    Note energy of this wfn is 0
-    """
-    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
-    ftn = FermionTensorNetwork([])
-    ind_to_pattern_map = dict()
-    cre = creation(spin='sum',symmetry=symmetry,flat=True) 
-    for ix, iy in product(range(tn.Lx), range(tn.Ly)):
-        T = tn[ix, iy]
-        pattern = get_pattern(T.inds,ind_to_pattern_map)
-        #put vaccum at site (ix, iy) and apply a^{\dagger}
-        vac = bonded_vaccum((1,)*(T.ndim-1), pattern=pattern)
-        trans_order = list(range(1,T.ndim))+[0]
-        data = np.tensordot(cre, vac, axes=((1,), (-1,))).transpose(trans_order)
-        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
-        ftn.add_tensor(new_T, virtual=False)
-    ftn.view_as_(FPEPS, like=tn)
-    return ftn
-def get_product_state(Lx,Ly,symmetry=None,doping=0.0):
-    cre = creation(spin='sum',symmetry=symmetry,flat=True) 
-    des = cre.dagger
-    ftn = get_half_filled_product_state(Lx,Ly,symmetry=symmetry)
-    if doping>0.0: # add hole
-        n = int(Lx*Ly*doping+1e-6)
-        op = des
-    else: # add particle
-        n = int(-Lx*Ly*doping+1e-6)
-        op = creation(spin='a',symmetry=symmetry,flat=True)
-    sites = [(i,j) for i in range(Lx) for j in range(Ly)]
-    for i in range(n):
-        site = sites[np.random.randint(low=0,high=len(sites))]
-        sites.remove(site)
-        site_tag = ftn.site_tag(*site)
-        ket = ftn[ftn.site_tag(*site)]
-        pix = ket.inds[-1]
-        TG = FermionTensor(data=op.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
-                           tags=ket.tags) 
-        ket.reindex_({pix:pix+'_'})
-        ket_tid,ket_site = ket.get_fermion_info()
-        ftn = insert(ftn,ket_site+1,TG)
-        ftn.contract_tags(ket.tags,which='all',inplace=True)
-    return ftn
-def write_ftn_to_disc(tn,fname):
-    # Create a generic dictionary to hold all information
-    data = dict()
-    # Save which type of tn this is
-    data['class'] = type(tn)
-    # Add information relevant to the tensors
-    data['tn_info'] = dict()
-    for e in tn._EXTRA_PROPS:
-        data['tn_info'][e] = getattr(tn, e)
-    # Add the tensors themselves
-    data['tensors'] = []
-    ntensors = 0
-    for ten in tn.tensors:
-        ten_info = dict()
-        ten_info['fermion_info'] = ten.get_fermion_info()
-        ten_info['global_flip'] = ten.phase.get('global_flip',False)
-        ten_info['local_inds'] = tuple(ten.phase.get('local_inds',[]))
-        if fname is None:
-            ten_info['tensor_data'] = ten.data.copy()
-        else:
-            ten_info['tensor_data'] = ten.data
-        ten_info['tensor_inds'] = ten.inds
-        ten_info['tensor_tags'] = ten.tags
-        data['tensors'].append(ten_info)
-        ntensors += 1
-    data['ntensors'] = ntensors
-    # Write to a file
-    if fname is None:
-        return data
-    else:
-        with open(fname, 'wb') as f:
-            pickle.dump(data, f)
-        return fname 
-def load_ftn_from_disc(fname, delete_file=False):
-    # Open up the file
-    if isinstance(fname,str):
-        with open(fname, 'rb') as f:
-            data = pickle.load(f)
-        copy_data = False
-    else:
-        data = fname
-        copy_data = True
-    # Set up a dummy fermionic tensor network
-    tn = FermionTensorNetwork([])
-    # Put the tensors into the ftn
-    tensors = [None,] * data['ntensors']
-    for i in range(data['ntensors']):
-        # Get the tensor
-        ten_info = data['tensors'][i]
-        ten_data = ten_info['tensor_data']
-        inds = ten_info['tensor_inds']
-        tags = ten_info['tensor_tags']
-        global_flip = ten_info['global_flip']
-        local_inds  = ten_info['local_inds']
-        if copy_data:
-            ten = FermionTensor(ten_data.copy(), inds=inds, tags=tags)
-        else:
-            ten = FermionTensor(ten_data, inds=inds, tags=tags)
-        # Get/set tensor info
-        tid, site = ten_info['fermion_info']
-        ten.fermion_owner = None
-        ten._avoid_phase = False
-        # Add the required phase
-        ten.phase = {'global_flip':global_flip,'local_inds':list(local_inds)}
-        # Add to tensor list
-        tensors[site] = (tid, ten)
-    # Add tensors to the tn
-    for (tid, ten) in tensors:
-        tn.add_tensor(ten, tid=tid, virtual=True)
-    # Get addition attributes needed
-    tn_info = data['tn_info']
-    # Set all attributes in the ftn
-    extra_props = dict()
-    for props in tn_info:
-        extra_props[props[1:]] = tn_info[props]
-    # Convert it to the correct type of fermionic tensor network
-    tn = tn.view_as_(data['class'], **extra_props)
-    # Remove file (if desired)
-    if delete_file:
-        delete_ftn_from_disc(fname)
-    # Return resulting tn
-    return tn
-def delete_ftn_from_disc(fname):
-    try:
-        os.remove(fname)
-    except:
-        pass
+from .utils import (
+    match_phase,
+    tensor_copy,
+    copy,
+    insert,
+    replace,
+) 
 def gen_long_range_path(ija,ijb):
     (ia,ja),(ib,jb) = ija,ijb
     step_i = 1 if ib>ia else -1
@@ -216,12 +53,9 @@ def gen_long_range_path(ija,ijb):
     ls += [(i,ja) for i in range(ia+step_i,ib+step_i,step_i)] # first vertical
     ls += [(ib,j) for j in range(ja+step_j,jb+step_j,step_j)] # then horizontal
     return tuple(ls)
-def remove_phase(peps):
-    for i in range(peps.Lx):
-        for j in range(peps.Ly):
-            peps[i,j].phase = dict()
-    return peps
-######################## Hamiltonians ########################################3
+################################################################################
+#                               Hamiltonians 
+################################################################################
 def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
     """Create a LocalHam2D object for 2D Hubbard Model
 
@@ -260,262 +94,6 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
             uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
             ham[where] = uop
     return LocalHam2D(Lx, Ly, ham)
-
-def hopping_ham(Nx,Ny,ke1,ke3=None,symmetry='u1',flat=True):
-    ham = dict()
-    # NN terms
-    op = Hubbard(t=-ke1, u=0.0, mu=0., fac=(0.,0.), symmetry=symmetry) 
-    for i, j in product(range(Nx), range(Ny)):
-        if i+1 != Nx:
-            where = ((i,j), (i+1,j))
-            ham[where] = op.copy() 
-        if j+1 != Ny:
-            where = ((i,j), (i,j+1))
-            ham[where] = op.copy()
-    # 3rd-NN terms
-    if ke3 is not None:
-        op = Hubbard(t=-ke3, u=0.0, mu=0., fac=(0.,0.), symmetry=symmetry) 
-        for i, j in product(range(Nx), range(Ny)):
-            if i+3 < Nx:
-                where = ((i,j), (i+3,j))
-                ham[where] = op.copy() 
-            if j+3 < Ny:
-                where = ((i,j), (i,j+3))
-                ham[where] = op.copy()
-    return LocalHam2D(Nx, Ny, ham)
-
-def ueg2(ke1, ee1, ke2, ee2, mu=0., fac=(0.,0.), symmetry='u1', flat=True):
-    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
-    faca, facb = fac
-    (ke1a, ke1b) = ke1 if isinstance(ke1,tuple) else (ke1,ke1)
-    (ee1a, ee1b) = ee1 if isinstance(ee1,tuple) else (ee1,ee1)
-    state_map = get_state_map(symmetry)
-    block_dict = dict()
-    for s1, s2 in product(cre_map.keys(), repeat=2):
-        q1, ix1, d1 = state_map[s1]
-        q2, ix2, d2 = state_map[s2]
-        val = (pn_dict[s1]==2) * faca * ee1a + pn_dict[s1] * faca * (mu+ke1a) +\
-              (pn_dict[s2]==2) * facb * ee1b + pn_dict[s2] * facb * (mu+ke1b)
-        val += pn_dict[s1] * pn_dict[s2] * ee2
-        if (q1, q2, q1, q2) not in block_dict:
-            block_dict[(q1, q2, q1, q2)] = np.zeros([d1, d2, d1, d2])
-        dat = block_dict[(q1, q2, q1, q2)]
-        phase = _compute_swap_phase(s1, s2, s1, s2)
-        dat[ix1, ix2, ix1, ix2] += phase * val
-        # ke2
-        for s3 in hop_map[s1]:
-            q3, ix3, d3 = state_map[s3]
-            input_string = sorted(cre_map[s1]+cre_map[s2])
-            for s4 in hop_map[s2]:
-                q4, ix4, d4 = state_map[s4]
-                output_string = sorted(cre_map[s3]+cre_map[s4])
-                if input_string != output_string:
-                    continue
-                if (q1, q2, q3, q4) not in block_dict:
-                    block_dict[(q1, q2, q3, q4)] = np.zeros([d1, d2, d3, d4])
-                dat = block_dict[(q1, q2, q3, q4)]
-                phase = _compute_swap_phase(s1, s2, s3, s4)
-                dat[ix1, ix2, ix3, ix4] += phase * ke2
-    blocks = [SubTensor(reduced=dat, q_labels=qlab) for qlab, dat in block_dict.items()]
-    T = SparseFermionTensor(blocks=blocks, pattern="++--")
-    if flat:
-        return T.to_flat()
-    else:
-        return T
-def ueg1(ke1,ee1,mu=0.,symmetry='u1', falt=True):
-    symmetry, flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
-    state_map = get_state_map(symmetry)
-    block_dict = dict()
-    for key, pn in pn_dict.items():
-        qlab, ind, dim = state_map[key]
-        irreps = (qlab, qlab)
-        if irreps not in block_dict:
-            block_dict[irreps] = np.zeros([dim, dim])
-        block_dict[irreps][ind, ind] += (pn==2) * ee1 + pn * (mu+ke1)
-    blocks = [SubTensor(reduced=dat, q_labels=q_lab) for q_lab, dat in block_dict.items()]
-    T = SparseFermionTensor(blocks=blocks, pattern="+-")
-    if flat:
-        return T.to_flat()
-    else:
-        return T
-
-def UEG2D_FD(Nx, Ny, Lx, Ly, Ne, scheme, mu=0., maxdist=1, symmetry='u1', flat=True):
-    eps = Lx/(Nx+2.)
-    h = Lx/(Nx+1.)
-    sites = [(i,j) for i in range(Nx) for j in range(Ny)]
-    den = (Ne+1e-15) / (Nx*Ny)
-    def count_neighbour(i, j):
-        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
-    def phys_dist(site1,site2,const=1.):
-        (x1,y1),(x2,y2) = site1,site2
-        dx,dy = x1-x2,y1-y2
-        return h*np.sqrt(dx**2+dy**2+const)
-    def compute_ke1(site):
-        x,y = site
-        if (x==0 and y==0) or (x==0 and y==Ny-1) or\
-           (x==Nx-1 and y==0) or (x==Nx-1 and y==Ny-1):
-            return 58./(24.*eps**2)
-        elif x==0 or x==Nx-1 or y==0 or y==Ny-1:
-            return 59./(24.*eps**2)
-        else:
-            return 60./(24.*eps**2)
-    if scheme==1:
-        const = 1.
-        def compute_lambda(site1):
-            return 1./h
-        def compute_u(site1):
-            u = sum([1./phys_dist(site1,site2,const=const) for site2 in sites])
-            return - u * h**2 * den 
-        background = 0.0
-        for site1 in sites:
-            for site2 in sites:
-                background += 1./phys_dist(site1,site2,const=const)
-        background *= h**4*den**2/2.
-    elif scheme==2:
-        const = 0. 
-        def compute_lambda(site):
-            return 1.4866/h
-        def compute_u(site1):
-            sites_ = sites.copy()
-            sites_.remove(site1)
-            u = sum([1./phys_dist(site1,site2,const=const) for site2 in sites_])
-            return - u * h**2 * den 
-        background = 0.0
-        for i,site1 in enumerate(sites):
-            for site2 in sites[i+1:]:
-                background += 1./phys_dist(site1,site2,const=const)
-        background *= h**4*den**2
-    else:
-        raise NotImplementedError(f'scheme {scheme} not implemented')
-
-    print('background=',background)
-    print('analytical=',1.4866*Ne**2/Lx)
-    ham = dict()
-    # onsite and NN terms
-    ke2 = -16./(24.*eps**2)
-    ee2 = 1./(h*np.sqrt(1.+const))
-    for (i,j) in sites:
-        count_ij = count_neighbour(i,j)
-        ke1a = compute_ke1((i,j)) + compute_u((i,j))
-        ee1a = compute_lambda((i,j))
-        if i+1 != Nx:
-            count_b = count_neighbour(i+1,j)
-            ke1b = compute_ke1((i+1,j)) + compute_u((i+1,j))
-            ee1b = compute_lambda((i+1,j))
-            ke1 = ke1a,ke1b
-            ee1 = ee1a,ee1b
-            where = (i,j), (i+1,j)
-            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), 
-                              symmetry=symmetry, flat=flat)
-        if j+1 != Ny:
-            count_b = count_neighbour(i,j+1)
-            ke1b = compute_ke1((i,j+1)) + compute_u((i,j+1))
-            ee1b = compute_lambda((i,j+1))
-            ke1 = ke1a,ke1b
-            ee1 = ee1a,ee1b
-            where = (i,j), (i,j+1)
-            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b),
-                              symmetry=symmetry, flat=flat)
-    NN = len(ham)
-    print('number of nearest-neighbor terms=',NN)
-    # long range terms
-    for i,site1 in enumerate(sites):
-        for site2 in sites[i+1:]:
-            dx,dy = abs(site1[0]-site2[0]),abs(site1[1]-site2[1])
-            d = dx+dy
-            ke2,ee2 = 0.0,0.0
-            if (d>1) and (d<=maxdist):
-                ee2 = 1./phys_dist(site1,site2,const=const)
-#            if d==3 and (dx==0 or dy==0):
-            if d==3 and (dx==0 or dy==0) and d<=maxdist:
-                ke2 = 1./(24.*eps**2) 
-            if abs(ke2)+abs(ee2)>1e-12:
-                ham[site1,site2] = ueg2(0.,0., ke2, ee2, mu, (0.,0.), 
-                                  symmetry=symmetry, flat=flat) 
-    print('number of long-range terms=',len(ham)-NN)
-    return LocalHam2D(Nx, Ny, ham)
- 
-def UEG2D_PWDB(imax, jmax, Lx, Ly, mu=0., maxdist=1, symmetry='u1', flat=True):
-    """Create a LocalHam2D object for 2D UEG Model in plane wave dual basis
-
-    Parameters
-    ----------
-    Nx : int
-        number of grid in x 
-    Ny : int
-        number of grid in y
-    Lx: scalar
-        Box length in x direction
-    Ly: scalar
-        Box length in y direction
-    mu: scalar, optional
-        Chemical potential
-    symmetry: {"z2",'u1', 'z22', 'u11'}, optional
-        Symmetry in the backend
-
-    Returns
-    -------
-    a LocalHam2D object
-    """
-    Nx,Ny = 2*imax+1,2*jmax+1
-    N,Omega = Nx*Ny,Lx*Ly
-    sites = [(i,j) for i in range(Nx) for j in range(Ny)]
-
-    g,g1,g2 = [],[],[]
-    for gx in range(-imax,-imax+Nx):
-        for gy in range(-jmax,-jmax+Ny):
-            g.append(2.0*np.pi*np.array([gx/Lx,gy/Ly]))
-            g2.append(np.dot(g[-1],g[-1]))
-            g1_inv = 0.0 if (gx==0 and gy==0) else 1.0/np.sqrt(g2[-1])
-            g1.append(g1_inv)
-    ke1 = sum(g2)/(2.0*N)
-    ee1 = sum(g1)*2.0*np.pi/Omega
-    ke1 = ke1,ke1
-    ee1 = ee1,ee1
-    g1 = np.array(g1)
-    g2 = np.array(g2)
-
-    def count_neighbour(i, j):
-        return (i>0) + (i<Nx-1) + (j>0) + (j<Ny-1)
-    def get_pair_fac(site1,site2):
-        (x1,y1),(x2,y2) = site1,site2
-        dx,dy = x1-x2,y1-y2
-        r = np.array([dx*Lx/Nx,dy*Ly/Ny])
-        cos = np.array([np.cos(np.dot(gi,r)) for gi in g])
-        ke2 = np.dot(cos,g2)/(2.0*N)
-        ee2 = np.dot(cos,g1)*2.0*np.pi/Omega
-        return ke2, ee2
-
-    ham = dict()
-    # onsite and NN terms
-    for (i,j) in sites: 
-        count_ij = count_neighbour(i,j)
-        if i+1 != Nx:
-            where = ((i,j), (i+1,j))
-            count_b = count_neighbour(i+1,j)
-            ke2, ee2 = get_pair_fac(*where)
-            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b), 
-                              symmetry=symmetry, flat=flat)
-        if j+1 != Ny:
-            where = ((i,j), (i,j+1))
-            count_b = count_neighbour(i,j+1)
-            ke2, ee2 = get_pair_fac(*where)
-            ham[where] = ueg2(ke1, ee1, ke2, ee2, mu, (1./count_ij, 1./count_b),
-                              symmetry=symmetry, flat=flat)
-    NN = len(ham)
-    print('number of nearest-neighbor terms=',NN)
-    # long range terms
-    for i,site1 in enumerate(sites):
-        for site2 in sites[i+1:]:
-            d = abs(site1[0]-site2[0])+abs(site1[1]-site2[1])
-            if (d>1) and (d<=maxdist):
-                where = site1,site2
-                ke2,ee2 = get_pair_fac(*where)
-                if abs(ke2)+abs(ee2)>1e-12:
-                    ham[where] = ueg2(0.,0., ke2, ee2, mu, (0.,0.), 
-                                      symmetry=symmetry, flat=flat) 
-    print('number of long range terms=',len(ham)-NN)
-    return LocalHam2D(Nx, Ny, ham)
 
 class LocalHam2D(LocalHamGen):
     """A 2D Fermion Hamiltonian represented as local terms. Different from
@@ -732,7 +310,9 @@ class SimpleUpdate(SimpleUpdate):
 
         return psi
 
-################## full update #########################
+###################################################################################
+#                          full update fxns
+###################################################################################
 def parse_specific_gate_opts(strategy,fit_opts):
     gate_opts = {
         'tol': fit_opts['tol'],
@@ -802,22 +382,6 @@ def compute_envs(fu,bix,benvs,sweep,
         tn.compute_right_environments(envs=envs,
             xrange=(max(bix-1,0),min(bix+1,tn.Lx-1)),**contract_boundary_opts)
     return envs
-def match_phase(T_tar,T_ref):
-    # match phase of T_tar to T_ref
-    global_flip_tar = T_tar.phase.get('global_flip',False)
-    local_inds_tar = set(T_tar.phase.get('local_inds',[]))
-    global_flip_ref = T_ref.phase.get('global_flip',False)
-    local_inds_ref = set(T_ref.phase.get('local_inds',[]))
-
-    data = T_tar.data.copy()
-    global_flip = (global_flip_tar!=global_flip_ref)
-    if global_flip:
-        data._global_flip()
-    local_inds = list(local_inds_tar.symmetric_difference(local_inds_ref))
-    if len(local_inds)>0:
-        axes = [T.inds.index(ind) for ind in local_inds]
-        data._local_flip(axes)
-    return data
 def update_envs(fu,ix,bix,envs,sweep,
     max_bond=None,cutoff=1e-10,canonize=True,dense=False,mode='mps',
     layer_tags=('KET','BRA'),compress_opts=None,**contract_boundary_opts):
@@ -966,52 +530,6 @@ def horizontal_sweep(fu,tau):
                 update_envs_(fu,ix=j,bix=i,envs=col_envs)
         update_benvs_(fu,bix=i,benvs=row_envs)
     return
-def tensor_copy(tsr):
-    new_tsr = FermionTensor(data=tsr.data.copy(),inds=tsr.inds,
-                            tags=tsr.tags.copy(),left_inds=tsr.left_inds)
-    new_tsr.avoid_phase = tsr.avoid_phase
-    new_tsr.phase = tsr.phase.copy()
-    return new_tsr
-def copy(ftn,full=True):
-    new_ftn = FermionTensorNetwork([])
-    new_order = dict()
-    for tid,tsr in ftn.tensor_map.items():
-        site = tsr.get_fermion_info()[1]
-        new_tsr = tensor_copy(tsr)
-        # add to fs
-        new_order[tid] = (new_tsr,site)
-        # add to tn
-        new_ftn.tensor_map[tid] = new_tsr
-        new_tsr.add_owner(new_ftn,tid)
-        new_ftn._link_tags(new_tsr.tags,tid)
-        new_ftn._link_inds(new_tsr.inds,tid)
-    new_fs = FermionSpace(tensor_order=new_order,virtual=True)
-    if full:
-        new_ftn.view_like_(ftn)
-    return new_ftn
-def insert(ftn,isite,T):
-    fs = ftn.fermion_space
-    fs.insert_tensor(isite,T,virtual=True)
-    tid = T.get_fermion_info()[0]
-    ftn.tensor_map[tid] = T 
-    T.add_owner(ftn,tid)
-    ftn._link_tags(T.tags,tid)
-    ftn._link_inds(T.inds,tid)
-    return ftn
-def replace(ftn,isite,T):
-    fs = ftn.fermion_space
-    tid = fs.get_tid_from_site(isite)
-    t = ftn.tensor_map.pop(tid)
-    ftn._unlink_tags(t.tags,tid)
-    ftn._unlink_inds(t.inds,tid)
-    t.remove_owner(ftn)
-
-    fs.replace_tensor(isite,T,tid=tid,virtual=True)    
-    ftn.tensor_map[tid] = T 
-    T.add_owner(ftn,tid)
-    ftn._link_tags(T.tags,tid)
-    ftn._link_inds(T.inds,tid)
-    return ftn
 def gate_full_update_als_qr(ket,env,bra,G,where,tags_plq,steps,tol,max_bond,rtol=1e-6,
     optimize='auto-hq',init_simple_guess=True,condition_tensors=True,
     condition_maintain_norms=True,condition_balance_bonds=True,atol=1e-10,
