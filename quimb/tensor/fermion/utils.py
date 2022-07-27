@@ -1,19 +1,7 @@
 import numpy as np
 import time,uuid,pickle,resource
-from itertools import product
-from ..tensor_core import rand_uuid
-from ..tensor_2d import PEPS,calc_plaquette_map
-
 from .fermion_core import FermionTensor,FermionTensorNetwork
-from .fermion_2d import FPEPS
-
-from .block_interface import setting,eye
-from pyblock3.algebra.fermion_encoding import get_state_map
-from pyblock3.algebra.fermion_ops import creation,bonded_vaccum
-from pyblock3.algebra.core import SubTensor
-from pyblock3.algebra.fermion import SparseFermionTensor,Constructor
-from pyblock3.algebra.fermion_symmetry import U1,Z2
-from pyblock3.algebra.symmetry import BondInfo
+import sys
 #####################################################################################
 # MPI STUFF
 #####################################################################################
@@ -21,6 +9,27 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
+
+def parallelized_looped_function_balanced(func, large, small, args, kwargs):
+    results = []
+    sizes = []
+    iterate_over = large + small 
+    for worker in reversed(range(SIZE)):
+        #i,j = worker,SIZE-1-worker
+        #tasks = large[i::SIZE] + small[j::SIZE]
+        tasks = iterate_over[worker::SIZE]
+        sizes.append(len(tasks))
+        if worker != 0:
+            worker_info = [func, tasks, args, kwargs]
+            COMM.send(worker_info, dest=worker)
+        else:
+            for task in tasks:
+                results.append(func(task, *args, **kwargs))
+    for worker in range(1, SIZE):
+        results += COMM.recv(source=worker)
+    print('large,small=',len(large),len(small))
+    print('sizes=',sizes)
+    return results
 
 def parallelized_looped_function(func, iterate_over, args, kwargs):
     """
@@ -43,55 +52,37 @@ def parallelized_looped_function(func, iterate_over, args, kwargs):
             This is a list of the results of each function call stored in 
             a list with the same ordering as was supplied in 'iterate_over'
     """
-    # Figure out which items are done by which worker
-    min_per_worker = len(iterate_over) // SIZE
+    ## Figure out which items are done by which worker
+    #min_per_worker = len(iterate_over) // SIZE
 
-    per_worker = [min_per_worker for _ in range(SIZE)]
-    for i in range(len(iterate_over) - min_per_worker * SIZE):
-        per_worker[SIZE-1-i] += 1
+    #per_worker = [min_per_worker for _ in range(SIZE)]
+    #for i in range(len(iterate_over) - min_per_worker * SIZE):
+    #    per_worker[SIZE-1-i] += 1
 
-    randomly_permuted_tasks = np.random.permutation(len(iterate_over))
-    worker_ranges = []
-    for worker in range(SIZE):
-        start = sum(per_worker[:worker])
-        end = sum(per_worker[:worker+1])
-        tasks = [randomly_permuted_tasks[ind] for ind in range(start, end)]
-        worker_ranges.append(tasks)
+    #randomly_permuted_tasks = np.random.permutation(len(iterate_over))
+    #worker_ranges = []
+    #for worker in range(SIZE):
+    #    start = sum(per_worker[:worker])
+    #    end = sum(per_worker[:worker+1])
+    #    tasks = [randomly_permuted_tasks[ind] for ind in range(start, end)]
+    #    worker_ranges.append(tasks)
 
-    # Container for all the results
-    worker_results = [None for _ in range(SIZE)]
-
-    # Loop over all the processes (backwards so zero starts last
+    results = []
+    #sizes = []
     for worker in reversed(range(SIZE)):
-
-        # Collect all info needed for workers
-        worker_iterate_over = [iterate_over[i] for i in worker_ranges[worker]]
-        worker_info = [func, worker_iterate_over, args, kwargs]
-
-        # Send to worker
+        #worker_iterate_over = [iterate_over[i] for i in worker_ranges[worker]]
+        worker_iterate_over = iterate_over[worker::SIZE]
+        #sizes.append(len(worker_iterate_over))
         if worker != 0:
+            worker_info = [func, worker_iterate_over, args, kwargs]
             COMM.send(worker_info, dest=worker)
-
-        # Do task with this worker
         else:
-            worker_results[0] = [None for _ in worker_ranges[worker]]
             for func_call in range(len(worker_iterate_over)):
-                result = func(worker_iterate_over[func_call], 
-                              *args, **kwargs)
-                worker_results[0][func_call] = result
-
-    # Collect all the results
+                results.append(func(worker_iterate_over[func_call],*args,**kwargs))
     for worker in range(1, SIZE):
-        worker_results[worker] = COMM.recv(source=worker)
-
-    results = [None for _ in range(len(iterate_over))]
-    for worker in range(SIZE):
-        worker_ind = 0
-        for i in worker_ranges[worker]:
-            results[i] = worker_results[worker][worker_ind]
-            worker_ind += 1
-
-    # Return the results
+        results += COMM.recv(source=worker)
+    #print('total=',len(iterate_over))
+    #print('sizes=',sizes)
     return results
 
 def worker_execution():
@@ -119,11 +110,8 @@ def worker_execution():
             break
 
         # Otherwise, call function
-        function = assignment[0]
-        iterate_over = assignment[1]
-        args = assignment[2]
-        kwargs = assignment[3]
-        results = [None for _ in range(len(iterate_over))]
+        function,iterate_over,args,kwargs = assignment
+        results = [None] * len(iterate_over)
         for func_call in range(len(iterate_over)):
             results[func_call] = function(iterate_over[func_call], 
                                           *args, **kwargs)
@@ -386,27 +374,6 @@ def _load_ftn_from_disc(fname, delete_file=False):
 
 
 ##################################################################################
-# some sum of op class for gradient 
-##################################################################################
-class OPi:
-    def __init__(self,data_map,site):
-        self.data_map = data_map
-        self.site = site
-        self.tag = '_'.join([key+'{},{}'.format(*site) for key in data_map])
-    def get_data(self,data_map):
-        data = 0.0
-        for key,fac in self.data_map.items():
-            data = data + fac*data_map[key]
-        return data
-class SumOpGrad:
-    def __init__(self,data_map,_1col_terms,_2col_terms,reuse):
-        self.data_map = data_map
-        self._1col_terms = _1col_terms
-        self._2col_terms = _2col_terms
-        self.reuse = reuse
-        print('number of 1 col terms=',len(self._1col_terms))
-        print('number of 2 col terms=',len(self._2col_terms))
-##################################################################################
 # some sum of op class for 2d-dmrg 
 ##################################################################################
 class OPTERM:
@@ -457,7 +424,7 @@ class SumOpDMRG:
         print('number of H terms=',len(self.ham_terms))
 
 ##################################################################################
-# some helper ftn 
+# some helper ftn fxn
 ##################################################################################
 def remove_phase(peps):
     for i in range(peps.Lx):
@@ -526,164 +493,3 @@ def replace(ftn,isite,T):
     ftn._link_tags(T.tags,tid)
     ftn._link_inds(T.inds,tid)
     return ftn
-def get_phys_bond_info(symmetry):
-    if symmetry in [U1,'u1']:
-        return BondInfo({U1(0):1,U1(1):2,U1(2):1})
-    elif symmetry in [Z2,'z2']:
-        return BondInfo({Z2(0):2,Z2(1):2})
-    else:
-        raise NotImplementedError(f'{symmteyr} symmetry not implemented!')
-##################################################################################
-# product state generation 
-##################################################################################
-def get_pattern(inds,ind_to_pattern_map):
-    """
-    make sure patterns match in input tensors, eg,
-    --->A--->B--->
-     i    j    k
-    pattern for A_ij = +-
-    pattern for B_jk = +-
-    the pattern of j index must be reversed in two operands
-    """
-    inv_pattern = {"+":"-", "-":"+"}
-    pattern = ""
-    for ix in inds[:-1]:
-        if ix in ind_to_pattern_map:
-            ipattern = inv_pattern[ind_to_pattern_map[ix]]
-        else:
-            nmin = pattern.count("-")
-            ipattern = "-" if nmin*2<len(pattern) else "+"
-            ind_to_pattern_map[ix] = ipattern
-        pattern += ipattern
-    pattern += "+" # assuming last index is the physical index
-    return pattern
-def get_vaccum(Lx,Ly,symmetry='u1',flat=True):
-    symmetry,flat = setting.dispatch_settings(symmetry=symmetry, flat=flat)
-    state_map = get_state_map(symmetry)
-    _, _, ish = state_map[0]
-
-    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
-    ftn = FermionTensorNetwork([])
-    ind_to_pattern_map = dict()
-    for ix, iy in product(range(tn.Lx), range(tn.Ly)):
-        T = tn[ix, iy]
-        pattern = get_pattern(T.inds,ind_to_pattern_map)
-        #put vaccum at site (ix, iy) 
-        vac = bonded_vaccum((ish,)*(T.ndim-1), pattern=pattern, 
-                            symmetry=symmetry, flat=flat)
-        new_T = FermionTensor(vac, inds=T.inds, tags=T.tags)
-        ftn.add_tensor(new_T, virtual=False)
-    ftn.view_as_(FPEPS, like=tn)
-    return ftn
-def add_particle(ftn,spin,sites,symmetry='u1',flat=True):
-    cre = creation(spin=spin,symmetry=symmetry,flat=flat)
-    for site in sites:
-        ket = ftn[site]
-        pix = ket.inds[-1]
-        TG = FermionTensor(data=cre.copy(),inds=(pix,pix+'_'),left_inds=(pix,),
-                           tags=ket.tags) 
-        inds = ket.inds
-        ket.reindex_({pix:pix+'_'})
-        ket_tid,ket_site = ket.get_fermion_info()
-        ftn = insert(ftn,ket_site+1,TG)
-        ftn.contract_tags(ket.tags,which='all',output_inds=inds,inplace=True)
-    return ftn
-def get_half_filled_product_state(Lx,Ly,symmetry='u1',flat=True):
-    """
-    helper function to generate initial guess from regular PEPS
-    |psi> = \prod (|alpha> + |beta>) at each site
-    this function only works for half filled case with U1 symmetry
-    Note energy of this wfn is 0
-    """
-    ftn = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat)
-    sites = [(i,j) for i in range(Lx) for j in range(Ly)]
-    ftn = add_particle(ftn,spin='sum',sites=sites,symmetry=symmetry,flat=flat)
-    return ftn
-def get_product_state(Lx,Ly,spin_map,symmetry='u1',flat=True):
-    ftn = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat)
-    for spin,(sites_pn,N) in spin_map.items():
-        if sites_pn is None: 
-            sites = [(i,j) for i in range(Lx) for j in range(Ly)]
-            sites_pn = []
-            for i in range(N):
-                sites_pn.append(sites.pop(np.random.randint(low=0,high=len(sites))))
-        ftn = add_particle(ftn,spin=spin,sites=sites_pn,symmetry=symmetry,flat=flat)
-    return ftn
-def insert_vac_at_boundary(ftn,side,symmetry='u1',flat=True): 
-    symmetry,flat = setting.dispatch_settings(symmetry=symmetry,flat=flat)
-    state_map = get_state_map(symmetry)
-    q_label, idx, ish = state_map[0]
-    arr = np.zeros(ish)
-    arr[idx] = 1
-    blocks = [SubTensor(reduced=arr, q_labels=(q_label,))]
-    dummy = SparseFermionTensor(blocks=blocks, pattern='-', shape=(ish,))
-    if flat:
-        dummy = dummy.to_flat()
-
-    if side in ['left','right']:
-        ftn = ftn.reorder(direction='col',inplace=True) 
-        L0,L1 = ftn.Lx,ftn.Ly
-    else:
-        ftn = ftn.reorder(direction='row',inplace=True) 
-        L0,L1 = ftn.Ly,ftn.Lx
-
-    idx = {(i,i+1):rand_uuid() for i in range(L0-1)}
-    ftn_new = FermionTensorNetwork([])
-    if side in ['right','top']:
-        for j in range(L1-1):
-            tag = f'COL{j}' if side=='right' else f'ROW{j}'
-            ftn_new.add_tensor_network(ftn.select(tag).copy())
-    j = L1-1 if side in ['right','top'] else 0
-    for i in range(L0):
-        (x,y) = (i,j) if side in ['left','right'] else (j,i)
-        (x_,y_) = (i,j+1) if side in ['left','right'] else (j+1,i)
-        if i==0:
-            vir_dim = 2
-            pattern = '+++'
-            inds = rand_uuid(),idx[i,i+1]
-        elif i==L0-1:
-            vir_dim = 2
-            pattern = '+-+'
-            inds = rand_uuid(),idx[i-1,i]
-        else:
-            vir_dim = 3
-            pattern = '+-++'
-            inds = rand_uuid(),idx[i-1,i],idx[i,i+1]
-        tags1 = f'I{x},{y}',f'ROW{x}',f'COL{y}'
-        tags2 = f'I{x_},{y_}',f'ROW{x_}',f'COL{y_}'
-        pix1 = f'k{x},{y}'
-        pix2 = f'k{x_},{y_}'
-
-        vac = bonded_vaccum((ish,)*vir_dim,pattern,symmetry=symmetry,flat=flat)
-        data = np.tensordot(dummy,ftn[x,y].data,axes=([],[]))
-        if side in ['left','bottom']:
-            T = FermionTensor(data=vac,inds=inds+(pix1,),tags=tags1)
-            ftn_new.add_tensor(T,virtual=True)
-
-            inds2 = list(inds[:1]+ftn[x,y].inds)
-            ax = inds2.index(pix1)
-            inds2[ax] = pix2
-            T = FermionTensor(data=data,inds=inds2,tags=tags2)
-            ftn_new.add_tensor(T,virtual=True)
-        else:
-            inds1 = list(inds[:1]+ftn[x,y].inds)
-            T = FermionTensor(data=data,inds=inds1,tags=tags1)
-            ftn_new.add_tensor(T,virtual=True)
-
-            T = FermionTensor(data=vac,inds=inds+(pix2,),tags=tags2)
-            ftn_new.add_tensor(T,virtual=True)
-            
-    if side in ['left','bottom']:
-        for j in range(1,L1):
-            for i in range(L0):
-                (x,y) = (i,j) if side=='left' else (j,i)
-                (x_,y_) = (i,j+1) if side=='left' else (j+1,i)
-                T = ftn[x,y].copy()
-                T.reindex_({f'k{x},{y}':f'k{x_},{y_}'})
-                T.modify(tags=(f'I{x_},{y_}',f'ROW{x_}',f'COL{y_}'))
-                ftn_new.add_tensor(T,virtual=True)
-    (Lx,Ly) = (L0,L1+1) if side in ['left','right'] else (L1+1,L0)
-    ftn_new.view_as_(FPEPS, Lx=Lx, Ly=Ly,
-                     site_ind_id=ftn._site_ind_id, site_tag_id=ftn._site_tag_id,
-                     row_tag_id=ftn._row_tag_id, col_tag_id=ftn._col_tag_id)
-    return ftn_new 

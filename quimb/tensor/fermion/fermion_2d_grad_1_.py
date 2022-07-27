@@ -12,12 +12,11 @@ from .fermion_2d import FermionTensorNetwork2D
 from .block_interface import (
     Constructor,
     creation,
+    annihilation,
     onsite_U,
     ParticleNumber,
 )
 from .utils import (
-    OPi,
-    SumOpGrad,
     parallelized_looped_function,
     worker_execution,
     insert,
@@ -26,36 +25,82 @@ from .utils import (
     _profile,
 )
 np.set_printoptions(suppress=True,linewidth=1000,precision=4)
-
+symmetry = 'u1'
+flat = True
+data_map = {'cre_a':creation(spin='a',symmetry=symmetry,flat=flat),
+            'cre_b':creation(spin='b',symmetry=symmetry,flat=flat),
+            'ann_a':annihilation(spin='a',symmetry=symmetry,flat=flat),
+            'ann_b':annihilation(spin='b',symmetry=symmetry,flat=flat),
+            'pn':ParticleNumber(symmetry=symmetry,flat=flat),
+            'nanb':onsite_U(u=1.,symmetry=symmetry,flat=flat)}
+sign_a = (-1)**(data_map['cre_a'].parity*data_map['ann_a'].parity)
+sign_b = (-1)**(data_map['cre_b'].parity*data_map['ann_b'].parity)
+##################################################################################
+# some sum of op class for gradient 
+##################################################################################
+class OPi:
+    def __init__(self,fac_map,site):
+        self.fac_map = fac_map
+        self.site = site
+        self.tag = '_'.join([key+'{},{}'.format(*site) for key in fac_map])
+    def get_data(self):
+        data = 0.0
+        for key,fac in self.fac_map.items():
+            data = data + fac*data_map[key]
+        return data
+class SumOpGrad:
+    def __init__(self,_1col_left,_1col_mid,_1col_right,
+                      reuse_left,reuse_mid,reuse_right,_2col_terms):
+        self._1col_left  = _1col_left
+        self._1col_mid   = _1col_mid
+        self._1col_right = _1col_right
+        self.reuse_left  = reuse_left
+        self.reuse_mid   = reuse_mid
+        self.reuse_right = reuse_right
+        self._2col_terms = _2col_terms
 ##################################################################
 # Hamiltonians
 ##################################################################
-def hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
-    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-    ann_a = cre_a.dagger
-    ann_b = cre_b.dagger
-    pn    = ParticleNumber(symmetry=symmetry,flat=flat)
-    nanb  = onsite_U(u=1.0,symmetry=symmetry)
-    sign_a = (-1)**(cre_a.parity*ann_a.parity)
-    sign_b = (-1)**(cre_b.parity*ann_b.parity)
-    data_map = {'cre_a':cre_a,'ann_a':ann_a,'cre_b':cre_b,'ann_b':ann_b,
-                'pn':pn,'onsite':nanb}
-    _1col_terms = []
+def hubbard(t,u,Lx,Ly):
+    def distribute_1col_terms(col_range):
+        ls = []
+        for j in col_range:
+            for i in range(Lx):
+                opis = OPi({'nanb':1.},(i,j)),
+                ls.append((opis,u)) 
+                if i+1 != Lx:
+                    opis = OPi({'cre_a':1.},(i,j)),OPi({'ann_a':1.},(i+1,j))
+                    ls.append((opis,-t*sign_a)) 
+                    opis = OPi({'ann_a':1.},(i,j)),OPi({'cre_a':1.},(i+1,j))
+                    ls.append((opis,-t)) 
+                    opis = OPi({'cre_b':1.},(i,j)),OPi({'ann_b':1.},(i+1,j))
+                    ls.append((opis,-t*sign_b)) 
+                    opis = OPi({'ann_b':1.},(i,j)),OPi({'cre_b':1.},(i+1,j))
+                    ls.append((opis,-t))
+        return ls 
+    def distribute_reuse(col_range):
+        ls = [(OPi({key:1.},(i,j)),min(Ly-1,j+1),max(0,j-1)) \
+              for key in ['cre_a','ann_a','cre_b','ann_b'] \
+              for i in range(Lx) for j in col_range] 
+        return ls
+    right_range = [Ly-2,Ly-1]
+    mid_range = range(2,Ly-2) if Ly > 4 else []
+    if Ly >= 4:
+        left_range = [0,1]
+    elif Ly == 3:
+        left_range = [0]
+    else:
+        left_range = []
+    _1col_left  = distribute_1col_terms(left_range)
+    _1col_mid   = distribute_1col_terms(mid_range)
+    _1col_right = distribute_1col_terms(right_range)
+    reuse_left  = distribute_reuse(left_range)
+    reuse_mid   = distribute_reuse(mid_range)
+    reuse_right = distribute_reuse(right_range)
+
     _2col_terms = []
     for i in range(Lx):
         for j in range(Ly):
-            opis = OPi({'onsite':1.},(i,j)),
-            _1col_terms.append((opis,u)) 
-            if i+1 != Lx:
-                opis = OPi({'cre_a':1.},(i,j)),OPi({'ann_a':1.},(i+1,j))
-                _1col_terms.append((opis,-t*sign_a)) 
-                opis = OPi({'ann_a':1.},(i,j)),OPi({'cre_a':1.},(i+1,j))
-                _1col_terms.append((opis,-t)) 
-                opis = OPi({'cre_b':1.},(i,j)),OPi({'ann_b':1.},(i+1,j))
-                _1col_terms.append((opis,-t*sign_b)) 
-                opis = OPi({'ann_b':1.},(i,j)),OPi({'cre_b':1.},(i+1,j))
-                _1col_terms.append((opis,-t)) 
             if j+1 != Ly:
                 opis = OPi({'cre_a':1.},(i,j)),OPi({'ann_a':1.},(i,j+1))
                 _2col_terms.append((opis,-t*sign_a))             
@@ -65,143 +110,193 @@ def hubbard(t,u,Lx,Ly,symmetry='u1',flat=True):
                 _2col_terms.append((opis,-t*sign_b))             
                 opis = OPi({'ann_b':1.},(i,j)),OPi({'cre_b':1.},(i,j+1))
                 _2col_terms.append((opis,-t)) 
-    reuse = [(OPi({key:1.},(i,j)),min(Ly-1,j+1),max(0,j-1)) \
-             for key in ['cre_a','ann_a','cre_b','ann_b'] \
-             for i in range(Lx) for j in range(Ly)] 
-    return SumOpGrad(data_map,_1col_terms,_2col_terms,reuse)
+    return SumOpGrad(_1col_left,_1col_mid,_1col_right,
+                     reuse_left,reuse_mid,reuse_right,_2col_terms)
+def fd_grad(N,L,Ne,order=2,has_coulomb=False,soft=True,maxdist=1000):
+    from .ueg_utils import _back,_ke2,_ke1,_u,_dist 
+    eps = L/(N+1.)
+    print('eps=',eps)
+    sites = [(x,y) for x in range(N) for y in range(N)]
+    norb = len(sites)
+    if has_coulomb:
+        rhob = Ne/(N**2*eps**2)
+        Eb = _back(sites,eps,rhob,soft=soft) 
+        print(f'rhob={rhob},Eb={Eb}')
+
+    _1col_terms = []
+    _2col_terms = []
+    sites = [(x,y) for y in range(N) for x in range(N)]
+    for (x,y) in sites:
+        ke2 = _ke2(eps,order=order) 
+        if x+1<N:
+           site1,site2 = (x,y),(x+1,y)
+           opis = OPi({'cre_a':1.},site1),OPi({'ann_a':1.},site2)
+           _1col_terms.append((opis,ke2*sign_a)) 
+           opis = OPi({'ann_a':1.},site1),OPi({'cre_a':1.},site2)
+           _1col_terms.append((opis,ke2)) 
+           opis = OPi({'cre_b':1.},site1),OPi({'ann_b':1.},site2)
+           _1col_terms.append((opis,ke2*sign_b)) 
+           opis = OPi({'ann_b':1.},site1),OPi({'cre_b':1.},site2)
+           _1col_terms.append((opis,ke2))
+        if y+1<N:
+           site1,site2 = (x,y),(x,y+1)
+           opis = OPi({'cre_a':1.},site1),OPi({'ann_a':1.},site2)
+           _2col_terms.append((opis,ke2*sign_a)) 
+           opis = OPi({'ann_a':1.},site1),OPi({'cre_a':1.},site2)
+           _2col_terms.append((opis,ke2)) 
+           opis = OPi({'cre_b':1.},site1),OPi({'ann_b':1.},site2)
+           _2col_terms.append((opis,ke2*sign_b)) 
+           opis = OPi({'ann_b':1.},site1),OPi({'cre_b':1.},site2)
+           _2col_terms.append((opis,ke2))
+        if order==4 and maxdist>=2:
+            ke2 = 1./(24.*eps**2)
+            if x+2<N:
+               site1,site2 = (x,y),(x+2,y)
+               opis = OPi({'cre_a':1.},site1),OPi({'ann_a':1.},site2)
+               _1col_terms.append((opis,ke2*sign_a)) 
+               opis = OPi({'ann_a':1.},site1),OPi({'cre_a':1.},site2)
+               _1col_terms.append((opis,ke2)) 
+               opis = OPi({'cre_b':1.},site1),OPi({'ann_b':1.},site2)
+               _1col_terms.append((opis,ke2*sign_b)) 
+               opis = OPi({'ann_b':1.},site1),OPi({'cre_b':1.},site2)
+               _1col_terms.append((opis,ke2))
+            if y+2<N:
+               site1,site2 = (x,y),(x,y+2)
+               opis = OPi({'cre_a':1.},site1),OPi({'ann_a':1.},site2)
+               _2col_terms.append((opis,ke2*sign_a)) 
+               opis = OPi({'ann_a':1.},site1),OPi({'cre_a':1.},site2)
+               _2col_terms.append((opis,ke2)) 
+               opis = OPi({'cre_b':1.},site1),OPi({'ann_b':1.},site2)
+               _2col_terms.append((opis,ke2*sign_b)) 
+               opis = OPi({'ann_b':1.},site1),OPi({'cre_b':1.},site2)
+               _2col_terms.append((opis,ke2))
+    for site in sites:
+        ke1 = _ke1(site,eps,N,order=order)
+        if has_coulomb: 
+            ke1 += _u(site,sites,eps,rhob,soft=soft)
+            ee1 = 1./eps 
+            opis = OPi({'pn':ke1,'nanb':ee1},site),
+        else: 
+            opis = OPi({'pn':ke1},site),
+        _1col_terms.append((opis,1.))
+    if has_coulomb:
+        const = 1. if soft else 0.
+        for i,site1 in enumerate(sites):
+            for site2 in sites[i+1:]:
+                if abs(site1[0]-site2[0])+abs(site1[1]-site2[1])<=maxdist:
+                    ee2 = 1./_dist(site1,site2,eps,const=const)
+                    opis = OPi({'pn':1.},site1),OPi({'pn':1.},site2)
+                    if site1[1]==site2[1]:
+                        _1col_terms.append((opis,ee2))
+                    else:
+                        _2col_terms.append((opis,ee2))
+    dy = 1 if order==2 else 2
+    reuse = [(OPi({key:1.},(x,y)),min(N-1,y+dy),max(0,y-dy)) \
+             for key in ['cre_a','ann_a','cre_b','ann_b'] for (x,y) in sites] 
+    if has_coulomb:
+        reuse += [(OPi({'pn':1.},(x,y)),min(N-1,y+maxdist),max(0,y-maxdist)) \
+                  for (x,y) in sites] 
+    return SumOpGrad(_1col_terms,_2col_terms,reuse)
 #############################################################
 # gradient functions
 #############################################################
-def _norm_left(norm,tmpdir,profile,**compress_opts):
-    norm = load_ftn_from_disc(norm)
-    first_col = norm.col_tag(0)
-    benvs_ = dict()
-    for j in range(2,norm.Ly):
-        norm.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,norm.Lx-1),
-                                          **compress_opts)
-        benvs_['norm','left',j] = write_ftn_to_disc(norm.select(first_col).copy(),
-                                                    tmpdir)
-    if profile:
-        _profile(f'_norm_left')
-    return benvs_ 
-def _norm_right(norm,tmpdir,profile,**compress_opts):
-    norm = load_ftn_from_disc(norm)
-    last_col = norm.col_tag(norm.Ly-1)
-    benvs_ = dict()
-    for j in range(norm.Ly-3,-1,-1):
-        norm.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,norm.Lx-1),
-                                           **compress_opts)
-        benvs_['norm','right',j] = write_ftn_to_disc(norm.select(last_col).copy(),
-                                                    tmpdir)
-    if profile:
-        _profile(f'_norm_right')
-    return benvs_
-def _norm_mid(norm,tmpdir,profile):
-    norm = load_ftn_from_disc(norm)
-    benvs_ = dict()
-    for j in range(norm.Ly):
-        benvs_['norm','mid',j] = write_ftn_to_disc(
-                                     norm.select(norm.col_tag(j)).copy(),tmpdir)
-    if profile:
-        _profile(f'_norm_mid')
-    return benvs_
-def _norm_benvs(side,norm,tmpdir,profile,**compress_opts):
-    if side=='left':
-        return _norm_left(norm,tmpdir,profile,**compress_opts)
-    elif side=='right':
-        return _norm_right(norm,tmpdir,profile,**compress_opts)
+def compute_mid_benvs(opis,norm,bra_parity,tmpdir):
+    ftn = load_ftn_from_disc(norm)
+    col = ftn.col_tag
+    if opis is None:
+        benvs = {('norm','mid',j):write_ftn_to_disc(ftn.select(col(j)).copy(),tmpdir) for j in range(ftn.Ly)}
     else:
-        return _norm_mid(norm,tmpdir,profile)
-def _1col_mid(opis,data_map,psi,tmpdir,profile):
-    psi = load_ftn_from_disc(psi)
-    ftn,_,bra = psi.make_norm(return_all=True,layer_tags=('KET','BRA')) 
+        max_site = max(ftn.fermion_space.sites)
+        for opi in opis:
+            data = opi.get_data()
+            global_parity = bra_parity * data.parity
+            if global_parity != 0:
+                data._global_flip()
+            data._local_flip([0])
 
-    tsrs = []
-    for opi in opis:
-        ket = ftn[ftn.site_tag(*opi.site),'KET']
-        pix = ket.inds[-1] 
-        TG = FermionTensor(data=opi.get_data(data_map),tags=ket.tags,
-                           inds=(pix,pix+'_'),left_inds=(pix,))
-        tsrs.append(bra.fermion_space.move_past(TG))
+            ket = ftn[ftn.site_tag(*opi.site),'KET']
+            pix,inds,site = ket.inds[-1],ket.inds,ket.get_fermion_info()[1]
+            TG = FermionTensor(data=data,tags=ket.tags,
+                               inds=(pix,pix+'_'),left_inds=(pix,))
+            TG = ftn.fermion_space.move_past(TG,(site+1,max_site+1))
+            ket.reindex_({pix:pix+'_'})
+            ftn = insert(ftn,site+1,TG)
+            ftn.contract_tags(TG.tags,which='all',output_inds=inds,inplace=True)
 
-    ftn.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    for TG,opi in zip(tsrs,opis):
-        site_tag = ftn.site_tag(*opi.site)
-        _,bra_site = ftn[site_tag,'BRA'].get_fermion_info()
-        site_range = bra_site,max(ftn.fermion_space.sites)+1
-        TG = ftn.fermion_space.move_past(TG,site_range)
-
-        inds = ftn[site_tag,'KET'].inds
-        pix = inds[-1] 
-        ftn[site_tag,'KET'].reindex_({pix:pix+'_'})
-        _,ket_site = ftn[site_tag,'KET'].get_fermion_info()
-        ftn = insert(ftn,ket_site+1,TG)
-        ftn.contract_tags(TG.tags,which='all',output_inds=inds,inplace=True)
-
-    y = opis[0].site[1]
-    term = tuple([opi.tag for opi in opis])
-    term = term[0] if len(term)==1 else term
-    ftn = write_ftn_to_disc(ftn.select(ftn.col_tag(y)).copy(),tmpdir)
-    if profile:
-        _profile(f'_1col_mid')
-    return {(term,'mid',y):ftn}
-def _1col_left(info,benvs,tmpdir,Ly,profile,**compress_opts):
-    # computes missing left envs: y,...,ix
+        y,term = opis[0].site[1],tuple([opi.tag for opi in opis])
+        term = term[0] if len(term)==1 else term
+        benvs = {(term,'mid',y):write_ftn_to_disc(ftn.select(col(y)).copy(),tmpdir)}
+    return benvs
+def compute_left_benvs_1col(info,benvs,tmpdir,Ly,profile,**compress_opts):
+    # computes missing left envs: y+1,...,ix for y
     opis,ix = info
-    y = opis[0].site[1]
-    benvs_ = dict()
-    if y<Ly-1:
+    if opis is None:
+        term = 'norm'
+        ls = [benvs['norm','mid',j] for j in range(Ly)]
+        j0 = 2
+    else:
+        y = opis[0].site[1]
+        if y == Ly-1:
+            return dict()
         term = tuple([opi.tag for opi in opis])
         term = term[0] if len(term)==1 else term
-        ls = []
-        if y>0:
-            ls += [benvs['norm','mid',0]] if y==1 else [benvs['norm','left',y]]
+        if y==0:
+            ls = []
+        elif y==1:
+            ls = [benvs['norm','mid',0]]
+        else:
+            ls = [benvs['norm','left',y]]
         ls += [benvs[term,'mid',y]]
         ls += [benvs['norm','mid',j] for j in range(y+1,ix)]
         j0 = y+2 if y==0 else y+1
 
-        ls = [load_ftn_from_disc(fname) for fname in ls]
-        like = ls[0] if ls[0].num_tensors>0 else ls[1]
-        ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=ls[0])
 
-        first_col = ftn.col_tag(0)
-        for j in range(j0,ix+1):
-            ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),
-                                             **compress_opts) 
-            benvs_[term,'left',j] = write_ftn_to_disc(ftn.select(first_col).copy(),
-                                                      tmpdir)
-        if profile:
-            _profile(f'_1col_left')
+    benvs_ = dict()
+    col = ftn.col_tag(0)
+    for j in range(j0,ix+1):
+        ftn.contract_boundary_from_left_(yrange=(j-2,j-1),xrange=(0,ftn.Lx-1),**compress_opts) 
+        benvs_[term,'left',j] = write_ftn_to_disc(ftn.select(col).copy(),tmpdir)
+    if profile:
+        _profile(f'compute_left_benvs_1col')
     return benvs_
-def _1col_right(info,benvs,tmpdir,Ly,profile,**compress_opts):
+def compute_right_benvs_1col(info,benvs,tmpdir,Ly,profile,**compress_opts):
     # computes missing right envs: ix,...,y-1
     opis,ix = info
-    y = opis[0].site[1]
-    benvs_ = dict()
-    if y>0:
+    if opis is None: # norm
+        term = 'norm'
+        ls = [benvs['norm','mid',j] for j in range(Ly)]
+        j0 = Ly-3
+    else:
+        y = opis[0].site[1]
+        if y == 0:
+            return dict()
         term = tuple([opi.tag for opi in opis])
         term = term[0] if len(term)==1 else term
         ls = [benvs['norm','mid',j] for j in range(ix+1,y)]
         ls += [benvs[term,'mid',y]]
-        if y<Ly-1:
-            ls += [benvs['norm','mid',Ly-1]] if y==Ly-2 else [benvs['norm','right',y]]
+        if y==Ly-2:
+            ls += [benvs['norm','mid',Ly-1]] 
+        elif y<Ly-2: 
+            ls += [benvs['norm','right',y]]
         j0 = y-2 if y==Ly-1 else y-1
 
-        ls = [load_ftn_from_disc(fname) for fname in ls]
-        like = ls[0] if ls[0].num_tensors>0 else ls[1]
-        ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
+    ls = [load_ftn_from_disc(fname) for fname in ls]
+    like = ls[0] if ls[0].num_tensors>0 else ls[1]
+    ftn = FermionTensorNetwork(ls).view_as_(FermionTensorNetwork2D,like=like)
 
-        last_col = ftn.col_tag(Ly-1)
-        for j in range(j0,ix-1,-1):
-            ftn.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,ftn.Lx-1),
-                                              **compress_opts) 
-            benvs_[term,'right',j] = write_ftn_to_disc(ftn.select(last_col).copy(),
-                                                       tmpdir)
-        if profile:
-            _profile(f'_1col_right')
+    col = ftn.col_tag(Ly-1)
+    benvs_ = dict()
+    for j in range(j0,ix-1,-1):
+        ftn.contract_boundary_from_right_(yrange=(j+1,j+2),xrange=(0,ftn.Lx-1),**compress_opts) 
+        benvs_[term,'right',j] = write_ftn_to_disc(ftn.select(col).copy(),tmpdir)
+    if profile:
+        _profile(f'compute_right_benvs_1col')
     return benvs_ 
-def _1col_benvs(info,benvs,tmpdir,Ly,profile,**compress_opts):
-    fxn = _1col_left if info[0]=='left' else _1col_right
+def compute_benvs_1col(info,benvs,tmpdir,Ly,profile,**compress_opts):
+    fxn = compute_left_benvs_1col if info[0]=='left' else \
+          compute_right_benvs_1col
     return fxn(info[1:],benvs,tmpdir,Ly,profile,**compress_opts)
 def _2col_left(opis,benvs,tmpdir,Ly,profile,**compress_opts):
     (x1,y1),(x2,y2) = [opi.site for opi in opis]
@@ -251,7 +346,7 @@ def _2col_benvs(info,benvs,tmpdir,Ly,profile,**compress_opts):
     fxn = _2col_left if info[0]=='left' else _2col_right
     return fxn(info[1],benvs,tmpdir,Ly,profile,**compress_opts)
 def _site_term(info,benvs,tmpdir,Ly,profile,**compress_opts):
-    typ,opis,j,fac = info
+    opis,j,fac = info
     if opis is None: # norm term
         term = 'norm'
         if j<2:
@@ -353,7 +448,7 @@ def _site_term(info,benvs,tmpdir,Ly,profile,**compress_opts):
         site_map[i,j] = scal*fac,data*fac
     if profile:
         _profile(f'_row_envs')
-    return typ,site_map
+    return term,site_map
 def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     layer_tags=('KET','BRA'),max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -362,43 +457,57 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     compress_opts['canonize'] = canonize
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
+
     Lx,Ly = psi.Lx,psi.Ly
+    bra_parity = sum([T.data.parity for T in psi.tensors])
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
     norm = write_ftn_to_disc(norm,tmpdir)
-    psi = write_ftn_to_disc(psi,tmpdir) 
-
-    fxn = _norm_benvs
-    iterate_over = ['left','right','mid']
-    args = [norm,tmpdir,profile]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     benvs = dict()
-    for benvs_ in ls:
-        benvs.update(benvs_)
-    os.remove(norm)
+    _1col_terms = H._1col_left + H._1col_mid + H._1col_right
+    reuse       = H.reuse_left + H.reuse_mid + H.reuse_right
 
-    fxn = _1col_mid
-    iterate_over  = [opis for (opis,_) in H._1col_terms]
-    iterate_over += [(opi,) for (opi,_,_) in H.reuse]
-    args = [H.data_map,psi,tmpdir,profile]
+    start_time = time.time()
+    fxn = compute_mid_benvs
+    iterate_over  = [None]
+    iterate_over += [opis for (opis,_) in _1col_terms]
+    iterate_over += [(opi,) for (opi,_,_) in reuse]
+    args = [norm,bra_parity,tmpdir]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
-    os.remove(psi) 
+    os.remove(norm)
 
-    fxn = _1col_benvs
-    iterate_over  = [('left', opis,Ly-1) for (opis,_) in H._1col_terms]
-    iterate_over += [('right',opis,0)    for (opis,_) in H._1col_terms]
-    iterate_over += [('left',(opi,),lix)  for (opi,lix,_) in H.reuse]
-    iterate_over += [('right',(opi,),rix) for (opi,_,rix) in H.reuse]
+    #print(benvs.keys())
+    start_time = time.time()
+    fxn = compute_benvs_1col
+    iterate_over = [('left',None,Ly-1),('right',None,0)]
+    iterate_over += [('left', opis,Ly-1) for (opis,_) in H._1col_left]
+    iterate_over += [('right',opis,0) for (opis,_) in H._1col_right]
+    iterate_over += [('left',(opi,),ix) for (opi,ix,_) in H.reuse_left]
+    iterate_over += [('right',(opi,),ix) for (opi,_,ix) in H.reuse_right]
     args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
+    print(f'\t\tcompute_benvs_1col_boundary={time.time()-start_time}')
 
+    #print(benvs.keys())
+    fxn = compute_benvs_1col
+    iterate_over  = [('left', opis,Ly-1) for (opis,_) in H._1col_mid+H._1col_right]
+    iterate_over += [('right',opis,0)    for (opis,_) in H._1col_mid+H._1col_left]
+    iterate_over += [('left',(opi,),ix) for (opi,ix,_) in H.reuse_mid+H.reuse_right]
+    iterate_over += [('right',(opi,),ix) for (opi,_,ix) in H.reuse_mid+H.reuse_left]
+    args = [benvs,tmpdir,Ly,profile]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for benvs_ in ls:
+        benvs.update(benvs_)
+    print(f'\t\tcompute_benvs_1col={time.time()-start_time}')
+
+    start_time = time.time()
     fxn = _2col_benvs
     iterate_over = [(side,opis) for (opis,_) in H._2col_terms \
                                 for side in ['left','right']]
@@ -407,13 +516,13 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
+    print(f'\t\t2col_benvs_time={time.time()-start_time}')
 
     fxn = _site_term
-    iterate_over  = [('norm',None,j,1.) for j in range(Ly)]
-    iterate_over += [('H',opis,j,fac) for j in range(Ly) \
-                                      for (opis,fac) in H._1col_terms]
-    iterate_over += [('H',opis,j,fac) for j in range(Ly) \
-                                      for (opis,fac) in H._2col_terms]
+    iterate_over  = [(None,j,1.) for j in range(Ly)]
+    iterate_over += [(opis,j,fac) for j in range(Ly) for (opis,fac) in _1col_terms]
+    iterate_over += [(opis,j,fac) for j in range(Ly) \
+                                  for (opis,fac) in H._2col_terms]
     args = [benvs,tmpdir,Ly,profile]
     compress_opts['dense'] = dense_row
     kwargs = compress_opts
@@ -424,9 +533,9 @@ def compute_grad(H,psi,tmpdir,profile=False,dense_row=True,
     H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
     n0 = dict() 
     n1 = dict() 
-    for typ,site_map in ls:
+    for term,site_map in ls:
         for (i,j),(scal,data) in site_map.items():
-            if typ == 'norm':
+            if term == 'norm':
                 n0[i,j] = scal
                 n1[i,j] = data
             else:
@@ -466,7 +575,7 @@ def compute_grad_small_mem(H,psi,tmpdir,profile=False,dense_row=True,
 
     fxn = _1col_mid
     iterate_over  = [opis for (opis,_) in H._1col_terms]
-    args = [H.data_map,psi,tmpdir,profile]
+    args = [psi,tmpdir,profile]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -507,7 +616,7 @@ def compute_grad_small_mem(H,psi,tmpdir,profile=False,dense_row=True,
 
     fxn = _1col_mid
     iterate_over = [(opi,) for (opi,_,_) in H.reuse]
-    args = [H.data_map,psi,tmpdir,profile]
+    args = [psi,tmpdir,profile]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
@@ -547,102 +656,6 @@ def compute_grad_small_mem(H,psi,tmpdir,profile=False,dense_row=True,
     for fname in benvs.values():
         os.remove(fname)
     return H0,H1,n0,n1
-def compute_grad_N(H,psi,tmpdir,profile=False,dense_row=True,
-    layer_tags=('KET','BRA'),max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
-    compress_opts = dict()
-    compress_opts['max_bond'] = max_bond
-    compress_opts['cutoff'] = cutoff
-    compress_opts['canonize'] = canonize
-    compress_opts['mode'] = mode
-    compress_opts['layer_tags'] = layer_tags
-    Lx,Ly = psi.Lx,psi.Ly
-    norm = psi.make_norm(layer_tags=('KET','BRA'))
-    norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
-    norm = write_ftn_to_disc(norm,tmpdir)
-    psi = write_ftn_to_disc(psi,tmpdir) 
-
-    fxn = _norm_benvs
-    iterate_over = ['left','right','mid']
-    args = [norm,tmpdir,profile]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    benvs = dict()
-    for benvs_ in ls:
-        benvs.update(benvs_)
-    os.remove(norm)
-
-    N_terms = [OPi({'pn':1.},(x,y)) for x in range(Lx) for y in range(Ly)]
-
-    fxn = _1col_mid
-    iterate_over  = [opis for (opis,_) in H._1col_terms]
-    iterate_over += [(opi,) for opi in N_terms]
-    for (opi,_,_) in H.reuse:
-        if opi.tag[:2]!='pn':
-            iterate_over.append((opi,))
-    args = [H.data_map,psi,tmpdir,profile]
-    kwargs = dict()
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-
-    fxn = _1col_benvs
-    iterate_over  = [('left', opis,Ly-1) for (opis,_) in H._1col_terms]
-    iterate_over += [('right',opis,0)    for (opis,_) in H._1col_terms]
-    iterate_over += [('left',(opi,),Ly-1) for opi in N_terms]
-    iterate_over += [('right',(opi,),0)   for opi in N_terms]
-    for (opi,lix,rix) in H.reuse:
-        if opi.tag[:2]!='pn':
-            iterate_over += [('left',(opi,),lix),('right',(opi,),rix)]
-    args = [benvs,tmpdir,Ly,profile]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-
-    fxn = _2col_benvs
-    iterate_over = [(side,opis) for (opis,_) in H._2col_terms \
-                                for side in ['left','right']]
-    args = [benvs,tmpdir,Ly,profile]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-    for benvs_ in ls:
-        benvs.update(benvs_)
-
-    fxn = _site_term
-    iterate_over  = [('norm',None,j,1.) for j in range(Ly)]
-    iterate_over += [('H',opis,j,fac) for j in range(Ly) \
-                                      for (opis,fac) in H._1col_terms]
-    iterate_over += [('H',opis,j,fac) for j in range(Ly) \
-                                      for (opis,fac) in H._2col_terms]
-    iterate_over += [('N',(opi,),j,1.) for j in range(Ly) for opi in mu_terms]
-    args = [benvs,tmpdir,Ly,profile]
-    compress_opts['dense'] = dense_row
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
-
-    # parse site_map
-    H0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
-    H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
-    n0 = dict() 
-    n1 = dict() 
-    N0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
-    N1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
-    for typ,site_map in ls:
-        for (i,j),(scal,data) in site_map.items():
-            if typ == 'norm':
-                n0[i,j] = scal
-                n1[i,j] = data
-            elif typ == 'H':
-                H0[i,j] = H0[i,j] + scal
-                H1[i,j] = H1[i,j] + data
-            else:
-                N0[i,j] = N0[i,j] + scal
-                N1[i,j] = N1[i,j] + data
-    os.remove(psi) 
-    for fname in benvs.values():
-        os.remove(fname)
-    return H0,H1,N0,N1,n0,n1
-
 def _energy_term(info,benvs,**compress_opts):
     opis,fac = info
     j = 0 
@@ -695,35 +708,40 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
     compress_opts['canonize'] = canonize
     compress_opts['mode'] = mode
     compress_opts['layer_tags'] = layer_tags
-    Lx,Ly = psi.Lx,psi.Ly
 
-    fxn = _norm_benvs
-    iterate_over = ['right','mid']
+    Lx,Ly = psi.Lx,psi.Ly
+    bra_parity = sum([T.data.parity for T in psi.tensors])
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
     norm = write_ftn_to_disc(norm,tmpdir)
-    args = [norm,tmpdir,False]
-    kwargs = compress_opts
-    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     benvs = dict()
-    for benvs_ in ls:
-        benvs.update(benvs_)
-    os.remove(norm)
+    _1col_terms = H._1col_left + H._1col_mid + H._1col_right
+    reuse       = H.reuse_left + H.reuse_mid + H.reuse_right
 
-    fxn = _1col_mid
-    iterate_over  = [opis for (opis,_) in H._1col_terms]
-    iterate_over += [(opi,) for (opi,_,_) in H.reuse]
-    psi = write_ftn_to_disc(psi,tmpdir) 
-    args = [H.data_map,psi,tmpdir,False]
+    fxn = compute_mid_benvs
+    iterate_over  = [None]
+    iterate_over += [opis for (opis,_) in _1col_terms]
+    iterate_over += [(opi,) for (opi,_,_) in reuse]
+    args = [norm,bra_parity,tmpdir]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
-    os.remove(psi) 
+    os.remove(norm) 
 
-    fxn = _1col_right
-    iterate_over  = [(opis,0)   for (opis,_) in H._1col_terms]
-    iterate_over += [((opi,),rix) for (opi,_,rix) in H.reuse]
+    fxn = compute_right_benvs_1col 
+    iterate_over = [(None,0)]
+    iterate_over += [(opis,0) for (opis,_) in H._1col_right]
+    iterate_over += [((opi,),ix) for (opi,_,ix) in H.reuse_right]
+    args = [benvs,tmpdir,Ly,False]
+    kwargs = compress_opts
+    ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    for benvs_ in ls:
+        benvs.update(benvs_)
+
+    fxn = compute_right_benvs_1col 
+    iterate_over  = [(opis,0) for (opis,_) in H._1col_mid+H._1col_left]
+    iterate_over += [((opi,),ix) for (opi,_,ix) in H.reuse_mid+H.reuse_left]
     args = [benvs,tmpdir,Ly,False]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -739,13 +757,13 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
         benvs.update(benvs_)
 
     fxn = _energy_term
-    iterate_over = H._1col_terms + H._2col_terms + [(None,1.)]
+    iterate_over = _1col_terms + H._2col_terms + [(None,1.)]
     args = [benvs]
     compress_opts['dense'] = dense_row
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     H0 = 0.
-    for (term,scal) in ls:
+    for term,scal in ls:
         if term == 'norm':
             n = scal
         else:
@@ -753,7 +771,6 @@ def compute_energy(H,psi,tmpdir,dense_row=True,
 
     for fname in benvs.values():
         os.remove(fname) 
-    print('nfile_energy=',len(os.listdir(tmpdir)))
     return H0/n,n
 def _pn_site(j,benvs,bra,ops,**compress_opts):
     bra = load_ftn_from_disc(bra)
@@ -773,7 +790,7 @@ def _pn_site(j,benvs,bra,ops,**compress_opts):
     envs = ftn.compute_row_environments(
                yrange=(max(j-1,0),min(j+1,ftn.Ly-1)),**compress_opts)
 
-    data_map = dict()
+    arr_map = dict()
     for opix,op in enumerate(ops):
         for i in range(ftn.Lx):
             pix = bra.site_ind(i,j)
@@ -794,8 +811,8 @@ def _pn_site(j,benvs,bra,ops,**compress_opts):
                 expec_ij = np.tensordot(bk_ij.data,TG.data,axes=((0,1),(0,1)))
             except IndexError:
                 expec_ij = 0.
-            data_map[opix,i,j] = expec_ij,norm_ij
-    return data_map
+            arr_map[opix,i,j] = expec_ij,norm_ij
+    return arr_map
 def check_pn(psi,tmpdir,symmetry='u1',layer_tags=('KET','BRA'),dense_row=True,
     max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
     compress_opts = dict()
@@ -833,16 +850,14 @@ def check_pn(psi,tmpdir,symmetry='u1',layer_tags=('KET','BRA'),dense_row=True,
     compress_opts['dense'] = dense_row
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     arrs = [np.zeros((psi.Lx,psi.Ly)) for op in ops]
-    sums = [0.0 for op in ops]
-    for data_map in ls:
-        for (opix,i,j),(e,n) in data_map.items():
+    for arr_map in ls:
+        for (opix,i,j),(e,n) in arr_map.items():
             arrs[opix][i,j] = e/n
-            sums[opix] += e/n
-    print('total particle number=',sums[0])
+    print('total particle number=',sum(arrs[0].reshape(-1)))
     print(arrs[0]) 
-    print('total alpha particle number=',sums[1])
+    print('total alpha particle number=',sum(arrs[1].reshape(-1)))
     print(arrs[1]) 
-    print('total beta particle number=',sums[2])
+    print('total beta particle number=',sum(arrs[2].reshape(-1)))
     print(arrs[2])
     os.remove(bra)
     for fname in benvs.values():
@@ -872,15 +887,11 @@ def compute_norm(psi,layer_tags=('KET','BRA'),dense_row=True,
     return norm.contract() 
 class GlobalGrad():
     def __init__(self,H,peps,chi,psi_fname,tmpdir,small_mem=False,
-                 opt_norm=False,mu=None,opt_mu=False,
                  profile=False,dense_row=True):
         self.start_time = time.time()
         self.H = H
         self.D = peps[0,0].shape[0]
         self.chi = chi
-        self.opt_norm = opt_norm
-        self.mu = mu
-        self.opt_mu = opt_mu
         self.profile = profile
         self.dense_row = dense_row
         self.tmpdir = tmpdir
@@ -932,32 +943,22 @@ class GlobalGrad():
         print(f'\t\tE={E},norm={n}')
         self.ne += 1
         self.fac = n**(-1.0/(2.0*psi.Lx*psi.Ly))
+        print('nfile_energy=',len(os.listdir(self.tmpdir)))
         return E,n
     def compute_grad(self,x):
         psi = self.vec2fpeps(x)
-        if self.mu is None:
-            if self.small_mem:
-                H0,H1,n0,n1 = compute_grad_small_mem(self.H,psi,self.tmpdir,
-                    max_bond=self.chi,dense_row=self.dense_row,profile=self.profile)
-            else:
-                H0,H1,n0,n1 = compute_grad(self.H,psi,self.tmpdir,
-                    max_bond=self.chi,dense_row=self.dense_row,profile=self.profile)
+        if self.small_mem:
+            H0,H1,n0,n1 = compute_grad_small_mem(self.H,psi,self.tmpdir,
+                max_bond=self.chi,dense_row=self.dense_row,profile=self.profile)
         else:
-           H0,H1,N0,N1,n0,n1 = compute_grad_N(self.H,psi,self.tmpdir,
-               max_bond=self.chi,dense_row=self.dense_row,profile=self.profile)
+            H0,H1,n0,n1 = compute_grad(self.H,psi,self.tmpdir,
+                max_bond=self.chi,dense_row=self.dense_row,profile=self.profile)
         g = []
         E = [] # energy
-        N = [] # pn
         for i in range(psi.Lx):
             for j in range(psi.Ly):
                 E.append(H0[i,j]/n0[i,j])
                 gij = (H1[i,j]-n1[i,j]*E[-1])/n0[i,j]
-                if self.mu is not None:
-                    N.append(N0[i,j]/n0[i,j])
-                    gij = gij-self.mu*(N1[i,j]-n1[i,j]*N[-1])/n0[i,j]
-                if self.opt_norm:
-                    fac = 2.*(n0[i,j]-1.)*psi.Lx*psi.Ly
-                    gij = gij+fac*n1[i,j]
                 cons = self.constructors[i,j][0]
                 g.append(cons.tensor_to_vector(gij))
         g = np.concatenate(g)
@@ -968,33 +969,14 @@ class GlobalGrad():
         E = sum(E)/len(E)
         print(f'\t\tE={E},norm={n0[0,0]},gmax={gmax},dE={dE}')
 
-        if self.opt_mu:
-            N = sum(N)/len(N)
-            g = np.concatenate([g,-N*np.ones(1)])
-            print(f'\t\tN={N},mu={self.mu},gmu={-N}')
-
         self.ng += 1
         self.fac = n0[0,0]**(-1.0/(2.0*psi.Lx*psi.Ly))
-
-        f = E
-        if self.mu is not None:
-            f -= self.mu*N
-        if self.opt_norm:
-            f += psi.Lx*psi.Ly*(n0[0,0]-1.)**2
-        return f,g
+        print('nfile_gradient=',len(os.listdir(self.tmpdir)))
+        return E,g
     def callback(self,x,g):
-        if self.opt_mu:
-            x = list(x)
-            g = list(g)
-            self.mu = x.pop()
-            gmu = g.pop()
-        if not self.opt_norm:
-            x *= self.fac
-            g /= self.fac
+        x *= self.fac
+        g /= self.fac
         psi = self.vec2fpeps(x)
-        if self.opt_mu:
-            x = np.array(x+[self.mu])
-            g = np.array(g+[gmu])
 
         write_ftn_to_disc(psi,self.psi+f'_{self.niter}',provided_filename=True)
         write_ftn_to_disc(psi,self.psi,provided_filename=True)
@@ -1006,8 +988,6 @@ class GlobalGrad():
         self.ne = 0
         self.niter = 0
         x0 = self.fpeps2vec(load_ftn_from_disc(self.psi))
-        if self.opt_mu:
-            x0 = np.concatenate([x0,np.ones(1)*self.mu])
         scipy.optimize.minimize(fun=self.compute_grad,jac=True,
                  method=method,x0=x0,
                  callback=self.callback,options=options)

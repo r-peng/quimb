@@ -6,7 +6,7 @@ from opt_einsum import shared_intermediates
 import numpy as np
 import scipy.sparse.linalg as spla
 
-from .block_interface import eye,Hubbard
+from .block_interface import Hubbard,eye
 from ...utils import pairwise
 from ...utils import progbar as Progbar
 from ..tensor_core import contract_strategy,bonds

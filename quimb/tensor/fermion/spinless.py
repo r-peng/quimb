@@ -1,62 +1,39 @@
+from pyblock3.algebra.core import SubTensor
+from pyblock3.algebra.fermion import SparseFermionTensor
+from pyblock3.algebra.fermion_symmetry import U1,Z2 
+from pyblock3.algebra.fermion_ops import _compute_swap_phase,_fuse_data_map
+import pyblock3.algebra.fermion_setting as setting 
 import numpy as np
 from itertools import product
 from functools import reduce
+SVD_SCREENING = setting.SVD_SCREENING
 
-from pyblock3.algebra.fermion_setting import symmetry_map
-from pyblock3.algebra.core import SubTensor
-from pyblock3.algebra.fermion import SparseFermionTensor
-from pyblock3.algebra.fermion_ops import (
-    make_phase_dict,
-    _fuse_data_map,
-    _compute_swap_phase
-)
-from .fermion_arbgeom_tebd import LocalHamGen
-from .fermion_2d_tebd import get_pattern
-from .fermion_core import FermionTensor,FermionTensorNetwork
-from .fermion_2d import FPEPS
-from ..tensor_2d import PEPS
-from ..tensor_2d_tebd import LocalHam2D 
-SVD_SCREENING = 1e-28
-#################### pyblock-like operators ##############
-def creation(symmetry='u1'):
-    dat = np.array([[1.0]])
-    symmetry = symmetry.upper()
-    symm = symmetry_map(symmetry)
-    if symmetry=='u1':
-        qlab = U1(1),U1(0)
-    elif symmetry=='z2':
-        qlab = Z2(1),Z2(0)
+state_map_u1 = {0:(U1(0),0,1),
+                1:(U1(1),0,1)}
+state_map_z2 = {0:(Z2(0),0,1),
+                1:(Z2(1),0,1)}
+cre_map = {0:"", 1:"+"}
+ann_map = {0:"", 1:"+"}
+hop_map = {0:(1,), 1:(0,)}
+
+sz_dict = {0:0, 1:.5}
+pn_dict = {0:0, 1:1}
+
+def get_state_map(symmetry):
+    if isinstance(symmetry, str):
+        symmetry_string = symmetry.upper()
     else:
-       raise NotImplementedError
-    blks = [SubTensor(reduced=dat,q_labels=qlab)]
-    T = SparseFermionTensor(blocks=blks,pattern='+-',shape=(2,2))
-    return T.to_flat()
-def get_phys_identity(symmetry='u1'):
-    dat = np.array([[1.0]])
-    if symmetry=='u1':
-        qlabs = (U1(0),U1(0)),(U1(1),U1(1))
-    elif symmetry=='z2':
-        qlabs = (Z2(0),Z2(0)),(Z2(1),Z2(1))
-    else:
-       raise NotImplementedError
-    blks = [SubTensor(reduced=dat,q_labels=qlab) for qlab in qlabs]
-    T = SparseFermionTensor(blocks=blks,pattern='+-',shape=(2,2))
-    return T.to_flat()
-def eye(bond_info):
-    dq,dim = list(bond_info.items())[0]
-    qlab = dq,-dq
-    dat = np.eye(dim)
-    blks = [SubTensor(reduced=dat,q_labels=qlab)]
-    T = SparseFermionTensor(blocks=blks,pattern='+-')
-    return T.to_flat() 
-def bonded_vaccum(vir_shape,pattern,normalize=True,symmetry='u1'):
-    if symmetry=='u1':
-        q_label = U1(0)
-    elif symmetry=='z2':
-        q_label = Z2(0)
-    else:
-        raise NotImplementedError
-    idx, ish = 0,1
+        symmetry_string = symmetry.__name__
+    return {#"U11": state_map_u11,
+            "U1": state_map_u1,
+            #"Z4": state_map_z4,
+            #"Z22": state_map_z22,
+            "Z2": state_map_z2}[symmetry_string]
+def bonded_vaccum(vir_shape, pattern, normalize=True, symmetry=None, flat=None):
+    symmetry, flat = setting.dispatch_settings(
+                                 symmetry=symmetry, flat=flat)
+    state_map = get_state_map(symmetry)
+    q_label, idx, ish = state_map[0]
     vir_shape = tuple(vir_shape)
     shape = vir_shape + (ish,)
     arr = np.zeros(shape)
@@ -66,53 +43,105 @@ def bonded_vaccum(vir_shape,pattern,normalize=True,symmetry='u1'):
     T = SparseFermionTensor(blocks=blocks, pattern=pattern, shape=vir_shape+(2,))
     if normalize:
         T = T / T.norm()
-    return T.to_flat()
-def spinless_fermion(t,v,symmetry='u1'):
-    if symmetry=='u1':
-        symmetry = U1
-    elif symmetry=='z2':
-        symmetry = Z2
+    if flat:
+        return T.to_flat()
     else:
-        raise NotImplementedError
+        return T 
+def creation(symmetry=None,flat=None):
+    symmetry, flat = setting.dispatch_settings(
+                                 symmetry=symmetry, flat=flat)
+    state_map = get_state_map(symmetry)
     block_dict = dict()
-    state_map = {0:(symmetry(0),0,1),
-                 1:(symmetry(1),0,1)}
-    cre_map = ann_map = {0:'',1:'+'}
-    hop_map = {0:1,1:0}
-    pn_dict = {0:0,1:1}
-    for s1,s2 in product(cre_map.keys(),repeat=2):
-        q1,ix1,d1 = state_map[s1]
-        q2,ix2,d2 = state_map[s2]
-        val = s1*s2*v
-        if (q1,q2,q1,q2) not in block_dict:
-            block_dict[(q1,q2,q1,q2)] = np.zeros((d1,d2,d1,d2))
-        dat = block_dict[(q1,q2,q1,q2)]
-        phase = _compute_swap_phase(s1,s2,s1,s2)
-        dat[ix1,ix2,ix1,ix2] += phase*val
+    creation_map = {0:1}
+    for s1 in cre_map.keys():
+        q1, ix1, d1 = state_map[s1]
+        if s1 not in creation_map:
+            continue
+        output_s1 = creation_map[s1]
+        if isinstance(output_s1, int):
+            output_s1 = (output_s1, )
+        for os1 in output_s1:
+            q2, ix2, d2 = state_map[os1]
+            if (q2, q1) not in block_dict:
+                block_dict[(q2, q1)] = np.zeros([d2, d1])
+            dat = block_dict[(q2, q1)]
+            phase = _compute_swap_phase(os1, s1)
+            dat[ix2, ix1] += phase
+    blocks = [SubTensor(reduced=dat, q_labels=qlab) for qlab, dat in block_dict.items()]
+    T = SparseFermionTensor(blocks=blocks, pattern="+-", shape=(2,2))
+    if flat:
+        return T.to_flat()
+    else:
+        return T
+def Hubbard(t=1, u=1, mu=0., fac=None, symmetry=None, flat=None):
+    symmetry, flat = setting.dispatch_settings(
+                                 symmetry=symmetry, flat=flat)
+    if fac is None:
+        fac = (1, 1)
+    faca, facb = fac
+    state_map = get_state_map(symmetry)
+    block_dict = dict()
 
-        s3 = hop_map[s1]
-        s4 = hop_map[s2]
-        q3,ix3,d3 = state_map[s3]
-        q4,ix4,d4 = state_map[s4]
-        input_string  = sorted(cre_map[s1]+cre_map[s2])
-        output_string = sorted(cre_map[s3]+cre_map[s4])
+    for s1, s2 in product(cre_map.keys(), repeat=2):
+        q1, ix1, d1 = state_map[s1]
+        q2, ix2, d2 = state_map[s2]
+        val = (pn_dict[s1]==2) * faca * u + pn_dict[s1] * faca * mu +\
+              (pn_dict[s2]==2) * facb * u + pn_dict[s2] * facb * mu
+        if (q1, q2, q1, q2) not in block_dict:
+            block_dict[(q1, q2, q1, q2)] = np.zeros([d1, d2, d1, d2])
+        dat = block_dict[(q1, q2, q1, q2)]
+        phase = _compute_swap_phase(s1, s2, s1, s2)
+        dat[ix1, ix2, ix1, ix2] += phase * val
+        for s3 in hop_map[s1]:
+            q3, ix3, d3 = state_map[s3]
+            input_string = sorted(cre_map[s1]+cre_map[s2])
+            for s4 in hop_map[s2]:
+                q4, ix4, d4 = state_map[s4]
+                output_string = sorted(cre_map[s3]+cre_map[s4])
+                if input_string != output_string:
+                    continue
+                if (q1, q2, q3, q4) not in block_dict:
+                    block_dict[(q1, q2, q3, q4)] = np.zeros([d1, d2, d3, d4])
+                dat = block_dict[(q1, q2, q3, q4)]
+                phase = _compute_swap_phase(s1, s2, s3, s4)
+                dat[ix1, ix2, ix3, ix4] += phase * -t
+
+    blocks = [SubTensor(reduced=dat, q_labels=qlab) for qlab, dat in block_dict.items()]
+    T = SparseFermionTensor(blocks=blocks, pattern="++--")
+    if flat:
+        return T.to_flat()
+    else:
+        return T
+def make_phase_dict(state_map, ndim):
+    phase_dict = {}
+    for states in product(state_map.keys(), repeat=ndim):
+        all_info = [state_map[istate] for istate in states]
+        qlabs = tuple([info[0] for info in all_info])
+        input_string = sorted("".join([cre_map[istate] for istate in states[:ndim//2]]))
+        output_string = sorted("".join([ann_map[istate] for istate in states[ndim//2:]]))
         if input_string != output_string:
             continue
-        if (q1,q2,q3,q4) not in block_dict:
-            block_dict[(q1,q2,q3,q4)] = np.zeros((d1,d2,d3,d4))
-        dat = block_dict[(q1,q2,q3,q4)]
-        phase = _compute_swap_phase(s1,s2,s3,s4)
-        dat[ix1,ix2,ix3,ix4] += phase*(-t)
-    blocks = [SubTensor(reduced=dat,q_labels=q) for q,dat in block_dict.items()]
-    T = SparseFermionTensor(blocks=blocks, pattern="++--")
-    return T.to_flat()
-def get_flat_exponential(T,x):
+        inds = tuple([info[1] for info in all_info])
+        shape = tuple([info[2] for info in all_info])
+        if qlabs not in phase_dict:
+            phase_dict[qlabs] = np.zeros(shape)
+        phase_dict[qlabs][inds] = _compute_swap_phase(*states)
+    return phase_dict 
+def get_exponential(T, x):
+    if setting.DEFAULT_FLAT:
+        return get_flat_exponential(T, x)
+    else:
+        return get_sparse_exponential(T, x)
+def get_flat_exponential(T, x):
     symmetry = T.dq.__class__
-    state_map = {0:(symmetry(0),0,1),
-                 1:(symmetry(1),0,1)}
-    phase_dict = make_phase_dict(state_map, T.ndim)
+    if setting.DEFAULT_FERMION:
+        state_map = get_state_map(T.symmetry)
+        phase_dict = make_phase_dict(state_map, T.ndim)
     def get_phase(qlabels):
-        return phase_dict[qlabels]
+        if setting.DEFAULT_FERMION:
+            return phase_dict[qlabels]
+        else:
+            return 1
     split_ax = T.ndim//2
     left_pattern = T.pattern[:split_ax]
     right_pattern = T.pattern[split_ax:]
@@ -173,148 +202,66 @@ def get_flat_exponential(T,x):
     datas = np.concatenate(datas)
     Texp = T.__class__(q_labels, shapes, datas, pattern=T.pattern, symmetry=T.symmetry)
     return Texp
-################# quimb tebd operator class ####################
-def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'): 
-    ham = dict()
-    op = spinless_fermion(t,v,symmetry=symmetry)
-    for i, j in product(range(Lx), range(Ly)):
-        if i+1 != Lx:
-            where = ((i,j), (i+1,j))
-            ham[where] = op.copy()
-        if j+1 != Ly:
-            where = ((i,j), (i,j+1))
-            ham[where] = op.copy()
-    return LocalHam2D(Lx, Ly, ham)
-class LocalHamGen_(LocalHamGen):
-    def _expm_cached(self, x, y):
-        cache = self._op_cache['expm']
-        key = (id(x), y)
-        if key not in cache:
-            out = get_flat_exponential(x, y)
-            cache[key] = out
-        return cache[key]
-class LocalHam2D(LocalHamGen_):
-    """A 2D Fermion Hamiltonian represented as local terms. Different from
-    class:`~quimb.tensor.tensor_2d_tebd.LocalHam2D`, this does not combine
-    two sites and one site term into a single interaction per lattice pair.
-
-    Parameters
-    ----------
-    Lx : int
-        The number of rows.
-    Ly : int
-        The number of columns.
-    H2 : pyblock3 tensors or dict[tuple[tuple[int]], pyblock3 tensors]
-        The two site term(s). If a single array is given, assume to be the
-        default interaction for all nearest neighbours. If a dict is supplied,
-        the keys should represent specific pairs of coordinates like
-        ``((ia, ja), (ib, jb))`` with the values the array representing the
-        interaction for that pair. A default term for all remaining nearest
-        neighbours interactions can still be supplied with the key ``None``.
-    H1 : array_like or dict[tuple[int], array_like], optional
-        The one site term(s). If a single array is given, assume to be the
-        default onsite term for all terms. If a dict is supplied,
-        the keys should represent specific coordinates like
-        ``(i, j)`` with the values the array representing the local term for
-        that site. A default term for all remaining sites can still be supplied
-        with the key ``None``.
-
-    Attributes
-    ----------
-    terms : dict[tuple[tuple[int]], pyblock3 tensors]
-        The total effective local term for each interaction (with single site
-        terms appropriately absorbed). Each key is a pair of coordinates
-        ``ija, ijb`` with ``ija < ijb``.
-
-    """
-
-    def __init__(self, Lx, Ly, H2, H1=None):
-        self.Lx = int(Lx)
-        self.Ly = int(Ly)
-
-        # parse two site terms
-        if hasattr(H2, 'shape'):
-            # use as default nearest neighbour term
-            H2 = {None: H2}
+def get_sparse_exponential(T, x):
+    symmetry = T.dq.__class__
+    if setting.DEFAULT_FERMION:
+        state_map = get_state_map(symmetry)
+        phase_dict = make_phase_dict(state_map, T.ndim)
+    def get_phase(qlabels):
+        if setting.DEFAULT_FERMION:
+            return phase_dict[qlabels]
         else:
-            H2 = dict(H2)
+            return 1
+    split_ax = T.ndim//2
+    left_pattern = T.pattern[:split_ax]
+    right_pattern = T.pattern[split_ax:]
+    data_map = {}
+    from_parent = {}
+    to_parent = {}
+    blocks = []
+    for iblk in T.blocks:
+        left_q = iblk.q_labels[:split_ax]
+        right_q = iblk.q_labels[split_ax:]
+        parent = _fuse_data_map(left_q, right_q, from_parent, to_parent, data_map)
+        data_map[parent].append(iblk)
 
-        # possibly fill in default gates
-        default_H2 = H2.pop(None, None)
-        if default_H2 is not None:
-            for coo_a, coo_b in gen_2d_bonds(Lx, Ly, steppers=[
-                lambda i, j: (i, j + 1),
-                lambda i, j: (i + 1, j),
-            ]):
-                if (coo_a, coo_b) not in H2 and (coo_b, coo_a) not in H2:
-                    H2[coo_a, coo_b] = default_H2
-
-        super().__init__(H2=H2, H1=H1)
+    for slab, datasets in data_map.items():
+        row_len = col_len = 0
+        row_map = {}
+        for iblk in datasets:
+            lq = iblk.q_labels[:split_ax]
+            rq = iblk.q_labels[split_ax:]
+            if lq not in row_map:
+                new_row_len = row_len + np.prod(iblk.shape[:split_ax], dtype=int)
+                row_map[lq] = (row_len, new_row_len, iblk.shape[:split_ax])
+                row_len = new_row_len
+            if rq not in row_map:
+                new_row_len = row_len + np.prod(iblk.shape[split_ax:], dtype=int)
+                row_map[rq] = (row_len, new_row_len, iblk.shape[split_ax:])
+                row_len = new_row_len
+        data = np.zeros([row_len, row_len], dtype=T.dtype)
+        for iblk in datasets:
+            lq = iblk.q_labels[:split_ax]
+            rq = iblk.q_labels[split_ax:]
+            ist, ied = row_map[lq][:2]
+            jst, jed = row_map[rq][:2]
+            phase = get_phase(iblk.q_labels)
+            if isinstance(phase, np.ndarray):
+                phase = phase.reshape(ied-ist, jed-jst)
+            data[ist:ied,jst:jed] = np.asarray(iblk).reshape(ied-ist, jed-jst) * phase
+        if data.size ==0:
+            continue
+        el, ev = np.linalg.eigh(data)
+        s = np.diag(np.exp(el*x))
+        tmp = reduce(np.dot, (ev, s, ev.conj().T))
+        for lq, (ist, ied, ish) in row_map.items():
+            for rq, (jst, jed, jsh) in row_map.items():
+                q_labels = lq + rq
+                phase = get_phase(q_labels)
+                chunk = tmp[ist:ied, jst:jed].reshape(tuple(ish)+tuple(jsh)) * phase
+                if abs(chunk).max()<SVD_SCREENING:
+                    continue
+                blocks.append(SubTensor(reduced=chunk, q_labels=q_labels))
+    Texp = T.__class__(blocks=blocks, pattern=T.pattern)
+    return Texp 
     
-    @property
-    def nsites(self):
-        """The number of sites in the system.
-        """
-        return self.Lx * self.Ly
-    
-    draw = LocalHam2D.draw
-    __repr__ = LocalHam2D.__repr__
-################### long-range op class ##################
-def SpinlessFermion(t,v,Lx,Ly,symmetry='u1'):
-    from .spinless import creation
-    cre = creation(symmetry=symmetry)
-    ann = cre.dagger
-    pn = np.tensordot(cre,ann,axes=((1,),(0,)))
-    def get_terms(sites):
-        # cre0,ann1 = (-1)**S ann1,cre0 
-        ops = cre.copy(),ann.copy()
-        phase = (-1)**(cre.parity*ann.parity)
-        ham[sites,'t1'] = ops,-t*phase
-        # cre1,ann0
-        ops = ann.copy(),cre.copy()
-        phase = 1.0
-        ham[sites,'t2'] = ops,-t*phase
-        # pn1,pn2
-        ops = pn.copy(),pn.copy()
-        phase = 1.0
-        ham[sites,'v'] = ops,v*phase
-        return 
-    ham = dict()
-    for i in range(Lx):
-        for j in range(Ly):
-            if i+1 != Lx:
-                get_terms(((i,j),(i+1,j)))
-            if j+1 != Ly:
-                get_terms(((i,j),(i,j+1)))
-    return ham
-################### wfn initialization ###################
-def get_product_state(Lx,Ly,n=0.5,symmetry='u1'):
-    """
-    helper function to generate initial guess from regular PEPS
-    |psi> = \prod |alpha> \prod | > 
-    this function only works for half filled case with U1 symmetry
-    Note energy of this wfn is 0
-    """
-    N = int(Lx*Ly*n+1e-6)
-    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
-    ftn = FermionTensorNetwork([])
-    ind_to_pattern_map = dict()
-    cre = creation(symmetry=symmetry)
-    count = 0
-    for ix, iy in product(range(tn.Lx), range(tn.Ly)):
-        T = tn[ix, iy]
-        pattern = get_pattern(T.inds,ind_to_pattern_map)
-        #put vaccum at site (ix, iy) and apply a^{\dagger}
-        vac = bonded_vaccum((1,)*(T.ndim-1), pattern=pattern)
-        if (ix+iy)%2==0 and count<N:
-            trans_order = list(range(1,T.ndim))+[0]
-            data = np.tensordot(cre, vac, axes=((1,), (-1,))).transpose(trans_order)
-            count += 1
-        else:
-            data = vac
-        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
-        ftn.add_tensor(new_T, virtual=False)
-    assert count==N
-    ftn.view_as_(FPEPS, like=tn)
-    return ftn,N
-

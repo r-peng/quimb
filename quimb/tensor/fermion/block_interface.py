@@ -1,7 +1,7 @@
 import sys
 from pyblock3.algebra.fermion import eye, Constructor
 from pyblock3.algebra import fermion_setting as setting
-from pyblock3.algebra import fermion_ops
+#from pyblock3.algebra import fermion_ops
 
 this = sys.modules[__name__]
 this.DEFAULT_SYMMETRY = "U1"
@@ -48,11 +48,14 @@ def dispatch_settings(*keys):
 def get_symmetry():
     return setting.symmetry_map[this.DEFAULT_SYMMETRY]
 
-to_exponential = fermion_ops.get_exponential
-H1 = fermion_ops.H1
-Hubbard = fermion_ops.Hubbard
-onsite_U = fermion_ops.onsite_U
-measure_SZ = fermion_ops.measure_SZ
-ParticleNumber = fermion_ops.ParticleNumber
-creation = fermion_ops.creation
-annihilation = fermion_ops.annihilation
+#to_exponential = fermion_ops.get_exponential
+#H1 = fermion_ops.H1
+#Hubbard = fermion_ops.Hubbard
+#onsite_U = fermion_ops.onsite_U
+#measure_SZ = fermion_ops.measure_SZ
+#ParticleNumber = fermion_ops.ParticleNumber
+#creation = fermion_ops.creation
+#annihilation = fermion_ops.annihilation
+from quimb.tensor.fermion import spin_utils 
+to_exponential = spin_utils.get_exponential
+Hubbard = spin_utils.Hubbard

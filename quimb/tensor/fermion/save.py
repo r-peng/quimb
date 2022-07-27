@@ -162,3 +162,88 @@ def hopping_ham(Nx,Ny,ke1,ke3=None,symmetry='u1',flat=True):
                 where = ((i,j), (i,j+3))
                 ham[where] = op.copy()
     return LocalHam2D(Nx, Ny, ham)
+#def get_phys_bond_info(symmetry):
+#    if symmetry in [U1,'u1']:
+#        return BondInfo({U1(0):1,U1(1):2,U1(2):1})
+#    if symmetry in [Z2,'z2']:
+#        return BondInfo({Z2(0):2,Z2(1):2})
+#    else:
+#        raise NotImplementedError(f'{symmteyr} symmetry not implemented!')
+#def insert_vac_at_boundary(ftn,side,symmetry='u1',flat=True): 
+#    symmetry,flat = setting.dispatch_settings(symmetry=symmetry,flat=flat)
+#    state_map = get_state_map(symmetry)
+#    q_label, idx, ish = state_map[0]
+#    arr = np.zeros(ish)
+#    arr[idx] = 1
+#    blocks = [SubTensor(reduced=arr, q_labels=(q_label,))]
+#    dummy = SparseFermionTensor(blocks=blocks, pattern='-', shape=(ish,))
+#    if flat:
+#        dummy = dummy.to_flat()
+#
+#    if side in ['left','right']:
+#        ftn = ftn.reorder(direction='col',inplace=True) 
+#        L0,L1 = ftn.Lx,ftn.Ly
+#    else:
+#        ftn = ftn.reorder(direction='row',inplace=True) 
+#        L0,L1 = ftn.Ly,ftn.Lx
+#
+#    idx = {(i,i+1):rand_uuid() for i in range(L0-1)}
+#    ftn_new = FermionTensorNetwork([])
+#    if side in ['right','top']:
+#        for j in range(L1-1):
+#            tag = f'COL{j}' if side=='right' else f'ROW{j}'
+#            ftn_new.add_tensor_network(ftn.select(tag).copy())
+#    j = L1-1 if side in ['right','top'] else 0
+#    for i in range(L0):
+#        (x,y) = (i,j) if side in ['left','right'] else (j,i)
+#        (x_,y_) = (i,j+1) if side in ['left','right'] else (j+1,i)
+#        if i==0:
+#            vir_dim = 2
+#            pattern = '+++'
+#            inds = rand_uuid(),idx[i,i+1]
+#        elif i==L0-1:
+#            vir_dim = 2
+#            pattern = '+-+'
+#            inds = rand_uuid(),idx[i-1,i]
+#        else:
+#            vir_dim = 3
+#            pattern = '+-++'
+#            inds = rand_uuid(),idx[i-1,i],idx[i,i+1]
+#        tags1 = f'I{x},{y}',f'ROW{x}',f'COL{y}'
+#        tags2 = f'I{x_},{y_}',f'ROW{x_}',f'COL{y_}'
+#        pix1 = f'k{x},{y}'
+#        pix2 = f'k{x_},{y_}'
+#
+#        vac = bonded_vaccum((ish,)*vir_dim,pattern,symmetry=symmetry,flat=flat)
+#        data = np.tensordot(dummy,ftn[x,y].data,axes=([],[]))
+#        if side in ['left','bottom']:
+#            T = FermionTensor(data=vac,inds=inds+(pix1,),tags=tags1)
+#            ftn_new.add_tensor(T,virtual=True)
+#
+#            inds2 = list(inds[:1]+ftn[x,y].inds)
+#            ax = inds2.index(pix1)
+#            inds2[ax] = pix2
+#            T = FermionTensor(data=data,inds=inds2,tags=tags2)
+#            ftn_new.add_tensor(T,virtual=True)
+#        else:
+#            inds1 = list(inds[:1]+ftn[x,y].inds)
+#            T = FermionTensor(data=data,inds=inds1,tags=tags1)
+#            ftn_new.add_tensor(T,virtual=True)
+#
+#            T = FermionTensor(data=vac,inds=inds+(pix2,),tags=tags2)
+#            ftn_new.add_tensor(T,virtual=True)
+#            
+#    if side in ['left','bottom']:
+#        for j in range(1,L1):
+#            for i in range(L0):
+#                (x,y) = (i,j) if side=='left' else (j,i)
+#                (x_,y_) = (i,j+1) if side=='left' else (j+1,i)
+#                T = ftn[x,y].copy()
+#                T.reindex_({f'k{x},{y}':f'k{x_},{y_}'})
+#                T.modify(tags=(f'I{x_},{y_}',f'ROW{x_}',f'COL{y_}'))
+#                ftn_new.add_tensor(T,virtual=True)
+#    (Lx,Ly) = (L0,L1+1) if side in ['left','right'] else (L1+1,L0)
+#    ftn_new.view_as_(FPEPS, Lx=Lx, Ly=Ly,
+#                     site_ind_id=ftn._site_ind_id, site_tag_id=ftn._site_tag_id,
+#                     row_tag_id=ftn._row_tag_id, col_tag_id=ftn._col_tag_id)
+#    return ftn_new 
