@@ -392,6 +392,7 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
     if iprint>0:
         print(f'\t\tcompute_benvs_2col={time.time()-start_time}')
 
+    start_time = time.time()
     fxn = compute_site_term
     iterate_over  = list(range(Ly))
     iterate_over += [(j,) + info for j in range(Ly) for info in H.ls1 + H.ls2]
@@ -399,8 +400,11 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
     compress_opts['dense'] = dense_row
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
+    if iprint>0:
+        print(f'\t\tcompute_site_term={time.time()-start_time}')
 
     # parse site_map
+    start_time = time.time()
     H0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
     H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
     N0 = dict() 
@@ -413,6 +417,8 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
             else:
                 H0[i,j] = H0[i,j] + scal
                 H1[i,j] = H1[i,j] + data
+    if iprint>0:
+        print(f'\t\tsum_grad_term={time.time()-start_time}')
     for fname in benvs.values():
         os.remove(fname)
     return H0,H1,N0,N1
@@ -726,10 +732,11 @@ class GlobalGrad():
         write_ftn_to_disc(psi,self.psi,provided_filename=True)
         self.niter += 1
         return x,g
-    def kernel(self,method=_minimize_bfgs,options={'maxiter':200,'gtol':1e-5}):
+    def kernel(self,method=_minimize_bfgs,maxiter=200,gtol=1e-5):
         self.ng = 0
         self.ne = 0
         self.niter = 0
+        options = {'maxiter':maxiter,'gtol':gtol}
         x0 = self.fpeps2vec(load_ftn_from_disc(self.psi))
         scipy.optimize.minimize(fun=self.compute_grad,jac=True,
                  method=method,x0=x0,
