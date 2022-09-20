@@ -21,8 +21,34 @@ from .utils import (
 from .spin_utils import data_map,sign_a,sign_b 
 np.set_printoptions(suppress=True,linewidth=1000,precision=4)
 
+def distribute(ls):
+    ls1 = []
+    ls2 = []
+    while len(ls)>0:
+        info = ls.pop()
+        if len(info)==7:
+            ls1.append(info)
+        else:
+            if info[0]=='nanb':
+                ls1.append(info)
+            else:
+                ls2.append(info)
+    return ls1,ls2
+def distribute1(ls):
+    ls1 = []
+    ls2 = []
+    while len(ls)>0:
+        info = ls.pop()
+        if info[0][:2]=='pn':
+            ls_ = info[0][2:].split('pn')
+            if len(ls_)==1:
+                ls2.append(info)
+            else:
+                ls1.append(info)
+        else:
+            ls1.append(info)
+    return ls1,ls2
 class SumOpGrad:
-    __slots__ = ['ls1','ls2','mid','l0','l1','r0','r1']
     def __init__(self,ls1,ls2,tmp):
         self.ls1 = ls1
         self.ls2 = ls2
@@ -34,9 +60,9 @@ class SumOpGrad:
 
         self.r0 = tmp.pop()
         self.r1 = tmp.pop()
-        self.mid = []
+        self.m = []
         for j in range(Ly-3,1,-1):
-            self.mid += tmp.pop()
+            self.m += tmp.pop()
         try:
             self.l0 = tmp.pop(0)
         except IndexError:
@@ -45,7 +71,14 @@ class SumOpGrad:
             self.l1 = tmp.pop(0)
         except IndexError:
             self.l1 = []
-        print('number of reuse terms=',len(self.l0+self.l1+self.r0+self.r1+self.mid))
+        print('number of reuse terms=',len(self.l0+self.l1+self.r0+self.r1+self.m))
+    def distribute(self):
+        self.m_1,self.m_2 = distribute(self.m)
+        self.l0_1,self.l0_2 = distribute(self.l0)
+        self.l1_1,self.l1_2 = distribute(self.l1)
+        self.r0_1,self.r0_2 = distribute(self.r0)
+        self.r1_1,self.r1_2 = distribute(self.r1)
+        self.ls1_1,self.ls1_2 = distribute1(self.ls1)
 ##################################################################
 # Hamiltonians
 ##################################################################
@@ -333,34 +366,58 @@ def compute_site_term(info,benvs,tmpdir,Ly,profile,**compress_opts):
         _profile(f'compute_site_terms')
     return norm,site_map
 def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
-    layer_tags=('KET','BRA'),max_bond=None,cutoff=1e-10,canonize=True,mode='mps'):
-    compress_opts = dict()
-    compress_opts['max_bond'] = max_bond
-    compress_opts['cutoff'] = cutoff
-    compress_opts['canonize'] = canonize
-    compress_opts['mode'] = mode
-    compress_opts['layer_tags'] = layer_tags
-
+                 smallmem=False,**compress_opts):
     Lx,Ly = psi.Lx,psi.Ly
     norm = psi.make_norm(layer_tags=('KET','BRA'))
     norm.reorder(direction='col',layer_tags=('KET','BRA'),inplace=True)
     norm = write_ftn_to_disc(norm,tmpdir)
-    benvs = dict()
+    H0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
+    H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
+    if smallmem:
+        H0,H1,N0,N1,benvs = compute_grad_batch(Lx,Ly,norm,bra_parity,tmpdir,
+            H.m_1,H.l0_1,H.l1_1,H.r0_1,H.r1_1,H.ls1_1,[],None,H0,H1,True,
+            profile=profile,dense_row=dense_row,iprint=iprint,**compress_opts)
+        keys = list(benvs.keys())
+        for key in keys:
+            if key[0] != 'norm':
+                fname = benvs.pop(key)
+                os.remove(fname)
+        H0,H1,_,_,benvs = compute_grad_batch(Lx,Ly,norm,bra_parity,tmpdir,
+            H.m_2,H.l0_2,H.l1_2,H.r0_2,H.r1_2,H.ls1_2,H.ls2,benvs,H0,H1,False,
+            profile=profile,dense_row=dense_row,iprint=iprint,**compress_opts)
+    else:
+        H0,H1,N0,N1,benvs = compute_grad_batch(Lx,Ly,norm,bra_parity,tmpdir,
+            H.m,H.l0,H.l1,H.r0,H.r1,H.ls1,H.ls2,None,H0,H1,True,
+            profile=profile,dense_row=dense_row,iprint=iprint,**compress_opts)
+    os.remove(norm)
+    for fname in benvs.values():
+        os.remove(fname)
+    return H0,H1,N0,N1
+def compute_grad_batch(Lx,Ly,norm,bra_parity,tmpdir,
+                       m,l0,l1,r0,r1,ls1,ls2,norm_benvs,H0,H1,compute_N,
+                       profile=False,dense_row=True,iprint=0,**compress_opts):
+    benvs = dict() if norm_benvs is None else norm_benvs
+    compress_opts['layer_tags'] = 'KET','BRA'
 
+    start_time = time.time()
     fxn = compute_mid_benvs
-    iterate_over  = [None] + [info[:-2] for info in H.mid+H.l0+H.l1+H.r0+H.r1]
+    iterate_over = [info[:-2] for info in m + l0 + l1 + r0 + r1]
+    if norm_benvs is None:
+        iterate_over.append(None)
     args = [norm,bra_parity,tmpdir]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     for benvs_ in ls:
         benvs.update(benvs_)
-    os.remove(norm)
+    if iprint>0:
+        print(f'\t\tcompute_mid_benvs={time.time()-start_time}')
 
     start_time = time.time()
     fxn = compute_benvs_1col
-    iterate_over = [('left',None),('right',None)]
-    iterate_over += [('left',) + info for info in H.l0 + H.l1]
-    iterate_over += [('right',) + info for info in H.r0 + H.r1]
+    iterate_over = [('left',) + info for info in l0 + l1]
+    iterate_over += [('right',) + info for info in r0 + r1]
+    if norm_benvs is None:
+        iterate_over += [('left',None),('right',None)]
     args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -371,8 +428,8 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
 
     start_time = time.time()
     fxn = compute_benvs_1col
-    iterate_over  = [('left',) + info for info in H.mid + H.r1]
-    iterate_over += [('right',) + info for info in H.mid + H.l1]
+    iterate_over  = [('left',) + info for info in m + r1]
+    iterate_over += [('right',) + info for info in m + l1]
     args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -383,7 +440,7 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
 
     start_time = time.time()
     fxn = compute_benvs_2col
-    iterate_over = [(side,) + info for info in H.ls2 for side in ['left','right']]
+    iterate_over = [(side,) + info for info in ls2 for side in ['left','right']]
     args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -393,11 +450,12 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
         print(f'\t\tcompute_benvs_2col={time.time()-start_time}')
 
     start_time = time.time()
-    fxn = compute_site_term
-    iterate_over  = list(range(Ly))
-    iterate_over += [(j,) + info for j in range(Ly) for info in H.ls1 + H.ls2]
-    args = [benvs,tmpdir,Ly,profile]
     compress_opts['dense'] = dense_row
+    fxn = compute_site_term
+    iterate_over = [(j,) + info for j in range(Ly) for info in ls1 + ls2]
+    if compute_N:
+        iterate_over += list(range(Ly))
+    args = [benvs,tmpdir,Ly,profile]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
     if iprint>0:
@@ -405,8 +463,6 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
 
     # parse site_map
     start_time = time.time()
-    H0 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
-    H1 = {(i,j):0.0 for i in range(Lx) for j in range(Ly)}
     N0 = dict() 
     N1 = dict() 
     for norm,site_map in ls:
@@ -419,9 +475,7 @@ def compute_grad(H,psi,tmpdir,bra_parity,profile=False,dense_row=True,iprint=0,
                 H1[i,j] = H1[i,j] + data
     if iprint>0:
         print(f'\t\tsum_grad_term={time.time()-start_time}')
-    for fname in benvs.values():
-        os.remove(fname)
-    return H0,H1,N0,N1
+    return H0,H1,N0,N1,benvs
 def compute_energy_term(info,benvs,**compress_opts):
     norm = False
     if info is None:
@@ -471,7 +525,7 @@ def compute_energy(H,psi,tmpdir,bra_parity=None,dense_row=True,
     benvs = dict()
 
     fxn = compute_mid_benvs
-    iterate_over  = [None] + [info[:-2] for info in H.mid+H.l0+H.l1+H.r0+H.r1]
+    iterate_over  = [None] + [info[:-2] for info in H.m + H.l0 + H.l1 + H.r0 + H.r1]
     args = [norm,bra_parity,tmpdir]
     kwargs = dict()
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -488,7 +542,7 @@ def compute_energy(H,psi,tmpdir,bra_parity=None,dense_row=True,
         benvs.update(benvs_)
 
     fxn = compute_right_benvs_1col 
-    iterate_over = H.mid + H.l1
+    iterate_over = H.m + H.l1
     args = [benvs,tmpdir,Ly,False]
     kwargs = compress_opts
     ls = parallelized_looped_function(fxn,iterate_over,args,kwargs)
@@ -635,8 +689,7 @@ def compute_norm(psi,layer_tags=('KET','BRA'),dense_row=True,
     return norm.contract() 
 class GlobalGrad():
     def __init__(self,H,peps,chi,psi_fname,tmpdir,save_every=True,
-                 profile=False,dense_row=True,iprint=0):
-        self.start_time = time.time()
+                 profile=False,dense_row=True,iprint=0,smallmem=False):
         self.H = H
         self.D = peps[0,0].shape[0]
         self.chi = chi
@@ -646,7 +699,10 @@ class GlobalGrad():
         self.parity = sum([T.data.parity for T in peps.tensors])
         self.iprint = iprint
         self.save_every = save_every
+        self.smallmem = smallmem
         print(f'D={self.D},chi={self.chi}')
+        if smallmem:
+            self.H.distribute()    
 
         n = compute_norm(peps,max_bond=chi,dense_row=dense_row)
         peps.multiply_each(n**(-1.0/(2.0*peps.num_tensors)),inplace=True)
@@ -668,6 +724,7 @@ class GlobalGrad():
         self.ng = 0
         self.ne = 0
         self.niter = 0
+        self.start_time = time.time()
     def fpeps2vec(self,psi):
         ls = []
         for i in range(psi.Lx):
@@ -683,6 +740,7 @@ class GlobalGrad():
                 cons,dq = self.constructors[i,j]
                 stop = int(start+cons.get_info(dq)[-1][-1]+1e-6)
                 data = cons.vector_to_tensor(x[start:stop],dq)
+                #print(i,j,start,stop,x[start:stop])
                 #data.shape = psi[i,j].data.shape
                 psi[i,j].modify(data=data)
                 start = stop
@@ -701,7 +759,7 @@ class GlobalGrad():
         psi = self.vec2fpeps(x)
         H0,H1,n0,n1 = compute_grad(self.H,psi,self.tmpdir,self.parity,
                 max_bond=self.chi,dense_row=self.dense_row,
-                profile=self.profile,iprint=self.iprint)
+                profile=self.profile,iprint=self.iprint,smallmem=self.smallmem)
         g = []
         E = [] # energy
         for i in range(psi.Lx):

@@ -1,15 +1,10 @@
 import sys
-this = sys.modules[__name__]
-this.symmetry = 'u1'
-this.flat = True
-this.spinless = True
-def set_options(symmetry='u1',flat=True,spinless=False):
-    this.symmetry=symmetry
-    this.flat=flat
-    this.spinless=spinless
-    
+symmetry = 'u1'
+flat = True
+spinless = True 
+#spinless = False
 import numpy as np
-if not this.spinless:
+if not spinless:
     from pyblock3.algebra.fermion_ops import (
         bonded_vaccum,
         creation,
@@ -20,16 +15,16 @@ if not this.spinless:
         get_exponential,
     )
     from pyblock3.algebra.fermion_encoding import get_state_map
-    cre_a = creation(spin='a',symmetry=this.symmetry,flat=this.flat)
-    cre_b = creation(spin='b',symmetry=this.symmetry,flat=this.flat)
-    cre_sum = creation(spin='sum',symmetry=this.symmetry,flat=this.flat)
-    ann_a = annihilation(spin='a',symmetry=this.symmetry,flat=this.flat)
-    ann_b = annihilation(spin='b',symmetry=this.symmetry,flat=this.flat)
-    ann_sum = annihilation(spin='sum',symmetry=this.symmetry,flat=this.flat)
-    pn = ParticleNumber(symmetry=this.symmetry,flat=this.flat)
+    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
+    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+    cre_sum = creation(spin='sum',symmetry=symmetry,flat=flat)
+    ann_a = annihilation(spin='a',symmetry=symmetry,flat=flat)
+    ann_b = annihilation(spin='b',symmetry=symmetry,flat=flat)
+    ann_sum = annihilation(spin='sum',symmetry=symmetry,flat=flat)
+    pn = ParticleNumber(symmetry=symmetry,flat=flat)
     pna = np.tensordot(cre_a,ann_a,axes=((-1,),(0,)))
     pnb = np.tensordot(cre_b,ann_b,axes=((-1,),(0,)))
-    nanb = onsite_U(u=1.,symmetry=this.symmetry,flat=this.flat)
+    nanb = onsite_U(u=1.,symmetry=symmetry,flat=flat)
     
     data_map = {'cre_a':cre_a,'cre_b':cre_b,'ann_a':ann_a,'ann_b':ann_b,
                 'cre_sum':cre_sum,'ann_sum':ann_sum,
@@ -45,7 +40,7 @@ else:
         get_exponential,
         get_state_map,
     ) 
-    cre_a = creation(symmetry=this.symmetry,flat=this.flat)
+    cre_a = creation(symmetry=symmetry,flat=flat)
     ann_a = cre_a.dagger
     pn = np.tensordot(cre_a,ann_a,axes=((-1,),(0,)))
     data_map = {'cre_a':cre_a,'ann_a':ann_a,'pn':pn,'pna':pn}
@@ -82,7 +77,7 @@ def get_pattern(inds,ind_to_pattern_map):
     pattern += "+" # assuming last index is the physical index
     return pattern
 def get_vaccum(Lx,Ly):
-    state_map = get_state_map(this.symmetry)
+    state_map = get_state_map(symmetry)
     _, _, ish = state_map[0]
 
     tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=2)
@@ -93,7 +88,7 @@ def get_vaccum(Lx,Ly):
         pattern = get_pattern(T.inds,ind_to_pattern_map)
         #put vaccum at site (ix, iy) 
         vac = bonded_vaccum((ish,)*(T.ndim-1), pattern=pattern, 
-                            symmetry=this.symmetry, flat=this.flat)
+                            symmetry=symmetry, flat=flat)
         new_T = FermionTensor(vac, inds=T.inds, tags=T.tags)
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)

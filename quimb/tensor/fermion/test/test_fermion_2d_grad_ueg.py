@@ -40,10 +40,6 @@ RANK = COMM.Get_rank()
 if RANK==0:
     try:
         ftn = load_ftn_from_disc(f'saved_su_states/ueg_N{N}D{D}_spinless{spinless}')
-        H = fd_tebd(N,L,order=order)
-        su = SimpleUpdate(ftn,H,D=D,chi=chi)
-        su.evolve(1,0.1)
-        ftn = su.get_state()
     except FileNotFoundError:
         ftn = get_product_state(N,N,Na=Na,Nb=Nb)
         check_particle_number(ftn,'./tmpdir/',spinless=spinless)
@@ -81,16 +77,17 @@ if RANK==0:
     check_particle_number(ftn,'./tmpdir/',spinless=spinless)
     #exit()
 
-    H = fd_grad(N,L,Ne,order=order,has_coulomb=False,spinless=spinless)
-    gg = GlobalGrad(H,ftn,chi,'./psi','./tmpdir/')
+    H = fd_grad(N,L,Ne,order=order,has_coulomb=True,spinless=spinless)
+    gg = GlobalGrad(H,ftn,chi,'./psi','./tmpdir/',smallmem=True)
     x = gg.fpeps2vec(ftn)
-    print(x)
-    print(ftn)
-    print('num_param=',len(x))
-    #exit()
     f,g = gg.compute_grad(x)
-    print('f=',f)
-    g *= 2.0
+    print(g)
+    H = fd_grad(N,L,Ne,order=order,has_coulomb=True,spinless=spinless)
+    gg = GlobalGrad(H,ftn,chi,'./psi','./tmpdir/',smallmem=False)
+    print('num_param=',len(x))
+    f,g = gg.compute_grad(x)
+    print(g)
+    exit()
     def _f(x):
         E,N = gg.compute_energy(x)
         return E
@@ -98,8 +95,9 @@ if RANK==0:
         sf = optimize._prepare_scalar_function(
              _f,x0=x,jac=None,epsilon=epsilon,
              finite_diff_rel_step=epsilon) 
-        g_ = sf.grad(x)
-        print(epsilon,np.linalg.norm(g),np.linalg.norm(g_-g)/np.linalg.norm(g))
+        g_ = sf.grad(x)/2.
+        print(g_)
+        print(epsilon,np.linalg.norm(g_),np.linalg.norm(g_-g)/np.linalg.norm(g_))
         idxs = []
         for ix in range(len(g)):
             if abs(g[ix]-g_[ix])>1e-6: 
