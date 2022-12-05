@@ -115,6 +115,18 @@ def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
 ################################################################################
 # MPI stuff
 ################################################################################    
+def distribute(ntotal):
+    batchsize,remain = ntotal // SIZE, ntotal % SIZE
+    batchsizes = [batchsize] * SIZE
+    for worker in range(SIZE-remain,SIZE):
+        batchsizes[worker] += 1
+    ls = [None] * SIZE
+    start = 0
+    for worker in range(SIZE):
+        stop = start + batchsizes[worker]
+        ls[worker] = start,stop
+        start = stop
+    return ls
 def parallelized_looped_fxn(fxn,ls,args):
     stop = min(SIZE,len(ls))
     results = [None] * stop 
@@ -182,7 +194,6 @@ class GradientAccumulator:
             self._glog_glog = np.zeros((size,)*2)
         if self.hess:
             self._geloc = np.zeros(size)
-            self._glog_glog_eloc = np.zeros((size,)*2)
             self._glog_geloc = np.zeros((size,)*2)
 
     def update(self, glx, ex, gex):
@@ -193,14 +204,12 @@ class GradientAccumulator:
         self._glog += glx 
         self._glog_eloc += glx * ex 
         if self.ovlp:
-            gij = np.outer(glx,glx)
-            self._glog_glog += gij 
+            self._glog_glog += np.outer(glx,glx)
         if self.hess:
             self._geloc += gex
-            self._glog_glog_eloc += gij * ex
             self._glog_geloc += np.outer(glx,gex)
         self._num_samples += 1
-    def update_test(self, glx, ex, gex,cx):
+    def update_exact(self, glx, ex, gex,cx):
         if self._eloc is None:
             self._init_storage(glx)
             self._num_samples = 0.
@@ -209,11 +218,9 @@ class GradientAccumulator:
         self._glog += glx * cx**2
         self._glog_eloc += glx * ex * cx**2
         if self.ovlp:
-            gij = np.outer(glx,glx)
-            self._glog_glog += gij * cx**2 
+            self._glog_glog += np.outer(glx,glx) * cx**2 
         if self.hess:
             self._geloc += gex * cx**2
-            self._glog_glog_eloc += gij * ex * cx**2
             self._glog_geloc += np.outer(glx,gex) * cx**2
         self._num_samples += cx**2
     def update_from_worker(self,other):
@@ -227,7 +234,6 @@ class GradientAccumulator:
             self._glog_glog += other._glog_glog
         if self.hess:
             self._geloc += other._geloc
-            self._glog_glog_eloc += other._glog_glog_eloc
             self._glog_geloc += other._glog_geloc
         self._num_samples += other._num_samples
     def extract_grads_energy(self):
@@ -235,23 +241,16 @@ class GradientAccumulator:
         self._glog /= self._num_samples
         self._glog_eloc /= self._num_samples
         g = self._glog_eloc - self._glog * self._eloc 
-        sij,h = None,None
+        sij,hij = None,None
         if self.ovlp:
             self._glog_glog /= self._num_samples
-            gigj = np.outer(self._glog,self._glog)
-            sij = self._glog_glog - gigj
+            sij = self._glog_glog - np.outer(self._glog,self._glog)
         if self.hess:
             self._geloc /= self._num_samples
-            self._glog_glog_eloc /= self._num_samples
-            hij = self._glog_glog_eloc + gigj * self._eloc
-            gigej = np.outer(self._glog,self._glog_eloc)
-            hij -= gigej + gigej.T
             self._glog_geloc /= self._num_samples
-            hij += self._glog_geloc - np.outer(self._glog,self._geloc)
-
-            h = self._eloc,self._geloc,hij
-        self.reset()
-        return g,sij,h 
+            hij = self._glog_geloc - np.outer(self._glog,self._geloc)
+            hij -= np.outer(g,self._glog)
+        return g,sij,hij 
     def reset(self):
         self._eloc = 0.
         self._glog.fill(0.)
@@ -260,7 +259,6 @@ class GradientAccumulator:
             self._glog_glog.fill(0.)
         if self.hess:
             self._geloc.fill(0.)
-            self._glog_glog_eloc.fill(0.)
             self._glog_geloc.fill(0.)
         self._num_samples = 0
     def transform_gradients(self):
@@ -302,31 +300,55 @@ class SR(GradientAccumulator):
         super().__init__(optimizer=None,learning_rate=learning_rate,
                          ovlp=True,hess=False)
     def transform_gradients(self):
-        g,s,_ = self.extract_grads_energy()
+        g,sij,_ = self.extract_grads_energy()
         idxs = tuple(range(len(g)))
-        s[idxs,idxs] += self.delta
-        return self.learning_rate * np.linalg.solve(s,g)
-class LinOpt(GradientAccumulator):
+        sij[idxs,idxs] += self.delta
+        return self.learning_rate * np.linalg.solve(sij,g)
+class RGN(GradientAccumulator):
     def __init__(self,learning_rate=1e-2,delta=1e-5):
         self.delta = delta
         super().__init__(optimizer=None,learning_rate=learning_rate,
                          ovlp=True,hess=True)
     def transform_gradients(self):
-        g,sij,(h00,geloc,hij) = self.extract_grads_energy()
+        g,sij,hij = self.extract_grads_energy()
+        hij -= self._eloc * sij
+
+        idxs = tuple(range(len(g)))
+        sij[idxs,idxs] += self.delta
+        return np.linalg.solve(hij+sij/self.learning_rate,g)
+class LinOpt(GradientAccumulator):
+    def __init__(self,learning_rate=1e-2,delta=1e-5,sr_damping=False):
+        self.delta = delta
+        self.sr_damping = sr_damping
+        super().__init__(optimizer=None,learning_rate=learning_rate,
+                         ovlp=True,hess=True)
+    def transform_gradients(self):
+        g,sij,hij = self.extract_grads_energy()
+        hij -= self._eloc * sij
+
         size = len(g)
+        idxs = tuple(range(size))
+        #sij[idxs,idxs] += self.delta
         s = np.block([[np.ones((1,1)),np.zeros((1,size))],
                       [np.zeros((size,1)),sij]])     
-        idxs = tuple(range(size+1))
-        s[idxs,idxs] += self.delta
-        h = np.block([[np.ones((1,1))*h00,(g-geloc).reshape(1,size)],
+
+        if self.sr_damping:
+            sij[idxs,idxs] += self.delta
+            hij += sij / self.learning_rate
+        else:
+            hij[idxs,idxs] += 1./self.learning_rate
+
+        h = np.block([[np.zeros((1,1)),g.reshape(1,size)],
                       [g.reshape(size,1),hij]])
-        E,deltas = spla.eigs(h,M=s,k=1,sigma=h[0,0]) 
-        print('sigma,Elin=',h[0,0],E)
-        deltas = deltas[1:,0].real / deltas[0,0].real 
-        return - self.learning_rate * deltas  
+        dE,deltas = spla.eigs(h,M=s,k=1,sigma=h[0,0]) 
+        print('dE=',dE)
+        deltas = deltas[:,0].real
+        scale = deltas[0] * (1. - np.dot(self._glog,deltas[1:]))
+        return - deltas[1:] / scale 
 def get_optimizer(optimizer_opts):
     _optimizer = optimizer_opts['optimizer']
     learning_rate = optimizer_opts.get('learning_rate',1e-2)
+    delta = optimizer_opts.get('delta',1e-5)
     hess = False
     if _optimizer=='adam':
         beta1 = optimizer_opts.get('beta1',.9)
@@ -335,11 +357,15 @@ def get_optimizer(optimizer_opts):
         optimizer = Adam(learning_rate=learning_rate,
                          beta1=beta1,beta2=beta2,eps=eps)
     elif _optimizer=='sr':
-        delta = optimizer_opts.get('delta',1e-5)
         optimizer = SR(learning_rate=learning_rate,delta=delta)
     elif _optimizer=='lin':
         hess = True 
-        optimizer = LinOpt(learning_rate=learning_rate)
+        sr_damping = optimizer_opts.get('sr_damping',False)
+        optimizer = LinOpt(learning_rate=learning_rate,
+                           delta=delta,sr_damping=sr_damping)
+    elif _optimizer=='rgn':
+        hess = True
+        optimizer = RGN(learning_rate=learning_rate,delta=delta)
     else:
         optimizer = GradientAccumulator(optimizer=_optimizer,
                         learning_rate=learning_rate,ovlp=False,hess=False)

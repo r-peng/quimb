@@ -11,7 +11,7 @@ from .block_interface import Constructor
 from .tnvmc import MetropolisHastingsSampler,ExchangeSampler
 from .utils import (
     load_ftn_from_disc,write_ftn_to_disc,rand_fname,
-    parallelized_looped_fxn,worker_execution,
+    parallelized_looped_fxn,worker_execution,distribute,
     get_optimizer,
 )
 from mpi4py import MPI
@@ -631,7 +631,8 @@ class Hubbard2D:
 ####################################################################################
 # sampler 
 ####################################################################################
-def _dense_amplitude_wrapper(ixs,psi,all_configs,direction,compress_opts):
+def _dense_amplitude_wrapper(info,psi,all_configs,direction,compress_opts):
+    start,stop = info
     psi = load_ftn_from_disc(psi)
     psi.reorder(direction,inplace=True)
 
@@ -639,7 +640,7 @@ def _dense_amplitude_wrapper(ixs,psi,all_configs,direction,compress_opts):
     cache_head = dict()
     cache_mid = dict()
     cache_tail = dict()
-    for ix in ixs:
+    for ix in range(start,stop):
         config = all_configs[ix]
         unsigned_amp,cache_head,cache_mid,cache_tail = \
             compute_amplitude(psi,config,direction,0,
@@ -708,11 +709,9 @@ class DenseSampler2D:
             self.p = np.zeros(nconfig)
             direction = 'row'
             t0 = time.time()
-            batchsize = nconfig // SIZE + 1
-            ls = [list(range(worker*batchsize,min((worker+1)*batchsize,nconfig))) \
-                  for worker in range(SIZE)]
+            infos = distribute(nconfig)
             args = psi,self.configs,direction,self.contract_opts
-            ls = parallelized_looped_fxn(_dense_amplitude_wrapper,ls,args)
+            ls = parallelized_looped_fxn(_dense_amplitude_wrapper,infos,args)
             for p in ls:
                 self.p += p
             self.p /= np.sum(self.p) 
@@ -892,10 +891,7 @@ def _compute_local_energy_g(ham,amplitude_factory,config,cx,gx):
             cy,gy = amplitude_factory.grad(*config_y[:2])
         ex += hxy * cy 
         gex += hxy * gy
-    ex /= cx
-    gex /= cx
-    glx = gx / cx
-    return ex, glx, gex - ex * glx 
+    return ex/cx, gx/cx, gex/cx 
 def _local_quantities(ham,amplitude_factory,config,cx,gx,hess):
     if hess:
         return _compute_local_energy_g(ham,amplitude_factory,config,cx,gx)
@@ -946,6 +942,41 @@ def _local_sampling(batchsize,psi,ham,sampler_opts,optimizer_opts,contract_opts)
     if progbar:
         _progbar.close()
     return optimizer,_xsum,_xsqsum 
+def _local_sampling_exact(info,psi,ham,sampler_opts,optimizer_opts,contract_opts):
+    start,stop = info
+    psi = load_ftn_from_disc(psi)
+
+    amplitude_factory = AmplitudeFactory2D(psi=psi,**contract_opts) 
+    sampler = DenseSampler2D(psi.Lx,psi.Ly,sampler_opts['nelec'])
+    optimizer,hess = get_optimizer(optimizer_opts)
+
+    store = dict()
+    progbar = (RANK==SIZE//2)
+    if progbar:
+        _progbar = Progbar(total=stop-start)
+    direction = 'row'
+    for n in range(start,stop):
+        config = sampler.configs[n]
+
+        # compute and track local energy
+        if config in store:
+            cx,glx,ex,gex = store[config]
+        else:
+            cx,gx = amplitude_factory.grad(config,direction)
+            if np.fabs(cx)>1e-12:
+                ex,glx,gex = _local_quantities(ham,amplitude_factory,config,cx,gx,hess)
+            else:
+                ex = 0.
+                glx = np.zeros_like(gx)
+                gex = np.zeros_like(gx)
+            store[config] = cx,glx,ex,gex
+
+        optimizer.update_exact(glx,ex,gex,cx)
+        if progbar:
+            _progbar.update()
+    if progbar:
+        _progbar.close()
+    return optimizer 
 class TNVMC2D:
     def __init__(
         self,
@@ -993,11 +1024,11 @@ class TNVMC2D:
                                 provided_filename=True) 
         self.constructors = get_constructors(self.psi)
         self._parse_sampler(psi) # only called with dense sampler
+        infos = [batchsize] * SIZE
         for step in range(steps):
-            ls = [batchsize] * SIZE
             args = psi,self.ham,self.sampler_opts,self.optimizer_opts,\
                    self.contract_opts
-            ls = parallelized_looped_fxn(_local_sampling,ls,args)
+            ls = parallelized_looped_fxn(_local_sampling,infos,args)
             _xsum = 0.
             _xsqsum = 0.
             for optimizer,_xsumi,_xsqsumi in ls:
@@ -1012,6 +1043,7 @@ class TNVMC2D:
 
             # apply learning rate and other transforms to gradients
             deltas = self.optimizer.transform_gradients()
+            self.optimizer.reset()
 
             # update the actual tensors
             self.update_psi(deltas)
@@ -1022,6 +1054,37 @@ class TNVMC2D:
             psi = write_ftn_to_disc(self.psi,self.tmpdir+f'psi{step}',
                                     provided_filename=True) 
             self._parse_sampler(psi) # only called with dense sampler
+    def _run_exact(self, steps):
+        self.Lx,self.Ly = self.psi.Lx,self.psi.Ly
+        psi = write_ftn_to_disc(self.psi,self.tmpdir+'psi_init',
+                                provided_filename=True) 
+        self.constructors = get_constructors(self.psi)
+
+        sampler = DenseSampler2D(self.Lx,self.Ly,self.sampler_opts['nelec'])
+        nconfig = len(sampler.configs) # only called with dense sampler
+        infos = distribute(nconfig)  
+        for step in range(steps):
+            args = psi,self.ham,self.sampler_opts,self.optimizer_opts,\
+                   self.contract_opts
+            ls = parallelized_looped_fxn(_local_sampling_exact,infos,args)
+            for optimizer in ls:
+                self.optimizer.update_from_worker(optimizer)
+            print(f'step={step},energy={self.optimizer._eloc/self.optimizer._num_samples},N={self.optimizer._num_samples}')
+            #self._progbar.update(batchsize * SIZE)
+            #exit()
+
+            # apply learning rate and other transforms to gradients
+            deltas = self.optimizer.transform_gradients()
+            self.optimizer.reset()
+
+            # update the actual tensors
+            self.update_psi(deltas)
+
+            # reset having just performed a gradient step
+            if self.conditioner is not None:
+                self.conditioner(self.psi)
+            psi = write_ftn_to_disc(self.psi,self.tmpdir+f'psi{step}',
+                                    provided_filename=True) 
     def update_psi(self,deltas):
         deltas = vec2fpeps(self.constructors,deltas,Lx=self.Lx,Ly=self.Ly)
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
@@ -1033,6 +1096,7 @@ class TNVMC2D:
         total=10000, 
         batchsize=100,
         tmpdir='./',
+        exact_sampling=False,
     ):
         steps = total // batchsize // SIZE
         total = steps * batchsize * SIZE
@@ -1040,5 +1104,8 @@ class TNVMC2D:
         self.dense_p = tmpdir+rand_fname()+'.hdf5'
         print('save dense amplitude to '+self.dense_p)
         #self._progbar = Progbar(total=total)
-        self._run(steps, batchsize)
+        if exact_sampling:
+            self._run_exact(steps)
+        else:
+            self._run(steps, batchsize)
         #self._progbar.close()
