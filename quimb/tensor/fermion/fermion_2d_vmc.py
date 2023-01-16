@@ -1,29 +1,21 @@
-import time,itertools,h5py
+import time,itertools
 import numpy as np
-from xyzpy import RunningStatistics
 
 from pyblock3.algebra.fermion_ops import vaccum,creation,bonded_vaccum
-from quimb.utils import progbar as Progbar
 from ..tensor_2d import PEPS
+from .utils import psi2vecs
 from .fermion_core import FermionTensor, FermionTensorNetwork, tensor_contract
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
 from .block_interface import Constructor
-from .tnvmc import MetropolisHastingsSampler,ExchangeSampler
-from .utils import (
-    load_ftn_from_disc,write_ftn_to_disc,rand_fname,
-    parallelized_looped_fxn,worker_execution,distribute,
-    get_optimizer,
-)
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
-symmetry = 'u11'
+symmetry = 'u11' # tsr symmetry
 flat = True
 thresh = 1e-6
-precision = 1e-10
-order = 'row'
+config_order = 'row'
 
 cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
 cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
@@ -46,7 +38,7 @@ def site2col(i,j,Lx,Ly):
     return j*Lx+i
 def col2site(ix,Lx,Ly):
     return ix%Lx,ix//Lx
-if order=='row':
+if config_order=='row':
     flatten = site2row # natural order
     flat2site = row2site
     flatten_ = site2col # other order
@@ -136,8 +128,8 @@ def get_product_state(Lx,Ly,spin_map):
         for site in sites:
             fpeps = create_particle(fpeps,site,spin)
     return fpeps
-def get_constructors(fpeps):
-    constructors = dict()
+def get_constructors_2d(fpeps):
+    constructors = [None] * (fpeps.Lx * fpeps.Ly)
     for i,j in itertools.product(range(fpeps.Lx),range(fpeps.Ly)):
         data = fpeps[fpeps.site_tag(i,j)].data
         bond_infos = [data.get_bond_info(ax,flip=False) \
@@ -145,52 +137,9 @@ def get_constructors(fpeps):
         cons = Constructor.from_bond_infos(bond_infos,data.pattern)
         dq = data.dq
         size = cons.vector_size(dq)
-        constructors[i,j] = cons,dq,size
+        ix = flatten(i,j,fpeps.Lx,fpeps.Ly)
+        constructors[ix] = cons,dq,size,(i,j)
     return constructors
-def fpeps2vecs(constructors,fpeps_or_grad,Lx=None,Ly=None):
-    is_fpeps = isinstance(fpeps_or_grad,FPEPS)
-    if is_fpeps:
-        fpeps = fpeps_or_grad
-        Lx,Ly = fpeps.Lx,fpeps.Ly 
-    else:
-        grad = fpeps_or_grad
-    ls = [None] * (Lx*Ly)
-    for i,j in itertools.product(range(Lx),range(Ly)):
-        cons,dq,size = constructors[i,j]
-        if is_fpeps:
-            vec = cons.tensor_to_vector(fpeps[fpeps.site_tag(i,j)].data)
-        else:
-            vec = cons.tensor_to_vector(grad[i,j]) if (i,j) in grad else\
-                  np.zeros(size)
-        ls[flatten(i,j,Lx,Ly)] = vec
-    return ls
-def split_vec(constructors,x,Lx,Ly):
-    start = 0
-    ls = [None] * (Lx*Ly)
-    for i,j in itertools.product(range(Lx),range(Ly)):
-        cons,dq,size = constructors[i,j]
-        stop = start + size
-        ls[flatten(i,j,Lx,Ly)] = x[start:stop]
-        start = stop
-    return ls 
-def vec2fpeps(constructors,x,fpeps=None,Lx=None,Ly=None,inplace=False): 
-    if fpeps is None:
-        fpeps_new = dict()
-    else:
-        fpeps_new = fpeps if inplace else fpeps.copy()
-        Lx,Ly = fpeps.Lx,fpeps.Ly 
-    start = 0
-    for ix in range(Lx*Ly):
-        i,j = flat2site(ix,Lx,Ly)
-        cons,dq,size = constructors[i,j]
-        stop = start + size
-        data = cons.vector_to_tensor(x[start:stop],dq)
-        if fpeps is None:
-            fpeps_new[i,j] = data
-        else:
-            fpeps_new[fpeps.site_tag(i,j)].modify(data=data)
-        start = stop
-    return fpeps_new
 
 ####################################################################################
 # amplitude fxns 
@@ -299,7 +248,7 @@ def update_cache_tail(fpeps,config,cache_tail,cache_mid,imin,imax,
         if i>0:
             cache_tail[key] = ftn.copy()
     return cache_tail,cache_mid
-def compute_amplitude(fpeps,config,direction,split,
+def compute_amplitude_2d(fpeps,config,direction,split,
                       cache_head,cache_mid,cache_tail,**compress_opts):
     # fpeps,config in same order
     if direction=='row':
@@ -455,17 +404,16 @@ def compute_config_parity(config,parity_fpeps,L,imax):
         parity += parity_config[i] * parity_
     return parity % 2
 class AmplitudeFactory2D:
-    def __init__(self,psi=None,**contract_opts):
+    def __init__(self,psi,**contract_opts):
         self.contract_opts=contract_opts
-        if psi is not None:
-            self._set_psi(psi)
+        self._set_psi(psi)
     def compute_row_parity(self):
         return compute_fpeps_parities(self.psi_row,self.Ly,self.Lx-1)
     def compute_col_parity(self):
         return compute_fpeps_parities(self.psi_col,self.Lx,self.Ly-1)
     def _set_psi(self,psi):
         self.Lx,self.Ly = psi.Lx,psi.Ly
-        self.constructors = get_constructors(psi)
+        self.constructors = get_constructors_2d(psi)
         self.psi_row = psi.reorder(direction='row',inplace=False)
         self.psi_col = psi.reorder(direction='col',inplace=False)
         self.row_parity = self.compute_row_parity()
@@ -484,7 +432,7 @@ class AmplitudeFactory2D:
     def reorder(self,config,sign=True):
         return reorder(config,self.Lx,self.Ly,sign=sign)
     def parse_config(self,config,direction):
-        if direction==order:
+        if direction==config_order:
             ordered_config,p1 = config,0
         else:
             ordered_config,p1 = self.reorder(config)
@@ -511,25 +459,25 @@ class AmplitudeFactory2D:
             self.cache_left = cache_head
             self.cache_mid_col = cache_mid
             self.cache_right = cache_tail
-    def amplitude(self, config):
+    def amplitude(self, info):
         """Get the amplitude of ``config``, either from the cache or by
         computing it.
         """
-        config,direction,split = config 
+        config,direction,split = info 
         if config in self.store:
             return self.store[config]
 
         fpeps,ordered_config,parity = self.parse_config(config,direction)
         cache_head,cache_mid,cache_tail = self.get_cache(direction)
-        amp,cache_head,cache_mid,cache_tail = compute_amplitude(
+        amp,cache_head,cache_mid,cache_tail = compute_amplitude_2d(
             fpeps,ordered_config,direction,split,\
             cache_head,cache_mid,cache_tail,**self.contract_opts) 
         self.set_cache(direction,cache_head,cache_mid,cache_tail)
         amp *= (-1)**parity
         self.store[config] = amp 
         return amp 
-    def _amplitude(self,config):
-        config,direction,split = config 
+    def _amplitude(self,info):
+        config,direction,split = info
         if config in self.store:
             return self.store[config]
 
@@ -543,7 +491,8 @@ class AmplitudeFactory2D:
             amp = 0.
         self.store[config] = amp 
         return amp
-    def grad(self,config,direction):
+    def grad(self,info):
+        config,direction,split = info 
         if config in self.store_grad:
             return self.store[config],self.store_grad[config]
 
@@ -555,15 +504,15 @@ class AmplitudeFactory2D:
         self.set_cache(direction,cache_head,cache_mid,cache_tail)
 
         amp *= (-1)**parity
-        grad = np.concatenate(fpeps2vecs(self.constructors,grad,self.Lx,self.Ly)) 
+        grad = np.concatenate(psi2vecs(self.constructors,grad)) 
         grad *= (-1)**parity 
         self.store[config] = amp 
         self.store_grad[config] = grad
         return amp,grad 
-    def prob(self, config):
+    def prob(self, info):
         """Calculate the probability of a configuration.
         """
-        coeff = self.amplitude(config)
+        coeff = self.amplitude(info)
         return coeff**2
 ####################################################################################
 # ham class 
@@ -597,30 +546,33 @@ def hop(ix1,ix2,config):
             configs.append((tuple(config_new),sign))
     return configs
 class Hubbard2D:
-    def __init__(self,Lx,Ly,t,u):
+    def __init__(self,Lx,Ly,t,u,reorder=False):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
+        self.reorder = reorder
     def flatten(self,i,j):
         return flatten(i,j,self.Lx,self.Ly)        
     def config_coupling(self,config):
         configs = []
         coeffs = []
 
-        direction = 'row'
+        direction = 'row' if self.reorder else config_order
         for i, j in itertools.product(range(self.Lx), range(self.Ly-1)):
             ix1,ix2 = self.flatten(i,j), self.flatten(i,j+1)
             configs_ = hop(ix1,ix2,config)
             for config_,sign_ in configs_:
+                split = i if direction=='row' else j
                 configs.append((config_,direction,i))
                 coeffs.append(-self.t*sign_) 
 
-        #direction = 'col'
+        direction = 'col' if self.reorder else config_order
         for i, j in itertools.product(range(self.Lx-1), range(self.Ly)):
             ix1,ix2 = self.flatten(i,j), self.flatten(i+1,j)
             sign = (-1)**sum([pn_map[ci] for ci in config[ix1+1:ix2]])
             configs_ = hop(ix1,ix2,config)
             for config_,sign_ in configs_:
-                configs.append((config_,direction,i))
+                split = j if direction=='col' else i
+                configs.append((config_,direction,split))
                 coeffs.append(-self.t*sign*sign_) 
    
         configs.append(None)
@@ -631,123 +583,24 @@ class Hubbard2D:
 ####################################################################################
 # sampler 
 ####################################################################################
-def _dense_amplitude_wrapper(info,psi,all_configs,direction,compress_opts):
-    start,stop = info
-    psi = load_ftn_from_disc(psi)
-    psi.reorder(direction,inplace=True)
+class ExchangeSampler2D:
+    def __init__(self,sampler_opts):
+        self.Lx,self.Ly = sampler_opts['Lx'],sampler_opts['Ly']
+        self.nelec = sampler_opts['nelec'] 
+        self.nsite = self.Lx * self.Ly
 
-    p = np.zeros(len(all_configs)) 
-    cache_head = dict()
-    cache_mid = dict()
-    cache_tail = dict()
-    for ix in range(start,stop):
-        config = all_configs[ix]
-        unsigned_amp,cache_head,cache_mid,cache_tail = \
-            compute_amplitude(psi,config,direction,0,
-            cache_head,cache_mid,cache_tail,**compress_opts)
-        p[ix] = unsigned_amp**2
-    return p
-class DenseSampler2D:
-    def __init__(self,Lx,Ly,nelec,seed=None,**contract_opts):
-        self.Lx,self.Ly = Lx,Ly
-        self.nsite = Lx * Ly
+        seed = sampler_opts.get('seed',None)
         self.rng = np.random.default_rng(seed)
-        self.nelec = nelec
-        self.contract_opts = contract_opts
-        self.configs = self.get_all_configs()
-    def get_all_configs(self):
-        if symmetry=='u1':
-            return self.get_all_configs_u1()
-        elif symmetry=='u11':
-            return self.get_all_configs_u11()
-        else:
-            raise NotImplementedError
-    def get_all_configs_u11(self):
-        assert isinstance(self.nelec,tuple)
-        sites = list(range(self.nsite))
-        ls = [None] * 2
-        for spin in (0,1):
-            occs = list(itertools.combinations(sites,self.nelec[spin]))
-            configs = [None] * len(occs) 
-            for i,occ in enumerate(occs):
-                config = [0] * self.nsite 
-                for ix in occ:
-                    config[ix] = 1
-                configs[i] = tuple(config)
-            ls[spin] = configs
 
-        na,nb = len(ls[0]),len(ls[1])
-        configs = [None] * (na*nb)
-        for ixa,configa in enumerate(ls[0]):
-            for ixb,configb in enumerate(ls[1]):
-                config = [config_map[configa[i],configb[i]] \
-                          for i in range(self.nsite)]
-                ix = ixa * nb + ixb
-                configs[ix] = tuple(config)
-        return configs
-    def get_all_configs_u1(self):
-        if isinstance(self.nelec,tuple):
-            self.nelec = sum(self.nelec)
-        sites = list(range(self.nsite*2))
-        occs = list(itertools.combinations(sites,self.nelec))
-        configs = [None] * len(occs) 
-        for i,occ in enumerate(occs):
-            config = [0] * (self.nsite*2) 
-            for ix in occ:
-                config[ix] = 1
-            configs[i] = tuple(config)
-
-        for ix in range(len(configs)):
-            config = configs[ix]
-            configa,configb = config[:self.nsite],config[self.nsite:]
-            config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
-            configs[ix] = tuple(config)
-        return configs
-    def _set_psi(self,psi=None,load_fname=None,write_fname=None):
-        nconfig = len(self.configs)
-        if load_fname is None:
-            self.p = np.zeros(nconfig)
-            direction = 'row'
-            t0 = time.time()
-            infos = distribute(nconfig)
-            args = psi,self.configs,direction,self.contract_opts
-            ls = parallelized_looped_fxn(_dense_amplitude_wrapper,infos,args)
-            for p in ls:
-                self.p += p
-            self.p /= np.sum(self.p) 
-            print(f'dense sampler updated ({time.time()-t0}s).')
-        else:
-            f = h5py.File(load_fname,'r')
-            self.p = f['p'][:]
-            f.close()
-        self.flat_indexes = list(range(nconfig))
-        if write_fname is not None:
-            f = h5py.File(write_fname,'w')
-            f.create_dataset('p',data=self.p)
-            f.close()
-    def sample(self):
-        flat_idx = self.rng.choice(self.flat_indexes,p=self.p)
-        omega = self.p[flat_idx]
-        config = self.configs[flat_idx]
-        return (config,'row',None),omega
-    def flatten(self,i,j):
-        return flatten(i,j,slef.Lx,self.Ly)
-    def flat2site(self,ix):
-        return flat2site(ix,self.Lx,self.Ly)
-class ExchangeSampler2D(ExchangeSampler):
-    def __init__(self,Lx,Ly,nelec,seed=None,sweep=True):
-        self.Lx,self.Ly = Lx,Ly
-        self.nsite = Lx * Ly
-        self.rng = np.random.default_rng(seed)
-        self.nelec = nelec
-
-        self.config = self.get_rand_config(),'row',0
+        self.config = self.get_rand_config(),config_order,0
+        self.reorder = sampler_opts.get('reorder',False)
         self.sweep = None 
+        sweep = sampler_opts.get('sweep',True)
         if sweep:
             self.sweep = self.rng.integers(low=0,high=1,endpoint=True),0,0
         else:
             self.blocks = [(i,j) for i in range(Lx-1) for j in range(Ly-1)] 
-    def flatten(i,j):
+    def flatten(self,i,j):
         return flatten(i,j,self.Lx,self.Ly)
     def flat2site(self,ix):
         return flat2site(ix,self.Lx,self.Ly)
@@ -783,16 +636,20 @@ class ExchangeSampler2D(ExchangeSampler):
         randint = self.rng.integers(low=0,high=3,endpoint=True)
         if randint==0:
             site1,site2 = (i,j),(i,j+1)
-            direction,split = 'row',i
+            direction = 'row' if self.reorder else config_order
+            split = i if direction=='row' else j
         elif randint==1:
             site1,site2 = (i,j),(i+1,j)
-            direction,split = 'col',j
+            direction = 'col' if self.reorder else config_order
+            split = j if direction=='col' else i
         if randint==2:
             site1,site2 = (i+1,j),(i+1,j+1)
-            direction,split = 'row',i+1
+            direction = 'row' if self.reorder else config_order
+            split = i+1 if direction=='row' else j
         elif randint==3:
             site1,site2 = (i,j+1),(i+1,j+1)
-            direction,split = 'col',j+1
+            direction = 'col' if self.reorder else config_order 
+            split = j+1 if direction=='col' else i
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2) 
         i1,i2 = nconfig[ix1],nconfig[ix2]
         if i1==i2:
@@ -823,289 +680,28 @@ class ExchangeSampler2D(ExchangeSampler):
                 return (tuple(nconfig),direction,split),1.
     def candidate_sweep(self):
         nconfig = list(self.config[0])
-        direction_,i,j = self.sweep
+        sweep_dir,i,j = self.sweep
         while True:
             is_new,nconfig,direction,split = self.new_config(nconfig,i,j)
             if i==self.Lx-2 and j==self.Ly-2:
-                direction_ = self.rng.integers(low=0,high=1,endpoint=True)
+                sweep_dir = self.rng.integers(low=0,high=1,endpoint=True)
                 i,j = 0,0
             else:
-                if direction_==0:
+                if sweep_dir ==0:
                     i,j = (i+1,0) if j==self.Ly-2 else (i,j+1)
                 else:
                     i,j = (0,j+1) if i==self.Lx-2 else (i+1,j)
-            self.sweep = direction_,i,j
+            self.sweep = sweep_dir,i,j
             if is_new:
                 return (tuple(nconfig),direction,split),1.
     def candidate(self):
         if self.sweep is None:
-            return candidate_rand()
+            return self.candidate_rand()
         else:
-            return candidate_sweep()
-####################################################################################
-# vmc engine 
-####################################################################################
-def _parse_sampler(Lx,Ly,sampler_opts,contract_opts):
-    seed = sampler_opts.get('seed',None)
-    nelec = sampler_opts['nelec']
-    _sampler = sampler_opts['sampler']
-    if _sampler=='dense':
-        sampler = DenseSampler2D(Lx,Ly,nelec,seed=seed,**contract_opts)
-        psi = sampler_opts.get('psi',None)
-        load_fname = sampler_opts.get('load_fname',None)
-        write_fname = sampler_opts.get('write_fname',None)
-        sampler._set_psi(psi=psi,load_fname=load_fname,write_fname=write_fname)
-        return sampler
-    if _sampler=='exchange':
-        sweep = sampler_opts.get('sweep',True)
-        sub_sampler = ExchangeSampler2D(Lx,Ly,nelec,seed=seed,sweep=sweep)
-    else:
-        raise NotImplementedError
-    amplitude_factory = sampler['amplitude_factory']
-    initial = sampler_opts.get('initial',None)
-    burn_in = sampler_opts.get('burn_in',0)
-    track = sampler_opts.get('track',False)
-    sampler = MetropolisHastingsSampler(sub_sampler,
-        amplitude_factory=amplitude_factory,
-        initial=initial,burn_in=burn_in,seed=seed,track=track)
-    return sampler
-def _compute_local_energy(ham,amplitude_factory,config,cx):
-    en = 0.0
-    c_configs, c_coeffs = ham.config_coupling(config)
-    for hxy, config_y in zip(c_coeffs, c_configs):
-        if np.fabs(hxy) < thresh:
-            continue
-        cy = cx if config_y is None else amplitude_factory.amplitude(config_y)
-        en += hxy * cy 
-    return en / cx
-def _compute_local_energy_g(ham,amplitude_factory,config,cx,gx):
-    ex = 0.0
-    gex = 0.0 
-    c_configs, c_coeffs = ham.config_coupling(config)
-    for hxy, config_y in zip(c_coeffs, c_configs):
-        if np.fabs(hxy) < thresh:
-            continue
-        if config_y is None:
-            cy,gy = cx,gx 
-        else:
-            cy,gy = amplitude_factory.grad(*config_y[:2])
-        ex += hxy * cy 
-        gex += hxy * gy
-    return ex/cx, gx/cx, gex/cx 
-def _local_quantities(ham,amplitude_factory,config,cx,gx,hess):
-    if hess:
-        return _compute_local_energy_g(ham,amplitude_factory,config,cx,gx)
-    else:
-        ex = _compute_local_energy(ham,amplitude_factory,config,cx)
-        return ex, gx/cx, None
-def _mean_err(_xsum,_xsqsum,n):
-    mean = _xsum / n
-    var = _xsqsum / n - mean**2
-    std = var ** .5
-    err = std / n**.5 
-    return mean,err
-def _local_sampling(batchsize,psi,ham,sampler_opts,optimizer_opts,contract_opts):
-    psi = load_ftn_from_disc(psi)
-
-    amplitude_factory = AmplitudeFactory2D(psi=psi,**contract_opts) 
-    _sampler = sampler_opts['sampler']
-    if _sampler != 'dense':
-        sampler_opts['amplitude_factory'] = amplitude_factory
-    sampler = _parse_sampler(psi.Lx,psi.Ly,sampler_opts,contract_opts)
-    optimizer,hess = get_optimizer(optimizer_opts)
-
-    _xsum = 0.
-    _xsqsum = 0.
-    store = dict()
-    progbar = (RANK==0)
-    if progbar:
-        _progbar = Progbar(total=batchsize)
-    direction = 'row'
-    for n in range(batchsize):
-        (config,direction,split), omega = sampler.sample()
-
-        # compute and track local energy
-        if config in store:
-            cx,glx,ex,gex = store[config]
-        else:
-            cx,gx = amplitude_factory.grad(config,direction)
-            ex,glx,gex = _local_quantities(ham,amplitude_factory,config,cx,gx,hess)
-            store[config] = cx,glx,ex,gex
-
-        _xsum += ex
-        _xsqsum += ex**2
-        mean,err = _mean_err(_xsum,_xsqsum,n+1)
-        optimizer.update(glx,ex,gex)
-        if progbar:
-            _progbar.update()
-            _progbar.set_description(f'mean={mean},err={err}')
-    if progbar:
-        _progbar.close()
-    return optimizer,_xsum,_xsqsum 
-def _local_sampling_exact(info,psi,ham,sampler_opts,optimizer_opts,contract_opts):
-    start,stop = info
-    psi = load_ftn_from_disc(psi)
-
-    amplitude_factory = AmplitudeFactory2D(psi=psi,**contract_opts) 
-    sampler = DenseSampler2D(psi.Lx,psi.Ly,sampler_opts['nelec'])
-    optimizer,hess = get_optimizer(optimizer_opts)
-
-    store = dict()
-    progbar = (RANK==SIZE//2)
-    if progbar:
-        _progbar = Progbar(total=stop-start)
-    direction = 'row'
-    for n in range(start,stop):
-        config = sampler.configs[n]
-
-        # compute and track local energy
-        if config in store:
-            cx,glx,ex,gex = store[config]
-        else:
-            cx,gx = amplitude_factory.grad(config,direction)
-            if np.fabs(cx)>1e-12:
-                ex,glx,gex = _local_quantities(ham,amplitude_factory,config,cx,gx,hess)
-            else:
-                ex = 0.
-                glx = np.zeros_like(gx)
-                gex = np.zeros_like(gx)
-            store[config] = cx,glx,ex,gex
-
-        optimizer.update_exact(glx,ex,gex,cx)
-        if progbar:
-            _progbar.update()
-    if progbar:
-        _progbar.close()
-    return optimizer 
-class TNVMC2D:
-    def __init__(
-        self,
-        psi,
-        ham,
-        sampler_opts,
-        optimizer_opts,
-        conditioner='auto',
-        **contract_opts
-    ):
-
-        self.psi = psi.copy()
-        self.ham = ham
-        self.sampler_opts = sampler_opts
-
-        if conditioner == 'auto':
-
-            def conditioner(psi):
-                psi.equalize_norms_(1.0)
-            self.conditioner = conditioner
-        else:
-            self.conditioner = None
-
-        if self.conditioner is not None:
-            # want initial arrays to be in conditioned form so that gradients
-            # are approximately consistent across runs (e.g. for momentum)
-            self.conditioner(self.psi)
-
-        self.optimizer_opts = optimizer_opts
-        self.optimizer,_ = get_optimizer(optimizer_opts)
-        self.contract_opts = contract_opts
-    def _parse_sampler(self,psi):
-        _sampler = self.sampler_opts['sampler']
-        if _sampler=='dense':
-            self.sampler_opts['psi'] = psi
-            self.sampler_opts['load_fname'] = None
-            self.sampler_opts['write_fname'] = self.dense_p
-            _parse_sampler(self.Lx,self.Ly,self.sampler_opts,self.contract_opts)
-            self.sampler_opts['psi'] = None
-            self.sampler_opts['load_fname'] = self.dense_p 
-            self.sampler_opts['write_fname'] = None 
-    def _run(self, steps, batchsize):
-        self.Lx,self.Ly = self.psi.Lx,self.psi.Ly
-        psi = write_ftn_to_disc(self.psi,self.tmpdir+'psi_init',
-                                provided_filename=True) 
-        self.constructors = get_constructors(self.psi)
-        self._parse_sampler(psi) # only called with dense sampler
-        infos = [batchsize] * SIZE
-        for step in range(steps):
-            args = psi,self.ham,self.sampler_opts,self.optimizer_opts,\
-                   self.contract_opts
-            ls = parallelized_looped_fxn(_local_sampling,infos,args)
-            _xsum = 0.
-            _xsqsum = 0.
-            for optimizer,_xsumi,_xsqsumi in ls:
-                self.optimizer.update_from_worker(optimizer)
-
-                _xsum += _xsumi 
-                _xsqsum += _xsqsumi 
-            mean,err = _mean_err(_xsum,_xsqsum,batchsize * SIZE)
-            print(f'step={step},energy={mean},err={err}')
-            #self._progbar.update(batchsize * SIZE)
-            #exit()
-
-            # apply learning rate and other transforms to gradients
-            deltas = self.optimizer.transform_gradients()
-            self.optimizer.reset()
-
-            # update the actual tensors
-            self.update_psi(deltas)
-
-            # reset having just performed a gradient step
-            if self.conditioner is not None:
-                self.conditioner(self.psi)
-            psi = write_ftn_to_disc(self.psi,self.tmpdir+f'psi{step}',
-                                    provided_filename=True) 
-            self._parse_sampler(psi) # only called with dense sampler
-    def _run_exact(self, steps):
-        self.Lx,self.Ly = self.psi.Lx,self.psi.Ly
-        psi = write_ftn_to_disc(self.psi,self.tmpdir+'psi_init',
-                                provided_filename=True) 
-        self.constructors = get_constructors(self.psi)
-
-        sampler = DenseSampler2D(self.Lx,self.Ly,self.sampler_opts['nelec'])
-        nconfig = len(sampler.configs) # only called with dense sampler
-        infos = distribute(nconfig)  
-        for step in range(steps):
-            args = psi,self.ham,self.sampler_opts,self.optimizer_opts,\
-                   self.contract_opts
-            ls = parallelized_looped_fxn(_local_sampling_exact,infos,args)
-            for optimizer in ls:
-                self.optimizer.update_from_worker(optimizer)
-            print(f'step={step},energy={self.optimizer._eloc/self.optimizer._num_samples},N={self.optimizer._num_samples}')
-            #self._progbar.update(batchsize * SIZE)
-            #exit()
-
-            # apply learning rate and other transforms to gradients
-            deltas = self.optimizer.transform_gradients()
-            self.optimizer.reset()
-
-            # update the actual tensors
-            self.update_psi(deltas)
-
-            # reset having just performed a gradient step
-            if self.conditioner is not None:
-                self.conditioner(self.psi)
-            psi = write_ftn_to_disc(self.psi,self.tmpdir+f'psi{step}',
-                                    provided_filename=True) 
-    def update_psi(self,deltas):
-        deltas = vec2fpeps(self.constructors,deltas,Lx=self.Lx,Ly=self.Ly)
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            tsr = self.psi[self.psi.site_tag(i,j)]
-            data = tsr.data - deltas[i,j] 
-            tsr.modify(data=data)
-    def run(
-        self,
-        total=10000, 
-        batchsize=100,
-        tmpdir='./',
-        exact_sampling=False,
-    ):
-        steps = total // batchsize // SIZE
-        total = steps * batchsize * SIZE
-        self.tmpdir = tmpdir
-        self.dense_p = tmpdir+rand_fname()+'.hdf5'
-        print('save dense amplitude to '+self.dense_p)
-        #self._progbar = Progbar(total=total)
-        if exact_sampling:
-            self._run_exact(steps)
-        else:
-            self._run(steps, batchsize)
-        #self._progbar.close()
+            return self.candidate_sweep()
+    def accept(self, config):
+        self.config = config
+    def sample(self):
+        config, omega = self.candidate()
+        self.accept(config)
+        return config, omega
