@@ -1,7 +1,6 @@
 import time,h5py,itertools,pickle
 import numpy as np
 import scipy.sparse.linalg as spla
-from scipy.optimize import line_search
 
 from quimb.utils import progbar as Progbar
 from .utils import (
@@ -173,8 +172,9 @@ class TNVMC: # stochastic sampling
 
         self.search_rate = False
         if self.method not in ['adam','rgn','lin']:
-            self.search_rate = optimizer_opts.get('search_rate',None)
-            self.saved_f = dict()
+            self.search_rate = optimizer_opts.get('search_rate',False)
+        if self.search_rate:
+            self.search_rate_method = optimizer.get('search_rate_method','quad')
         self.search_cond = False
 
         if self.method=='adam':
@@ -183,6 +183,12 @@ class TNVMC: # stochastic sampling
             self.eps = optimizer_opts.get('eps',1e-8)
             self._ms = None
             self._vs = None
+    def get_rate_cond(self):
+        if self.step < self.rate_itv:
+            self.rate *= self.rate_base
+        if self.step < self.cond_itv:
+            self.cond *= self.cond_base
+        return self.rate,self.cond
     def run(self,steps,tmpdir=None,
             rate_min=DEFAULT_RATE_MIN,
             rate_max=DEFAULT_RATE_MAX,
@@ -213,15 +219,10 @@ class TNVMC: # stochastic sampling
         for step in range(steps):
             self.step = step
             self.sample()
-            if RANK==0:
-                print(f'step={self.step},E={self.E},err={self.err}')
 
-            self.propagate_rate_cond()
-            if self.search_rate is None:
-                self.transform_gradients()
-                self.regularize()
-            else:
-                self.transform_gradients_search_rate()
+            rate,cond = self.get_rate_cond()
+            self.transform_gradients(rate=rate,cond=cond)
+            #COMM.Barrier()
             COMM.Bcast(self.deltas,root=0) 
 
             self.psi = _update_psi(self.psi,self.deltas,self.constructors)
@@ -238,19 +239,20 @@ class TNVMC: # stochastic sampling
         start,stop = self.sampler.start,self.sampler.stop
         configs = self.sampler.all_configs[start:stop]
 
-        self.flocal = [] 
+        p_local = [] 
         for config in configs:
             amp = self.amplitude_factory.amplitude((config,0))
-            self.flocal.append(amp**2)
-        self.flocal = np.array(self.flocal)
-        nz_local = np.array([len(np.nonzero(self.flocal)[0])])
-        nz = np.zeros_like(nz_local)
+            p_local.append(amp**2)
+        p_local = np.array(p_local)
+        nz_local = np.array([len(np.nonzero(p_local)[0])])
+        nz = np.zeros(1,dtype=int)
+
+        # sync before gathering
+        #COMM.Barrier()
          
-        COMM.Allgatherv(self.flocal,[p_total,self.sampler.count,self.sampler.disp,MPI.DOUBLE])
-        n = np.sum(p_total)
-        p_total /= n 
+        COMM.Allgatherv(p_local,[p_total,self.sampler.count,self.sampler.disp,MPI.DOUBLE])
+        p_total /= np.sum(p_total)
         self.sampler._set_prob(p_total)
-        self.flocal /= n 
 
         COMM.Allreduce(nz_local,nz,op=MPI.MAX)
         self.progbar = (nz_local[0]==nz[0])
@@ -267,11 +269,13 @@ class TNVMC: # stochastic sampling
         if progbar:
             _progbar = Progbar(total=batchsize)
         for n in range(batchsize):
-            self.config,omega = self.sampler.sample()
+            config,omega = self.sampler.sample()
             if progbar:
                 _progbar.update()
         if progbar:
             _progbar.close()
+        self.config = config
+        if RANK==SIZE-1:
             print(f'\tburn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
         #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
     def _update_local_energy(self,config,cx):
@@ -297,7 +301,7 @@ class TNVMC: # stochastic sampling
         self.hg_local.append(hgx/cx)
     def update_local(self,config):
         if self.vlocal is None:
-            cx = self.amplitude_factory.amplitude((config,0))
+            cx = self.amplitude_factory.store[config]
         else:
             cx,gx = self.amplitude_factory.grad(config)
         if np.fabs(cx) < PRECISION:
@@ -314,16 +318,15 @@ class TNVMC: # stochastic sampling
             else:
                 self._update_local_energy(config,cx)
     def sample(self,energy_only=False): 
-        # randomly select a process to be the control process
-        self.cix = np.random.randint(low=0,high=SIZE,size=1)
-        COMM.Bcast(self.cix,root=0)
-        self.cix = self.cix[0]
-
-        if self.dense: # runs only for dense sampler 
-            self.compute_dense_amplitude() 
+        if self.dense:
+            self.compute_dense_amplitude() # runs only for dense sampler 
         else: # burn in
             self.burn_in()
 
+        t0 = time.time()
+        progbar = (RANK==SIZE-1)
+        if progbar:
+            _progbar = Progbar(total=self.batchsize)
         self.samples = []
         self.flocal = dict()
         self.elocal = []
@@ -333,58 +336,30 @@ class TNVMC: # stochastic sampling
             self.vlocal = []
             if self.compute_hg:
                 self.hg_local = []
-
-        self.terminate = np.array([0])
-        self.rid = np.array([RANK])
-        if RANK==self.cix:
-            self._ctr()
-        else:
-            self._sample()
+        for n in range(self.batchsize):
+            config,omega = self.sampler.sample()
+            if config in self.flocal:
+                self.flocal[config] += 1
+            else:
+                self.flocal[config] = 1
+                self.samples.append(config)
+                self.update_local(config)
+            if progbar:
+                _progbar.update()
+        self.config = config
         self.flocal = np.array([self.flocal[config] for config in self.samples])
+        #print(f'RANK={RANK},sample time={time.time()-t0}')
+        # sync before gathering
+        #COMM.Barrier()
+        if RANK==0:
+            print('\tsample time=',time.time()-t0)
         self.extract_energy_gradient()
-    def _ctr(self):
-        t0 = time.time()
-        self.config,omega = self.sampler.sample()
-        self.flocal[self.config] = 1
-        self.samples.append(self.config)
-        self.update_local(self.config)
-
-        ncurr = 1
-        ntotal = self.batchsize * SIZE
-        progbar = Progbar(total=ntotal)
-        tdest = set(range(SIZE)).difference({RANK})
-        while self.terminate[0]==0:
-            COMM.Recv(self.rid)
-            ncurr += 1
-            progbar.update()
-            if ncurr > ntotal: # send termination message to all workers
-                self.terminate[0] = 1
-                for worker in tdest:
-                    COMM.Bsend(self.terminate,dest=worker)
-            else:
-                COMM.Bsend(self.terminate,dest=self.rid[0])
-        progbar.close()
-        print(f'\tRANK={RANK},sample time={time.time()-t0}')
-    def _sample(self):
-        while self.terminate[0]==0:
-            self.config,omega = self.sampler.sample()
-            if self.config in self.flocal:
-                self.flocal[self.config] += 1
-            else:
-                self.flocal[self.config] = 1
-                self.samples.append(self.config)
-                self.update_local(self.config)
-
-            COMM.Bsend(self.rid,dest=self.cix) 
-            COMM.Recv(self.terminate,source=self.cix)
     def extract_energy_gradient(self,new_sample=True):
         if new_sample:
             nlocal = np.array([np.sum(self.flocal)])
             self.n = np.zeros_like(nlocal)
             COMM.Allreduce(nlocal,self.n,op=MPI.SUM)
             self.n = self.n[0]
-            if RANK==0:
-                print('\tnormalization=',self.n)
 
         self.elocal = np.array(self.elocal)
         fe_local = self.flocal * self.elocal
@@ -397,6 +372,9 @@ class TNVMC: # stochastic sampling
         self.E = self.E[0] / self.n 
         esq_mean = esq_mean[0] / self.n
         self.err = np.sqrt((esq_mean-self.E**2)/self.n) 
+        if RANK==0:
+            print('\tnormalization=',self.n)
+            print(f'step={self.step},E={self.E},err={self.err}')
 
         if self.vlocal is not None:
             self.vlocal = np.array(self.vlocal)
@@ -439,26 +417,20 @@ class TNVMC: # stochastic sampling
             Hx3 = self.g * np.dot(self.vmean,x)
             return Hx1-Hx2-Hx3
         return H
-    def correlated_sampling(self,psi,energy_only=False):
+    def correlated_sampling(self,psi):
         self.amplitude_factory._set_psi(psi)
-
-        # figure out which process requires the largest number of computation
-        nz_local = np.array([len(self.samples)])
-        nz = np.zeros_like(nz_local) 
-        COMM.Allreduce(nz_local,nz,op=MPI.MAX)
-        progbar = (nz_local[0]==nz[0])
+        self.sampler.amplitude_factory = self.amplitude_factory
+        progbar = (RANK==SIZE-1)
         if progbar:
             _progbar = Progbar(total=len(self.samples))
-        self.vlocal = None if energy_only else []
+        self.vlocal = []
         self.elocal = []
-        t0 = time.time()
         for config in self.samples:
             self.update_local(config)
             if progbar:
                 _progbar.update()
-        if progbar:
-            _progbar.close()
-            print('\tsample time=',time.time()-t0) 
+        # sync before gathering
+        #COMM.Barrier()
         self.extract_energy_gradient(new_sample=False) 
     def getH_num(self):
         self.ncalls = 0
@@ -468,14 +440,7 @@ class TNVMC: # stochastic sampling
             self.correlated_sampling(psi)
             return (self.g-g0)/self.num_step 
         return H
-    def propagate_rate_cond(self):
-        if self.step < self.rate_itv:
-            self.rate *= self.rate_base
-        if self.step < self.cond_itv:
-            self.cond *= self.cond_base
     def transform_gradients(self,rate=None,cond=None):
-        rate = self.rate if rate is None else rate
-        cond = self.cond if cond is None else cond
         self.deltas = np.zeros_like(self.g)
         if self.method=='adam':
             self._transform_gradients_adam(rate)
@@ -487,7 +452,7 @@ class TNVMC: # stochastic sampling
             self._transform_gradients_lin(rate,cond)
         else:
             self._transform_gradients_sgd(rate)
-    def regularize(self):
+
         if RANK>0:
             return
         delta_norm = np.linalg.norm(self.deltas)
@@ -538,13 +503,13 @@ class TNVMC: # stochastic sampling
         terminate = np.array([0])
         buf = np.zeros_like(b)
         sh = len(b)
-        self.ncalls = 0
         def _A(x): # wrapper for synced parallel process
             COMM.Bcast(terminate,root=0)
             if terminate[0]==1:
                 return x
-
+            # sync calls to ensure all processes have the same x 
             self.ncalls += 1
+            #COMM.Barrier()
             COMM.Bcast(x,root=0)
             return A(x)
         LinOp = spla.LinearOperator((sh,sh),matvec=_A,dtype=float)
@@ -558,13 +523,18 @@ class TNVMC: # stochastic sampling
             COMM.Bcast(terminate,root=0)
             return x,info
         else:
+            #while True:
+            #    _A(buf) 
+            #    if terminate[0]==1:
+            #        return buf,1
             while terminate[0]==0:
-                _A(buf) 
+                _A(buf)
             return buf,1
     def _transform_gradients_sr(self,rate,cond):
         t0 = time.time()
         g = self.g
         S = self.getS()
+        self.ncalls = 0
         def R(vec):
             return S(vec) + cond * vec
         self.deltas,info = self.parallel_inv(R,g)
@@ -633,7 +603,7 @@ class TNVMC: # stochastic sampling
         deltas = deltas[:,0].real
         deltas = deltas[1:] / deltas[0]
         return - deltas / (1. - np.dot(self._glog,deltas)) 
-    def transform_gradients_search_rate(self):
+    def search_rate(self):
         # save the current quantities
         E = self.E
         elocal = self.elocal.copy()
@@ -642,87 +612,66 @@ class TNVMC: # stochastic sampling
         vmean = self.vmean.copy()
         g = self.g.copy()
 
-        self.transform_gradients(rate=1.)
-        COMM.Bcast(self.deltas,root=0) 
-        pk = self.deltas
-        if self.search_rate=='wolfe':
-            xk = np.concatenate(psi2vecs(self.constructors,self.psi))
-            gfk = g     
-            old_fval = E
-            self.saved_f[self.step] = E
-            old_old_fval = self.saved_f.get(self.step-1,None) 
-            self.maxiter = 3
-            alpha_star,phi_star = self._search_rate_wolfe(xk,pk,gfk,old_fval,old_old_fval) 
-        else:    
-            alpha_star,phi_star = self._search_rate_quad(pk)
-        self.deltas *= alpha_star
-        # reset current quantities
-        self.E = E
-        self.elocal = elocal
-        self.vlocal = vlocal
-        self.fv_local = fv_local
-        self.vmean = vmean
-        self.g = g
-    def _search_rate_quad(self,pk):
-        E0,E1 = np.zeros(3),np.zeros(3)
-        alpha = np.array([self.rate/2.,self.rate,self.rate*2.]) 
-        for ix,alpha_i in enumerate(alpha):
-            psi = _update_psi(self.psi.copy(),alpha_i * pk,self.constructors)
-            self.correlated_sampling(psi,energy_only=True)
-            E0[ix] = self.E
-            E1[ix] = self.err 
-        return _solve_quad(alpha,E0)
-    def _search_rate_wolfe(self,xk,pk,gfk,old_fval,old_old_fval):
-        terminate = np.array([0])
-        buf = np.zeros_like(xk)
         def f(x):
-            COMM.Bcast(terminate,root=0)
-            if terminate[0]==1:
-                return 0.
-
-            COMM.Bcast(x,root=0)
             if np.linalg.norm(x-self.x)/np.linalg.norm(self.x)<PRECISION:
                 return self.E
             psi = vec2psi(self.constructors,x,psi=self.psi.copy())
             self.correlated_sampling(psi) 
             return self.E
         def fprime(x):
-            COMM.Bcast(terminate,root=0)
-            if terminate[0]==1:
-                return buf
-
-            COMM.Bcast(x,root=0)
             if np.linalg.norm(x-self.x)/np.linalg.norm(self.x)<PRECISION:
                 return self.g
             psi = vec2psi(self.constructors,x,psi=self.psi.copy())
             self.correlated_sampling(psi) 
             return self.g
-        if RANK==0:
-            alpha_star,fc,gc,phi_star,old_fval,derphi_star = line_search(f,fprime,xk,pk,
-                gfk=gfk,old_fval=old_fval,old_old_fval=old_old_fval,maxiter=self.maxiter)
-            terminate[0] = 1
-            COMM.Bcast(terminate,root=0)
-            return alpha_star,phi_star
-        else:
-            while True:
-                if terminate[0]==1:
-                    return 0.,0.
-                f(buf)
-                if terminate[0]==1:
-                    return 0.,0.
-                fprime(buf)
+
+        if self.search_rate_method=='wolfe':
+            xk = np.concatenate(psi2vecs(self.concatenate,self.psi))
+            gfk = g     
+            pk = self.transform_gradients(x=1.)
+            old_fval = E
+            self.saved_f[self.step] = E
+            old_old_fval = self.saved_f.get(self.step-1,None) 
+            amax = self.rate_max
+            amin = self.rate_min
+            maxiter = 3
+            from scipy.optimize._linesearch import line_search_wolfe2
+            alpha_star,fc,gc,phi_star,old_fval,derphi_star = line_search_wolfe2(f,fprime,xk,pk,
+                gfk=gfk,old_fval=old_fval,old_old_fval=old_old_fval,amax=amax,maxiter=maxiter)
+            
+        if self.search == 'rate':
+            deltas = self.transform_gradients(x=1.) 
+            trial_deltas = [deltas * xi for xi in x]
+        elif self.search == 'cond':
+            trial_deltas = [self.transform_gradients(x=xi) for xi in x]
+    
+        E0,E1 = np.zeros(len(x)),np.zeros(len(x))
+        for ix,deltas in enumerate(trial_deltas):
+            psi = _update_psi(self.psi.copy(),deltas,self.constructors)
+            psi = write_ftn_to_disc(psi,self.tmpdir+'tmp',provided_filename=True)
+            self.parse_sampler(psi)
+            infos = [(psi,samples,f) for samples,f in zip(self.samples,self.f)]
+            ls = parallelized_looped_fxn(line_search_local_sampling,infos,self.sample_args) 
+            _esum = sum([opt._esum for opt in ls])
+            _esqsum = sum([opt._esqsum for opt in ls])
+            n = sum([opt.n for opt in ls])
+            E0[ix],E1[ix] = _mean_err(_esum,_esqsum,n)
+            print(f'\tx={x[ix]},energy={E0[ix]},err={E1[ix]}')
+        x0,y0 = _solve_quad(x,E0)
+        return x0,y0
 class TNVMC_EX(TNVMC): # exact sampling
     def __init__(self,psi,ham,sampler_opts,contract_opts,optimizer_opts,conditioner=None):
         super().__init__(psi,ham,sampler_opts,contract_opts,optimizer_opts,conditioner=conditioner)
         self.sampler = DenseSampler(sampler_opts)
-        start,stop = self.sampler.start,self.sampler.stop
-        self.samples = self.sampler.all_configs[start:stop]
+        self.dense = True
     def burn_in(self):
         raise NotImplementedError
     def sample(self,energy_only=False): 
         self.compute_dense_amplitude() # runs only for dense sampler 
+        t0 = time.time()
+        start,stop = self.sampler.start,self.sampler.stop
         if self.progbar:
-            _progbar = Progbar(total=len(self.samples))
+            _progbar = Progbar(total=stop-start)
         self.elocal = []
         self.vlocal = None 
         self.hg_local = None 
@@ -730,18 +679,34 @@ class TNVMC_EX(TNVMC): # exact sampling
             self.vlocal = []
             if self.compute_hg:
                 self.hg_local = [] 
-        t0 = time.time()
-        for config in self.samples:
+        for n in range(start,stop):
+            config,omega = self.sampler.sample_exact(n)
             self.update_local(config)
             if self.progbar:
                 _progbar.update()
+        self.flocal = self.sampler.p[start:stop]
+        # sync before gathering
+        #COMM.Barrier()
         if self.progbar:
-            _progbar.close()
             print('\tsample time=',time.time()-t0)
         self.extract_energy_gradient()
-    def correlated_sampling(self,psi,energy_only=False):
-        self.amplitude_factory._set_psi(psi)
-        self.sample(energy_only=energy_only) 
+    def getH_num(self):
+        g0 = self.g.copy()
+        def H(x):
+            # sync calls to ensure all processes have the same x 
+            #self.ncalls += 1
+            #COMM.Barrier()
+            #COMM.Bcast(x,root=0)
+
+            psi = _update_psi(self.psi.copy(),-x*self.num_step,self.constructors) 
+            self.amplitude_factory._set_psi(psi)
+            self.sampler.amplitude_factory = self.amplitude_factory
+            self.sample()
+            # sync before gathering
+            #COMM.Barrier()
+            #self.extract_energy_gradient()
+            return (self.g-g0)/self.num_step 
+        return H 
 class LBFGS(TNVMC):
     def __init__(self,psi,ham,sampler_opts,contract_opts,optimizer_opts,conditioner=None):
         optimizer_opts['method'] = 'bfgs'
@@ -811,20 +776,17 @@ def _update_psi(psi,deltas,constructors):
         data = tsr.data - deltas[site] 
         tsr.modify(data=data)
     return psi
-#def _solve_quad(x,y):
-#    m = np.stack([np.square(x),x,np.ones(3)],axis=1)
-#    a,b,c = list(np.dot(np.linalg.inv(m),y))
-#    if a < 0. or a*b > 0.:
-#        ix = np.argmin(y)
-#        x0,y0 = x[ix],y[ix]
-#    else:
-#        x0,y0 = -b/(2.*a),-b**2/(4.*a)+c
-#    if RANK==0:
-#        print(f'x={x},y={y},x0={x0},y0={y0}')
-#    return x0,y0
 def _solve_quad(x,y):
-    if RANK==0:
-        print(f'x={x},y={y}')
-    ix = np.argmin(y)
-    return x[ix],y[ix]
+    m = np.stack([np.square(x),x,np.ones(3)],axis=1)
+    a,b,c = list(np.dot(np.linalg.inv(m),y))
+    if a < 0. or a*b > 0.:
+        idx = np.argmin(y)
+        x0,y0 = x[idx],y[idx]
+    else:
+        x0,y0 = -b/(2.*a),-b**2/(4.*a)+c
+    print(f'x={x},y={y},x0={x0},y0={y0}')
+    return x0,y0
+#def _solve_quad(x,y):
+#    ix = np.argmin(y)
+#    return x[ix],y[ix]
  
