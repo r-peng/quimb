@@ -114,9 +114,12 @@ def psi2vecs(constructors,psi):
     is_dict = isinstance(psi,dict)
     ls = [None] * len(constructors)
     for ix,(cons,_,size,site) in enumerate(constructors):
-        if is_dict:
-            vec = cons.tensor_to_vector(psi[site]) if site in psi else\
-                  np.zeros(size)
+        if is_dict: 
+            vec = np.zeros(size)
+            if site in psi:
+                g = psi[site] 
+                if g is not None:
+                    vec = cons.tensor_to_vector(g) 
         else:
             vec = cons.tensor_to_vector(psi[psi.site_tag(*site)].data)
         ls[ix] = vec
