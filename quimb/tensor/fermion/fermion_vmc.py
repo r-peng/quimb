@@ -82,8 +82,8 @@ class TNVMC: # stochastic sampling
             self._ms = None
             self._vs = None
         if self.extrapolator=='diis':
-            from pyscf.lib import diis
-            self.diis = diis.DIIS()
+            from .diis import DIIS
+            self.diis = DIIS()
             self.diis_start = kwargs.get('diis_start',0) 
             self.diis_every = kwargs.get('diis_every',1)
             self.diis_size  = kwargs.get('diis_size',10)
@@ -206,6 +206,7 @@ class TNVMC: # stochastic sampling
         xerr = g
         # add perturbation
         #gmax = np.amax(np.fabs(xerr))
+        #print('gmax=',gmax)
         #pb = np.random.normal(size=len(xerr))
         #eps = .1
         #xerr += eps*gmax*pb
@@ -213,52 +214,6 @@ class TNVMC: # stochastic sampling
         self.x = self.diis.update(self.x,xerr=xerr)
         #print('\tDIIS error vector norm=',np.linalg.norm(e))  
         print('\tDIIS extrapolated x norm=',np.linalg.norm(self.x))  
-    def _update_local_energy(self,config,cx):
-        ex = 0.0
-        c_configs, c_coeffs = self.ham.config_coupling(config)
-        for hxy, info_y in zip(c_coeffs, c_configs):
-            if np.fabs(hxy) < PRECISION:
-                continue
-            cy = cx if info_y is None else self.amplitude_factory.amplitude(info_y)
-            ex += hxy * cy 
-        self.elocal.append(ex/cx)
-    def _update_local_hg(self,config,cx,gx):
-        ex = 0.0
-        hgx = 0.0 
-        c_configs, c_coeffs = self.ham.config_coupling(config)
-        for hxy, info_y in zip(c_coeffs, c_configs):
-            if np.fabs(hxy) < PRECISION:
-                continue
-            cy,gy = (cx,gx) if info_y is None else self.amplitude_factory.grad(info_y[0])
-            ex += hxy * cy 
-            hgx += hxy * gy
-        self.elocal.append(ex/cx)
-        self.hg_local.append(hgx/cx)
-    def _update_local(self,config):
-        if self.vlocal is None:
-            cx = self.amplitude_factory.amplitude((config,0))
-        else:
-            cx,gx = self.amplitude_factory.grad(config)
-        if np.fabs(cx) < PRECISION:
-            self.elocal.append(0.)
-            if self.vlocal is not None:
-                self.vlocal.append(np.zeros_like(gx))
-            if self.hg_local is not None:
-                self.hg_local.append(np.zeros_like(gx))
-        else:
-            if self.vlocal is not None:
-                self.vlocal.append(gx/cx)
-            if self.hg_local is not None:
-                self._update_local_hg(config,cx,gx)
-            else:
-                self._update_local_energy(config,cx)
-    def update_vanish(self):
-        self.elocal.append(0.)
-        if self.vlocal is not None:
-            vx = np.zeros_like(self.x)
-            self.vlocal.append(vx)
-        if self.hg_local is not None:
-            self.hg_local.append(vx)
     def update_local(self,config):
         cx,gx = self.amplitude_factory.grad(config)
         self.vlocal.append(gx/cx)

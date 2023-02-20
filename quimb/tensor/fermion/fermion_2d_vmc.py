@@ -1,7 +1,7 @@
-import time,itertools
+import time,itertools,sys
 import numpy as np
 
-from pyblock3.algebra.fermion_ops import vaccum,creation,bonded_vaccum
+from pyblock3.algebra.fermion_ops import vaccum,creation,bonded_vaccum,H1
 from ..tensor_2d import PEPS
 from .utils import psi2vecs
 from .fermion_core import FermionTensor, FermionTensorNetwork, tensor_contract
@@ -13,25 +13,28 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-symmetry = 'u1' # tsr symmetry
 SYMMETRY = 'u11' # sampler symmetry
 flat = True
 PRECISION = 1e-10
 
-cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-vac = vaccum(n=1,symmetry=symmetry,flat=flat)
-occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
-occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
-occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
-state_map = [vac,occ_a,occ_b,occ_db]
+# set tensor symmetry
+this = sys.modules[__name__]
+def set_symmetry(symmetry):
+    this.h1 = H1(symmetry=symmetry,flat=flat)
+    this.cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
+    this.cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+    this.vac = vaccum(n=1,symmetry=symmetry,flat=flat)
+    this.occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
+    this.occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
+    this.occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
+    this.state_map = [vac,occ_a,occ_b,occ_db]
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
 
 ####################################################################################
 # configuration ordering 
 ####################################################################################
-def flatten(i,j,Lx,Ly): # flattern site to row order
+def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
 def flat2site(ix,Lx,Ly): # ix in row order
     return ix//Ly,ix%Ly
@@ -101,367 +104,355 @@ def get_constructors_2d(fpeps):
         cons = Constructor.from_bond_infos(bond_infos,data.pattern)
         dq = data.dq
         size = cons.vector_size(dq)
-        ix = flatten(i,j,fpeps.Lx,fpeps.Ly)
+        ix = flatten(i,j,fpeps.Ly)
         constructors[ix] = cons,dq,size,(i,j)
     return constructors
 
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-def get_bra_tsr(fpeps,ci,site):
-    inds = fpeps.site_ind(*site),
-    tags = fpeps.site_tag(*site)
+def get_bra_tsr(fpeps,ci,i,j):
+    inds = fpeps.site_ind(i,j),
+    tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
     data = state_map[ci].dagger
-    data.shape = fpeps[tags].shape[-1],
     return FermionTensor(data=data,inds=inds,tags=tags)
-def update_cache_mid(fpeps,config,i,cache_mid):
-    L = fpeps.Ly
-    tag = fpeps.row_tag
-    start,stop = i*L,(i+1)*L
-    config_row = config[start:stop] 
-    if (i,config_row) in cache_mid:
-        row = cache_mid[i,config_row] 
-        return row,cache_mid
-
-    row = fpeps.select(tag(i)).copy()
-    for ix in range(stop-1,start-1,-1):
-        site = flat2site(ix,fpeps.Lx,fpeps.Ly)
-        row.add_tensor(get_bra_tsr(fpeps,config[ix],site))
-    try:
-        for ix in range(stop-1,start-1,-1):
-            site = flat2site(ix,fpeps.Lx,fpeps.Ly)
-            row.contract_tags(fpeps.site_tag(*site),inplace=True)
-        cache_mid[i,config_row] = row
+def get_mid_env(i,fpeps,config):
+    row = fpeps.select(fpeps.row_tag(i)).copy()
+    key = config[i*fpeps.Ly:(i+1)*fpeps.Ly]
+    # compute mid env for row i
+    for j in range(row.Ly-1,-1,-1):
+        row.add_tensor(get_bra_tsr(row,key[j],i,j),virtual=True)
+    return row
+def contract_mid_env(i,row):
+    try: 
+        for j in range(row.Ly-1,-1,-1):
+            row.contract_tags(row.site_tag(i,j),inplace=True)
     except (ValueError,IndexError):
         row = None 
-        cache_mid[i,config_row] = None
-    return row,cache_mid
-def update_cache_head(fpeps,config,cache_head,cache_mid,imin,imax,**compress_opts):
-    # compute all bottom envs
-    ftn = FermionTensorNetwork([]) 
-    L = fpeps.Ly
-    imax_ = fpeps.Lx-1
-    for i in range(imin,imax+1):
-        key = config[:(i+1)*L]
-        if key in cache_head:
-            ftn = cache_head[key]
-            continue
-        if ftn is None:
-            cache_head[key] = None 
-            continue
-        row,cache_mid = update_cache_mid(fpeps,config,i,cache_mid)
-        if row is None:
-            cache_head[key] = None 
-            continue
-        ftn = FermionTensorNetwork([ftn,row]).view_as_(FermionTensorNetwork2D,like=row)
-        if i>0:
-            try:
-                ftn.contract_boundary_from_bottom_(
-                    xrange=(i-1,i),yrange=(0,fpeps.Ly-1),**compress_opts)
-            except (ValueError,IndexError):
-                ftn = None
-                cache_head[key] = None 
-                continue
-        if i<imax_:
-            cache_head[key] = ftn.copy()
-    return cache_head,cache_mid
-def update_cache_tail(fpeps,config,cache_tail,cache_mid,imin,imax,**compress_opts):
-    # compute all top envs
-    ftn = FermionTensorNetwork([]) 
-    L = fpeps.Ly 
-    imax_ = fpeps.Lx-1 
-    for i in range(imax,imin-1,-1):
-        key = config[i*L:]
-        if key in cache_tail:
-            ftn = cache_tail[key]
-            continue
-        if ftn is None:
-            cache_tail[key] = None 
-            continue
-        row,cache_mid = update_cache_mid(fpeps,config,i,cache_mid)
-        if row is None:
-            cache_tail[key] = None 
-            continue
-        ftn = FermionTensorNetwork([row,ftn]).view_as_(FermionTensorNetwork2D,like=row)
-        if i<imax_:
-            try:
-                ftn.contract_boundary_from_top_(
-                    xrange=(i,i+1),yrange=(0,fpeps.Ly-1),**compress_opts)
-            except (ValueError,IndexError):
-                ftn = None
-                cache_tail[key] = None 
-                continue
-        if i>0:
-            cache_tail[key] = ftn.copy()
-    return cache_tail,cache_mid
-def compute_amplitude_2d(fpeps,config,split,cache_head,cache_mid,cache_tail,**compress_opts):
-    L,imax = fpeps.Ly,fpeps.Lx-1
-    split = split - 1 if split == imax else split
-    cache_head,cache_mid = update_cache_head(
-            fpeps,config,cache_head,cache_mid,0,split,**compress_opts)
-    cache_tail,cache_mid = update_cache_tail(
-            fpeps,config,cache_tail,cache_mid,split+1,imax,**compress_opts)
-    ftn_head = cache_head[config[:(split+1)*L]]
-    ftn_tail = cache_tail[config[(split+1)*L:]]
-    if ftn_head is None or ftn_tail is None:
-        amp = 0.
-    else:
-        try:
-            amp = FermionTensorNetwork([ftn_head,ftn_tail]).contract()
-        except (ValueError,IndexError):
-            amp = 0.
-    return amp,cache_head,cache_mid,cache_tail
-def compute_3col_envs(tn,direction,step,imin,imax,envs):
-    sweep = range(imin,imax+1) if step==1 else range(imax,imin-1,-1)
-    from_which = 'head' if step==1 else 'tail'
-    row_tag = tn.row_tag if direction=='row' else tn.col_tag
-
-    envs[from_which, sweep[0]] = FermionTensorNetwork([])
-    first_row = row_tag(sweep[0])
+    return row
+def get_bot_env(i,row,env_prev,config,cache,**compress_opts):
+    # contract mid env for row i with prev bot env 
+    key = config[:(i+1)*row.Ly]
+    if key in cache: # reusable
+        return cache[key]
+    row = contract_mid_env(i,row)
+    if i==0:
+        cache[key] = row
+        return row
+    if row is None:
+        cache[key] = row
+        return row
+    if env_prev is None:
+        cache[key] = None 
+        return None
+    ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
     try:
-        tn ^= first_row
-        envs[from_which, sweep[1]] = tn.select(first_row).copy()
+        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,row.Ly-1),**compress_opts)
     except (ValueError,IndexError):
-        tn = None
-        envs[from_which, sweep[1]] = None 
-
-    for i in sweep[2:]:
-        if tn is None:
-            envs[from_which,i] = None
-            continue
-        iprevprev = i - 2 * step
-        iprev = i - step
-        try:
-            tn ^= (row_tag(iprevprev), row_tag(iprev))
-            envs[from_which, i] = tn.select(first_row).copy()
-        except (ValueError,IndexError):
-            tn = None
-            envs[from_which,i] = None
-    return envs
-def compute_grad(fpeps,config,cache_head,cache_mid,cache_tail,
-                 **compress_opts):
-    # fpeps,config in same order
-    L,imax = fpeps.Ly,fpeps.Lx-1
-    row_tag = fpeps.col_tag
+        ftn = None
+    cache[key] = ftn
+    return ftn 
+def get_all_bot_envs(fpeps,config,cache_bot,imax=None,**compress_opts):
+    # imax for bot env
+    imax = fpeps.Lx-2 if imax is None else imax
+    env_prev = None
     for i in range(imax+1):
-        _,cache_mid = update_cache_mid(fpeps,config,i,cache_mid)
-    cache_head,_ = update_cache_head(fpeps,config,cache_head,cache_mid,0,imax,**compress_opts)
-    cache_tail,_ = update_cache_tail(fpeps,config,cache_tail,cache_mid,0,imax,**compress_opts)
-    # compute grad
-    amps = []
-    grad = dict()
-    for i in range(imax+1):
-        ftn_head = FermionTensorNetwork([]) if i==0 else cache_head[config[:i*L]]
-        if ftn_head is None:
-            continue
-        ftn_mid = cache_mid[i,config[i*L:(i+1)*L]]
-        if ftn_mid is None:
-            continue
-        ftn_tail = FermionTensorNetwork([]) if i==imax else \
-                   cache_tail[config[(i+1)*L:]]
-        if ftn_tail is None:
-            continue
-        ftn = FermionTensorNetwork([ftn_head,ftn_mid,ftn_tail]).view_as_(
-                  FermionTensorNetwork2D,like=ftn_mid)
-        ftn.reorder('col',inplace=True)
-        envs = {('mid',j):ftn.select(row_tag(j)).copy() for j in range(L)}
-        envs = compute_3col_envs(ftn.copy(),'col',1,0,L-1,envs)
-        envs = compute_3col_envs(ftn.copy(),'col',-1,0,L-1,envs)
-        for j in range(L):
-            if envs['head',j] is None:
-                continue
-            if envs['tail',j] is None:
-                continue
-            ftn_ij = FermionTensorNetwork([envs[side,j] \
-                                           for side in ['head','mid','tail']])
-
-            ix = i*L+j
-            site = flat2site(ix,fpeps.Lx,fpeps.Ly) 
-            tag = fpeps.site_tag(*site)
-            tid = ftn_ij[tag].get_fermion_info()[0]
-            Tv = ftn_ij._pop_tensor(tid,remove_from_fermion_space='end')
-
-            try:
-                target = fpeps[tag]
-                #print(target.inds[:-1])
-                g = ftn_ij.contract()
-                #print(g.inds)
-                amps.append(FermionTensorNetwork([g,Tv]).contract())
-                
-                v = get_bra_tsr(fpeps,config[ix],site)
-                if pn_map[config[ix]] % 2 == 1:
-                    tmp = FermionTensorNetwork([target,v]).contract(
-                                 output_inds=target.inds[:-1])
-                    size = np.product(np.array(tmp.shape))
-                    if (Tv.data-tmp.data).norm()/size<PRECISION:
-                        pass
-                    elif (Tv.data+tmp.data).norm()/size<PRECISION:
-                        v.data._global_flip()
-                    else:
-                        print(T.data)
-                        print(tmp.data)
-                        raise ValueError('T and tmp not related by a global phase!')
-                    if target.data.parity == 1:
-                        v.data._global_flip()
-                    v.data._local_flip([0])
-
-                g = FermionTensorNetwork([g,v]).contract(
-                        output_inds=target.inds[::-1])
-                grad[site] = g.data.dagger 
-            except (ValueError,IndexError):
-                continue
-    amp = sum(amps)/len(amps) if len(amps)>0 else 0.
-    return amp,grad,cache_head,cache_mid,cache_tail
+         row = get_mid_env(i,fpeps,config)
+         env_prev = get_bot_env(i,row,env_prev,config,cache_bot,**compress_opts)
+    return env_prev
+def get_top_env(i,row,env_prev,config,cache,**compress_opts):
+    # contract mid env for row i with prev top env 
+    key = config[i*row.Ly:]
+    if key in cache: # reusable
+        return cache[key]
+    row = contract_mid_env(i,row)
+    if i==row.Lx-1:
+        cache[key] = row
+        return row
+    if row is None:
+        cache[key] = row
+        return row
+    if env_prev is None:
+        cache[key] = None 
+        return None
+    ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
+    try:
+        ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,row.Ly-1),**compress_opts)
+    except (ValueError,IndexError):
+        ftn = None
+    cache[key] = ftn
+    return ftn 
+def get_all_top_envs(fpeps,config,cache_top,imin=None,**compress_opts):
+    imin = 1 if imin is None else imin
+    env_prev = None
+    key_bot = config
+    key_top = tuple()
+    for i in range(fpeps.Lx-1,imin-1,-1):
+         row = get_mid_env(i,fpeps,config)
+         env_prev = get_top_env(i,row,env_prev,config,cache_top,**compress_opts)
+    return env_prev
+def get_all_lenvs(ftn,jmax=None):
+    jmax = ftn.Ly-2 if jmax is None else jmax
+    first_col = ftn.col_tag(0)
+    lenvs = [None] * ftn.Ly
+    for j in range(jmax+1): 
+        tags = first_col if j==0 else (first_col,ftn.col_tag(j))
+        ftn ^= tags
+        lenvs[j] = ftn.select(first_col).copy()
+    return lenvs
+def get_all_renvs(ftn,jmin=None):
+    jmin = 1 if jmin is None else jmin
+    last_col = ftn.col_tag(ftn.Ly-1)
+    renvs = [None] * ftn.Ly
+    for j in range(ftn.Ly-1,jmin-1,-1): 
+        tags = last_col if j==ftn.Ly-1 else (ftn.col_tag(j),last_col)
+        ftn ^= tags
+        renvs[j] = ftn.select(last_col).copy()
+    return renvs
+def replace_sites(ftn,sites,cis):
+    for (i,j),ci in zip(sites,cis): 
+        bra = ftn[ftn.site_tag(i,j),'BRA']
+        bra_target = get_bra_tsr(ftn,ci,i,j)
+        bra.modify(data=bra_target.data.copy(),inds=bra_target.inds)
+    return ftn
+def site_grad(ftn_plq,i,j):
+    ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
+    tid = ket.get_fermion_info()[0]
+    ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
+    try:
+        g = ftn_plq.contract(output_inds=ket.inds[::-1])
+        return g.data.dagger 
+    except (ValueError,IndexError):
+        return None
 def compute_fpeps_parity(fs,start,stop):
     if start==stop:
         return 0
     tids = [fs.get_tid_from_site(site) for site in range(start,stop)]
     tsrs = [fs.tensor_order[tid][0] for tid in tids] 
     return sum([tsr.parity for tsr in tsrs]) % 2
-def compute_fpeps_parities(fpeps,L,imax):
-    parity = [None] * (imax+1) 
-    fs = fpeps.fermion_space
-    for i in range(imax+1):
-        start,stop = i*L,(i+1)*L
-        parity[i] = compute_fpeps_parity(fs,start,stop)
-    return parity
-def compute_config_parity(config,parity_fpeps,L,imax):
-    parity_config = [None] * (imax+1)
-    for i in range(imax+1):
-        parity_config[i] = sum([pn_map[ci] for ci in config[i*L:(i+1)*L]]) % 2
-    parity = 0
-    for i in range(imax-1,-1,-1):
-        parity_ = (sum(parity_fpeps[i+1:]) + sum(parity_config[i+1:])) % 2
-        parity += parity_config[i] * parity_
-    return parity % 2
 class AmplitudeFactory2D:
-    def __init__(self,psi=None,**contract_opts):
+    def __init__(self,psi=None,x_bsz=2,y_bsz=2,**contract_opts):
         self.contract_opts=contract_opts
+        self.x_bsz = x_bsz
+        self.y_bsz = y_bsz
         if psi is not None:
             self._set_psi(psi)
     def _set_psi(self,psi):
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.constructors = get_constructors_2d(psi)
         self.psi = psi.reorder(direction='row',inplace=True)
-        self.parity = compute_fpeps_parities(self.psi,self.Ly,self.Lx-1)
+        self.psi.add_tag('KET')
+
+        parity = []
+        fs = self.psi.fermion_space
+        for i in range(1,self.Lx): # only need parity of row 1,...,Lx-1
+            start,stop = i*self.Ly,(i+1)*self.Ly
+            parity.append(compute_fpeps_parity(fs,start,stop))
+        self.parity_cum = np.cumsum(np.array(parity[::-1]))
 
         self.store = dict()
         self.store_grad = dict()
 
-        self.cache_bottom = dict()
+        self.cache_bot = dict()
         self.cache_top = dict()
-        self.cache_mid = dict()
+        self.compute_bot = True
+        self.compute_top = True
         return
-    def amplitude(self, info):
-        """Get the amplitude of ``config``, either from the cache or by
-        computing it.
-        """
-        config,split = info 
+    def update_scheme(self,benv_dir):
+        if benv_dir == 1:
+            self.compute_bot = True
+            self.compute_top = False
+        elif benv_dir == -1:
+            self.compute_top = True
+            self.compute_bot = False
+        elif benv_dir == 0:
+            self.compute_top = True
+            self.compute_bot = True 
+        else:
+            raise NotImplementedError
+    def compute_config_parity(self,config):
+        parity = [None] * self.Lx
+        for i in range(self.Lx):
+            parity[i] = sum([pn_map[ci] for ci in config[i*self.Ly:(i+1)*self.Ly]]) % 2
+        parity = np.array(parity[::-1])
+        parity_cum = np.cumsum(parity[:-1])
+        parity_cum += self.parity_cum 
+        return np.dot(parity[1:],parity_cum) % 2
+    def unsigned_amplitude(self,config):
+        # should only be used to:
+        # 1. compute dense probs
+        # 2. initialize MH sampler
         if config in self.store:
             return self.store[config]
-
-        amp,self.cache_bottom,self.cache_mid,self.cache_top = \
-            compute_amplitude_2d(self.psi,config,split,
-            self.cache_bottom,self.cache_mid,self.cache_top,**self.contract_opts) 
-
-        p = compute_config_parity(config,self.parity,self.Ly,self.Lx-1)
-        amp *= (-1)**p
-        self.store[config] = amp 
-        return amp 
-    def _amplitude(self,info):
-        config,split = info
-        if config in self.store:
-            return self.store[config]
-
-        fpeps = self.psi.copy()
-        for ix,i in reversed(list(enumerate(config))):
-            site = flat2site(ix,self.Lx,self.Ly)
-            fpeps.add_tensor(get_bra_tsr(fpeps,i,site))
+        if self.compute_bot: 
+            row = get_mid_env(self.Lx-1,self.psi,config)
+            env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-2,
+                                       **self.contract_opts)
+            if env_bot is None:
+                self.unsigned_cx = 0.
+                return self.unsigned_cx
+            ftn = FermionTensorNetwork([env_bot,row],virtual=False)
+        if self.compute_top:
+            row = get_mid_env(0,self.psi,config)
+            env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=1,**self.contract_opts)
+            ftn = FermionTensorNetwork([row,env_top],virtual=False)
+            if env_top is None:
+                self.unsigned_cx = 0.
+                return self.unsigned_cx
         try:
-            amp = fpeps.contract()
+            self.unsigned_cx = ftn.contract()
         except (ValueError,IndexError):
-            amp = 0.
-        self.store[config] = amp 
-        return amp
+            self.unsigned_cx = 0.
+        return self.unsigned_cx
+    def amplitude(self,config):
+        self.unsigned_ampplitude(config)
+        sign = (-1) ** self.compute_config_parity(config)
+        cx = self.unsigned_cx * sign 
+        self.store[config] = cx 
+        return cx
+    def _amplitude(self,fpeps,config):
+        for ix,ci in reversed(list(enumerate(config))):
+            i,j = flat2site(ix,self.Lx,self.Ly)
+            fpeps.add_tensor(get_bra_tsr(fpeps,ci,i,j))
+        try:
+            cx = fpeps.contract()
+        except (ValueError,IndexError):
+            cx = 0.
+        return cx 
+    def get_all_plqs(self,config):
+        #if self.compute_bot and self.compute_top:
+        #    raise ValueError
+        if self.compute_bot: 
+            get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-1-self.x_bsz,
+                             **self.contract_opts)
+        if self.compute_top:
+            get_all_top_envs(self.psi,config,self.cache_top,imin=self.x_bsz,
+                             **self.contract_opts)
+        first_col = self.psi.col_tag(0)
+
+        imax = self.Lx-self.x_bsz
+        jmax = self.Ly-self.y_bsz
+        plq = dict()
+        for i in range(imax+1):
+            ls = []
+            if i>0:
+                ls.append(self.cache_bot[config[:i*self.Ly]])
+            ls += [get_mid_env(i+ix,self.psi,config) for ix in range(self.x_bsz)]
+            if i<imax:
+                ls.append(self.cache_top[config[(i+self.x_bsz)*self.Ly:]])
+            ftn = FermionTensorNetwork(ls,virtual=False).view_like_(self.psi)
+            ftn.reorder('col',inplace=True)
+            renvs = get_all_renvs(ftn.copy(),jmin=self.y_bsz)
+            for j in range(jmax+1): 
+                tags = [first_col]+[ftn.col_tag(j+ix) for ix in range(self.y_bsz)]
+                cols = [ftn.select(tags,which='any').copy()]
+                if j<jmax:
+                    cols.append(renvs[j+self.y_bsz].copy())
+                plq[i,j] = FermionTensorNetwork(cols,virtual=True).view_like_(self.psi) 
+                if j<jmax: 
+                    tags = first_col if j==0 else (first_col,ftn.col_tag(j))
+                    ftn ^= tags 
+        return plq
     def grad(self,config):
         if config in self.store_grad:
             return self.store[config],self.store_grad[config]
 
-        amp,grad,self.cache_bottom,self.cache_mid,self.cache_top = compute_grad(self.psi,config,
-            self.cache_bottom,self.cache_mid,self.cache_top,**self.contract_opts) 
-        grad = np.concatenate(psi2vecs(self.constructors,grad)) 
+        plq = self.get_all_plqs(config)
+        # amplitude
+        ftn_plq = plq[0,0].copy()
+        try:
+            self.unsigned_cx = ftn_plq.contract()
+        except (IndexError,ValueError):
+            self.unsigned_cx = 0.
+        # gradient
+        gx = dict()
+        for i0,j0 in plq:
+            ftn_plq = plq[i0,j0]
+            for i in range(i0,i0+self.x_bsz):
+                for j in range(j0,j0+self.y_bsz):
+                    if (i,j) in gx:
+                        continue
+                    gx[i,j] = site_grad(ftn_plq.copy(),i,j) 
+        self.plq = plq
+        self.unsigned_gx = np.concatenate(psi2vecs(self.constructors,gx)) 
 
-        p = compute_config_parity(config,self.parity,self.Ly,self.Lx-1)
-        amp *= (-1)**p
-        grad *= (-1)**p
-        self.store[config] = amp 
-        self.store_grad[config] = grad
-        return amp,grad 
-    def prob(self, info):
+        sign = (-1) ** self.compute_config_parity(config)
+        cx = self.unsigned_cx * sign 
+        gx = self.unsigned_gx * sign
+        self.store[config] = cx
+        self.store_grad[config] = gx
+        return cx,gx 
+    def prob(self, config):
         """Calculate the probability of a configuration.
         """
-        coeff = self.amplitude(info)
-        return coeff**2
+        return self.unsigned_amplitude(config) ** 2
 ####################################################################################
 # ham class 
 ####################################################################################
-def hop(ix1,ix2,config):
-    i1,i2 = config[ix1],config[ix2]
+def hop(i1,i2):
     if i1==i2:
         return []
     n1,n2 = pn_map[i1],pn_map[i2]
     nsum,ndiff = n1+n2,abs(n1-n2)
     if ndiff==1:
         sign = 1 if nsum==1 else -1
-        config_new = list(config)
-        config_new[ix1] = i2 
-        config_new[ix2] = i1
-        return [(tuple(config_new),sign)]
-    configs = []
+        return [(i2,i1,sign)]
     if ndiff==2:
-        for i1_new,i2_new in ((1,2),(2,1)):
-            sign = i1_new-i2_new
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new
-            configs.append((tuple(config_new),sign))
+        return [(1,2,-1),(2,1,1)] 
     if ndiff==0:
-        sign = i1-i2
-        for i1_new,i2_new in ((0,3),(3,0)):
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new
-            configs.append((tuple(config_new),sign))
-    return configs
+        sign = i1-i2 
+        return [(0,3,sign),(3,0,sign)]
 class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
     def flatten(self,i,j):
-        return flatten(i,j,self.Lx,self.Ly)        
-    def config_coupling(self,config):
-        configs = []
-        coeffs = []
-
-        for i, j in itertools.product(range(self.Lx), range(self.Ly-1)):
-            ix1,ix2 = self.flatten(i,j), self.flatten(i,j+1)
-            configs_ = hop(ix1,ix2,config)
-            for config_,sign_ in configs_:
-                configs.append((config_,i))
-                coeffs.append(-self.t*sign_) 
-
-        for i, j in itertools.product(range(self.Lx-1), range(self.Ly)):
-            ix1,ix2 = self.flatten(i,j), self.flatten(i+1,j)
-            sign = (-1)**sum([pn_map[ci] for ci in config[ix1+1:ix2]])
-            configs_ = hop(ix1,ix2,config)
-            for config_,sign_ in configs_:
-                configs.append((config_,i))
-                coeffs.append(-self.t*sign*sign_) 
-   
-        configs.append(None)
+        return flatten(i,j,self.Ly)        
+    def hop_coeff(self,site1,site2):
+        return -self.t
+    def hop(self,ftn_plq,config,site1,site2):
+        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+        i1,i2 = config[ix1],config[ix2] 
+        if i1==i2: # no hopping possible
+            return 0.
+        kixs = [ftn_plq.site_ind(*site) for site in [site1,site2]]
+        bixs = [kix+'*' for kix in kixs]
+        for site,kix,bix in zip([site1,site2],kixs,bixs):
+            ftn_plq[ftn_plq.site_tag(*site),'BRA'].reindex_({kix:bix})
+        ftn_plq.add_tensor(FermionTensor(h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
+        try:
+            return self.hop_coeff(site1,site2) * ftn_plq.contract()
+        except (ValueError,IndexError):
+            return 0.
+    def nn(self,config,amplitude_factory):
+        plq = amplitude_factory.plq 
+        cx = amplitude_factory.unsigned_cx
+        e = 0.
+        # all horizontal bonds
+        for i in range(self.Lx):
+            for j in range(self.Ly-1):
+                site1,site2 = (i,j),(i,j+1)
+                i0,j0 = i,j
+                if i0==self.Lx-1:
+                    i0 -= 1
+                ftn_plq = plq[i0,j0]
+                e += self.hop(ftn_plq.copy(),config,site1,site2)
+        # all vertical bonds
+        for i in range(self.Lx-1):
+            for j in range(self.Ly):
+                site1,site2 = (i,j),(i+1,j)
+                i0,j0 = i,j
+                if j0==self.Ly-1:
+                    j0 -= 1
+                ftn_plq = plq[i0,j0]
+                e += self.hop(ftn_plq.copy(),config,site1,site2)
+        return e/cx
+    def compute_local_energy(self,config,amplitude_factory):
+        e = self.nn(config,amplitude_factory) 
+        # onsite terms
         config = np.array(config,dtype=int)
-        coeffs.append(self.u*len(config[config==3]))
-        return configs,coeffs
+        e += self.u*len(config[config==3])
+        return e 
 class PN2D(Hubbard2D):
     def __init__(self,Lx,Ly,spin='a'):
         super().__init__(Lx,Ly,0.,0.)
@@ -482,31 +473,174 @@ class PN2D(Hubbard2D):
 ####################################################################################
 # sampler 
 ####################################################################################
+#class ExchangeSampler2D:
+#    def __init__(self,Lx,Ly,nelec,sweep=True,seed=None,burn_in=0):
+#        self.Lx = Lx
+#        self.Ly = Ly
+#        self.nelec = nelec 
+#        self.nsite = self.Lx * self.Ly
+#
+#        self.sweep = sweep 
+#        self.blocks = [(i,j) for i in range(self.Lx-1) for j in range(self.Ly-1)] 
+#
+#        self.rng = np.random.default_rng(seed)
+#        self.exact = False
+#        self.dense = False
+#        self.burn_in = burn_in 
+#    def _set_amplitude_factory(self,amplitude_factory,config):
+#        self.amplitude_factory = amplitude_factory
+#        self.amplitude_factory.update_scheme(0)
+#        self.prob_fn = self.amplitude_factory.prob
+#        if config is None:
+#            self.config = self.get_rand_config()
+#        else:
+#            assert len(config)==self.nsite
+#            self.config = config
+#        self.px = self.prob_fn(self.config)
+#        #print(f'initialize nonvanishing config. Start at {self.config},{self.px}.')
+#        cnt = 0
+#        maxcnt = 5
+#        while self.px < PRECISION:
+#            self.config,self.px = self.sample()
+#            cnt += 1
+#            if cnt > maxcnt:
+#                raise ValueError(f'failes to generate nonvanishing config. Final at {self.config},{self.px}.') 
+#    def preprocess(self):
+#        self._burn_in()
+#    def _burn_in(self,batchsize=None):
+#        batchsize = self.burn_in if batchsize is None else batchsize
+#        if batchsize==0:
+#            return
+#        t0 = time.time()
+#        for n in range(batchsize):
+#            self.config,self.omega = self.sample()
+#        if RANK==SIZE-1:
+#            print('\tburn in time=',time.time()-t0)
+#            print('\tsaved amplitudes=',len(self.amplitude_factory.store))
+#        #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
+#    def flatten(self,i,j):
+#        return flatten(i,j,self.Ly)
+#    def flat2site(self,ix):
+#        return flat2site(ix,self.Lx,self.Ly)
+#    def get_rand_config(self):
+#        if SYMMETRY=='u1':
+#            return self.get_rand_config_u1()
+#        elif SYMMETRY=='u11':
+#            return self.get_rand_config_u11()
+#        else:
+#            raise NotImplementedError
+#    def get_rand_config_u11(self):
+#        assert isinstance(self.nelec,tuple)
+#        config = np.zeros((self.nsite,2),dtype=int)
+#        sites = np.array(range(self.nsite),dtype=int)
+#        for spin in (0,1):
+#            occ = self.rng.choice(sites,size=self.nelec[spin],
+#                                  replace=False,shuffle=False)
+#            for ix in occ:
+#                config[ix,spin] = 1
+#        config = [config_map[tuple(config[i,:])] for i in range(self.nsite)]
+#        return tuple(config)
+#    def get_rand_config_u1(self):
+#        if isinstance(self.nelec,tuple):
+#            self.nelec = sum(self.nelec)
+#        sites = np.array(range(self.nsite),dtype=int)
+#        occ = self.rng.choice(sites,size=self.nelec,replace=False,shuffle=False)
+#        for ix in occ:
+#            config[ix] = 1
+#        configa,configb = config[:self.nsite],config[self.nsite:]
+#        config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
+#        return tuple(config)
+#    def new_pair(self,i1,i2):
+#        if SYMMETRY=='u11':
+#            return self.new_pair_u11(i1,i2)
+#        else:
+#            raise NotImplementedError
+#    def new_pair_u11(self,i1,i2):
+#        n = abs(pn_map[i1]-pn_map[i2])
+#        if n==1:
+#            i1_new,i2_new = i2,i1
+#        else:
+#            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
+#            i1_new,i2_new = self.rng.choice(choices)
+#        return i1_new,i2_new 
+#    def new_pair_u1(self,i1,i2):
+#        return
+#    def sample_pair(self,site1,site2):
+#        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+#        i1,i2 = self.config[ix1],self.config[ix2]
+#        if i1==i2:
+#            return 
+#        i1_new,i2_new = self.new_pair(i1,i2)
+#        config_new = list(self.config)
+#        config_new[ix1] = i1_new
+#        config_new[ix2] = i2_new
+#        config_new = tuple(config_new)
+#        py = self.prob_fn(config_new)
+#        try:
+#            acceptance = py / self.px
+#        except ZeroDivisionError:
+#            acceptance = 1. if py > self.px else 0.
+#        #print(py,self.px,acceptance)
+#        if self.rng.uniform() < acceptance:
+#            self.config = config_new
+#            self.px = py
+#    def sweep_row(self):
+#        for i in range(self.Lx):
+#            for j in range(self.Ly-1):
+#                site1,site2 = (i,j),(i,j+1)
+#                self.sample_pair(site1,site2)
+#    def sweep_col(self):
+#        for j in range(self.Ly):
+#            for i in range(self.Lx-1):
+#                site1,site2 = (i,j),(i+1,j)
+#                self.sample_pair(site1,site2)
+#    def sample_sweep(self):
+#        first = self.rng.integers(low=0,high=1,endpoint=True)
+#        if first==0:
+#            self.sweep_row()
+#            self.sweep_col()
+#        else:
+#            self.sweep_col()
+#            self.sweep_row()
+#    def sample_rand(self):
+#        blocks = self.rng.permutation(self.blocks)
+#        for i,j in blocks:
+#            site1 = i,j
+#            site2 = [(i,j+1),(i+1,j)][self.rgn.integers(low=0,high=1,endpoint=True)]
+#            self.sample_pair(site1,site2)
+#    def sample(self):
+#        if self.sweep:
+#            self.sample_sweep()
+#        else:
+#            self.sample_rand()
+#        return self.config,self.px
 class ExchangeSampler2D:
-    def __init__(self,Lx,Ly,nelec,sweep=True,seed=None,burn_in=0):
+    def __init__(self,Lx,Ly,nelec,seed=None,burn_in=0):
         self.Lx = Lx
         self.Ly = Ly
         self.nelec = nelec 
         self.nsite = self.Lx * self.Ly
-
-        self.sweep = sweep 
-        self.blocks = [(i,j) for i in range(self.Lx-1) for j in range(self.Ly-1)] 
 
         self.rng = np.random.default_rng(seed)
         self.exact = False
         self.dense = False
         self.burn_in = burn_in 
         self.amplitude_factory = None
+        self.alternate = None
     def initialize(self,config):
-        self.prob_fn = self.amplitude_factory.prob
+        # randomly choses the initial sweep direction
+        self.sweep_row_dir = self.rng.choice([-1,1]) 
+        # setup to compute all opposite envs for initial sweep
+        self.amplitude_factory.update_scheme(-self.sweep_row_dir) 
+        self.px = self.amplitude_factory.prob(config)
         self.config = config
-        self.px = self.prob_fn((self.config,0))
         # force to initialize with a better config
         if self.px < PRECISION:
             raise ValueError 
     def preprocess(self):
         self._burn_in()
     def _burn_in(self,batchsize=None):
+        self.alternate = True
         batchsize = self.burn_in if batchsize is None else batchsize
         if batchsize==0:
             return
@@ -515,40 +649,12 @@ class ExchangeSampler2D:
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
-            print('\tsaved amplitudes=',len(self.amplitude_factory.store))
+        self.alternate = False 
         #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
     def flatten(self,i,j):
-        return flatten(i,j,self.Lx,self.Ly)
+        return flatten(i,j,self.Ly)
     def flat2site(self,ix):
         return flat2site(ix,self.Lx,self.Ly)
-    def get_rand_config(self):
-        if SYMMETRY=='u1':
-            return self.get_rand_config_u1()
-        elif SYMMETRY=='u11':
-            return self.get_rand_config_u11()
-        else:
-            raise NotImplementedError
-    def get_rand_config_u11(self):
-        assert isinstance(self.nelec,tuple)
-        config = np.zeros((self.nsite,2),dtype=int)
-        sites = np.array(range(self.nsite),dtype=int)
-        for spin in (0,1):
-            occ = self.rng.choice(sites,size=self.nelec[spin],
-                                  replace=False,shuffle=False)
-            for ix in occ:
-                config[ix,spin] = 1
-        config = [config_map[tuple(config[i,:])] for i in range(self.nsite)]
-        return tuple(config)
-    def get_rand_config_u1(self):
-        if isinstance(self.nelec,tuple):
-            self.nelec = sum(self.nelec)
-        sites = np.array(range(self.nsite),dtype=int)
-        occ = self.rng.choice(sites,size=self.nelec,replace=False,shuffle=False)
-        for ix in occ:
-            config[ix] = 1
-        configa,configb = config[:self.nsite],config[self.nsite:]
-        config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
-        return tuple(config)
     def new_pair(self,i1,i2):
         if SYMMETRY=='u11':
             return self.new_pair_u11(i1,i2)
@@ -564,55 +670,168 @@ class ExchangeSampler2D:
         return i1_new,i2_new 
     def new_pair_u1(self,i1,i2):
         return
-    def sample_pair(self,site1,site2):
-        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-        i1,i2 = self.config[ix1],self.config[ix2]
-        if i1==i2:
-            return 
-        i1_new,i2_new = self.new_pair(i1,i2)
-        config_new = list(self.config)
-        config_new[ix1] = i1_new
-        config_new[ix2] = i2_new
-        config_new = tuple(config_new)
-        info = config_new,site1[0]
-        py = self.prob_fn(info)
-        try:
-            acceptance = py / self.px
-        except ZeroDivisionError:
-            acceptance = 1. if py > self.px else 0.
-        #print(py,self.px,acceptance)
-        if self.rng.uniform() < acceptance:
-            self.config = config_new
-            self.px = py
-    def sweep_row(self):
-        for i in range(self.Lx):
-            for j in range(self.Ly-1):
-                site1,site2 = (i,j),(i,j+1)
-                self.sample_pair(site1,site2)
-    def sweep_col(self):
-        for j in range(self.Ly):
-            for i in range(self.Lx-1):
-                site1,site2 = (i,j),(i+1,j)
-                self.sample_pair(site1,site2)
-    def sample_sweep(self):
-        first = self.rng.integers(low=0,high=1,endpoint=True)
-        if first==0:
-            self.sweep_row()
-            #self.sweep_col()
-        else:
-            self.sweep_col()
-            #self.sweep_row()
-    def sample_rand(self):
-        blocks = self.rng.permutation(self.blocks)
-        for i,j in blocks:
-            site1 = i,j
-            site2 = [(i,j+1),(i+1,j)][self.rgn.integers(low=0,high=1,endpoint=True)]
-            self.sample_pair(site1,site2)
+    def get_pairs(self,i,j):
+        bonds_map = {'l':((i,j),(i+1,j)),
+                     'd':((i,j),(i,j+1)),
+                     'r':((i,j+1),(i+1,j+1)),
+                     'u':((i+1,j),(i+1,j+1)),
+                     'x':((i,j),(i+1,j+1)),
+                     'y':((i,j+1),(i+1,j))}
+        bonds = []
+        order = 'ldru' 
+        for key in order:
+            bonds.append(bonds_map[key])
+        return bonds
+    def update_plq(self,i,j,cols,ftn,saved_rows):
+        ftn_plq = FermionTensorNetwork(cols,virtual=True).view_like_(ftn)
+        pairs = self.get_pairs(i,j) 
+        for site1,site2 in pairs:
+            ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+            i1,i2 = self.config[ix1],self.config[ix2]
+            if i1==i2: # continue
+                #print(i,j,site1,site2,ix1,ix2,'pass')
+                continue
+            i1_new,i2_new = self.new_pair(i1,i2)
+            ftn_pair = replace_sites(ftn_plq.copy(),(site1,site2),(i1_new,i2_new)) 
+            try:
+                py = ftn_pair.contract()**2
+            except (ValueError,IndexError):
+                py = 0.
+            # test
+            #config_ = self.config.copy()
+            #config_[ix1] = i1_new
+            #config_[ix2] = i2_new
+            #fpeps_ = self.amplitude_factory.psi.copy()
+            #for i_ in range(self.Lx):
+            #    for j_ in range(self.Ly):
+            #        fpeps_.add_tensor(get_bra_tsr(fpeps_,config_[self.flatten(i_,j_)],i_,j_))
+            #try:
+            #    py_ = fpeps_.contract()**2
+            #except (ValueError,IndexError):
+            #    py_ = 0.
+            #print(i,j,site1,site2,ix1,ix2,i1_new,i2_new,self.config)
+            #print(py,py_)
+            #if np.fabs(py-py_)>PRECISION:
+            #    raise ValueError
+            # test
+            try:
+                acceptance = py / self.px
+            except ZeroDivisionError:
+                acceptance = 1. if py > self.px else 0.
+            if self.rng.uniform() < acceptance: # accept, update px & config & env_m
+                #print('acc')
+                self.px = py
+                self.config[ix1] = i1_new
+                self.config[ix2] = i2_new
+                ftn_plq = replace_sites(ftn_plq,(site1,site2),(i1_new,i2_new))
+                ftn = replace_sites(ftn,(site1,site2),(i1_new,i2_new))
+                saved_rows = replace_sites(saved_rows,(site1,site2),(i1_new,i2_new))
+        return ftn,saved_rows
+    def sweep_col_forward(self,i,rows):
+        self.config = list(self.config)
+        ftn = FermionTensorNetwork(rows,virtual=False).view_like_(rows[0])
+        saved_rows = ftn.copy()
+        ftn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
+        renvs = get_all_renvs(ftn.copy(),jmin=2)
+        first_col = ftn.col_tag(0)
+        for j in range(self.Ly-1): # 0,...,Ly-2
+            tags = first_col,ftn.col_tag(j),ftn.col_tag(j+1)
+            cols = [ftn.select(tags,which='any').copy()]
+            if j<self.Ly-2:
+                cols.append(renvs[j+2])
+            ftn,saved_rows = self.update_plq(i,j,cols,ftn,saved_rows) 
+            # update new lenv
+            if j<self.Ly-2:
+                tags = first_col if j==0 else (first_col,ftn.col_tag(j))
+                ftn ^= first_col,ftn.col_tag(j) 
+        self.config = tuple(self.config)
+        return saved_rows
+    def sweep_col_backward(self,i,rows):
+        self.config = list(self.config)
+        ftn = FermionTensorNetwork(rows,virtual=False).view_like_(rows[0])
+        saved_rows = ftn.copy()
+        ftn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
+        lenvs = get_all_lenvs(ftn.copy(),jmax=self.Ly-3)
+        last_col = ftn.col_tag(self.Ly-1)
+        for j in range(self.Ly-1,0,-1): # Ly-1,...,1
+            cols = []
+            if j>1: 
+                cols.append(lenvs[j-2])
+            tags = ftn.col_tag(j-1),ftn.col_tag(j),last_col
+            cols.append(ftn.select(tags,which='any').copy())
+            ftn,saved_rows = self.update_plq(i,j-1,cols,ftn,saved_rows) 
+            # update new renv
+            if j>1:
+                tags = last_col if j==ftn.Ly-1 else (ftn.col_tag(j),last_col)
+                ftn ^= tags 
+        self.config = tuple(self.config)
+        return saved_rows
+    def sweep_row_forward(self):
+        fpeps = self.amplitude_factory.psi
+        compress_opts = self.amplitude_factory.contract_opts
+        cache_bot = self.amplitude_factory.cache_bot
+        cache_top = self.amplitude_factory.cache_top
+        # can assume to have all opposite envs
+        #get_all_top_envs(fpeps,self.config,cache_top,imin=2,**compress_opts)
+        sweep_col = self.sweep_col_forward if self.sweep_col_dir == 1 else\
+                    self.sweep_col_backward
+
+        env_bot = None 
+        row1 = get_mid_env(0,fpeps,self.config)
+        for i in range(self.Lx-1):
+            rows = []
+            if i>0:
+                rows.append(env_bot)
+            row2 = get_mid_env(i+1,fpeps,self.config)
+            rows += [row1,row2]
+            if i<self.Lx-2:
+                rows.append(cache_top[self.config[(i+2)*self.Ly:]]) 
+            saved_rows = sweep_col(i,rows)
+            row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
+            row2_new = saved_rows.select(fpeps.row_tag(i+1),virtual=True)
+            # update new env_h
+            env_bot = get_bot_env(i,row1_new,env_bot,self.config,cache_bot,**compress_opts)
+            row1 = row2_new
+    def sweep_row_backward(self):
+        fpeps = self.amplitude_factory.psi
+        compress_opts = self.amplitude_factory.contract_opts
+        cache_bot = self.amplitude_factory.cache_bot
+        cache_top = self.amplitude_factory.cache_top
+        # can assume to have all opposite envs
+        #get_all_bot_envs(fpeps,self.config,cache_bot,imax=self.Lx-3,**compress_opts)
+        sweep_col = self.sweep_col_forward if self.sweep_col_dir == 1 else\
+                    self.sweep_col_backward
+
+        env_top = None 
+        row1 = get_mid_env(self.Lx-1,fpeps,self.config)
+        for i in range(self.Lx-1,0,-1):
+            rows = []
+            if i>1:
+                rows.append(cache_bot[self.config[:(i-1)*self.Ly]])
+            row2 = get_mid_env(i-1,fpeps,self.config)
+            rows += [row2,row1]
+            if i<self.Lx-1:
+                rows.append(env_top) 
+            saved_rows = sweep_col(i-1,rows)
+            row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
+            row2_new = saved_rows.select(fpeps.row_tag(i-1),virtual=True)
+            # update new env_h
+            env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,**compress_opts)
+            row1 = row2_new
     def sample(self):
-        if self.sweep:
-            self.sample_sweep()
+        self.sweep_col_dir = -1 # randomly choses the col sweep direction
+        #print(self.sweep_row_dir,self.sweep_col_dir)
+        if self.sweep_row_dir == 1:
+            self.sweep_row_forward()
         else:
-            self.sample_rand()
+            self.sweep_row_backward()
+        # setup to compute all opposite env for gradient
+        self.amplitude_factory.update_scheme(-self.sweep_row_dir) 
+
+        if self.alternate: # for burn in 
+            self.sweep_row_dir *= -1
+        else: # actual sampling 
+            self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler2D:
     def __init__(self,Lx,Ly,nelec,exact=False,seed=None):
@@ -640,7 +859,8 @@ class DenseSampler2D:
         self.burn_in = 0
         self.dense = True
         self.exact = exact 
-    def _set_amplitude_factory(self,amp_fac=None,config=None):
+        self.amplitude_factory = None
+    def initialize(self,config=None):
         pass
     def preprocess(self):
         self.compute_dense_prob()
@@ -657,11 +877,24 @@ class DenseSampler2D:
         plocal = np.array(plocal)
          
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
+        nonzeros = np.nonzero(ptotal)[0]
         n = np.sum(ptotal)
         ptotal /= n 
         self.p = ptotal
-        if RANK==0:
+        if RANK==SIZE-1:
             print('\tdense amplitude time=',time.time()-t0)
+
+        ntotal = len(nonzeros)
+        batchsize,remain = ntotal//SIZE,ntotal%SIZE
+        L = SIZE-remain
+        if RANK<L:
+            start = RANK*batchsize
+            stop = start+batchsize
+        else:
+            start = (batchsize+1)*RANK-L
+            stop = start+batchsize+1
+        self.nonzeros = nonzeros[start:stop]
+        self.amplitude_factory.update_scheme(0)
     def get_all_configs(self):
         if SYMMETRY=='u1':
             return self.get_all_configs_u1()
