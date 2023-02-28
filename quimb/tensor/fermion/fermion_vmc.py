@@ -4,10 +4,7 @@ import scipy.sparse.linalg as spla
 from scipy.optimize import line_search
 
 from quimb.utils import progbar as Progbar
-from .utils import (
-    load_ftn_from_disc,write_ftn_to_disc,
-    vec2psi,psi2vecs,
-)
+from .utils import load_ftn_from_disc,write_ftn_to_disc
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
@@ -47,9 +44,7 @@ class TNVMC: # stochastic sampling
 
         # parse wfn 
         self.amplitude_factory = amplitude_factory         
-        self.constructors = amplitude_factory.constructors 
-        self.skeleton = amplitude_factory.psi
-        self.x = self.psi2vec(self.skeleton)
+        self.x = self.amplitude_factory.get_x()
 
         # TODO: if need to condition, try making the element of psi-vec O(1)
 #        if conditioner == 'auto':
@@ -61,8 +56,7 @@ class TNVMC: # stochastic sampling
         self.conditioner = None
         if self.conditioner is not None:
             self.conditioner(self.x)
-            psi = self.vec2psi(self.x)
-            self.amplitude_factory._set_psi(psi)
+            psi = self.amplitude_factory.vec2psi(self.x,inplace=True)
 
         # parse gradient optimizer
         self.optimizer = optimizer
@@ -92,10 +86,6 @@ class TNVMC: # stochastic sampling
         # TODO: not sure how to do line search
         self.search_rate = search_rate 
         self.search_cond = search_cond
-    def psi2vec(self,psi):
-        return np.concatenate(psi2vecs(self.constructors,psi)) 
-    def vec2psi(self,x):
-        return vec2psi(self.constructors,x,psi=self.skeleton)
     def run(self,start,stop,tmpdir=None,
             rate_min=DEFAULT_RATE_MIN,
             rate_max=DEFAULT_RATE_MAX,
@@ -141,8 +131,7 @@ class TNVMC: # stochastic sampling
                     self.conditioner(self.x)
                 print('\tx norm=',np.linalg.norm(self.x))
             COMM.Bcast(self.x,root=0) 
-            psi = self.vec2psi(self.x)
-            self.amplitude_factory._set_psi(psi)
+            psi = self.amplitude_factory.update(self.x)
             if RANK==0:
                 if tmpdir is not None: # save psi to disc
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
@@ -250,7 +239,7 @@ class TNVMC: # stochastic sampling
             self.config = all_configs[ix]
             self.samples.append(self.config) 
             self.update_local(self.config)
-        if RANK==SIZE//2:
+        if RANK==SIZE-1:
             print('\texact sample time=',time.time()-t0)
         self.flocal = np.array(self.flocal)
     def sample_stochastic(self,energy_only=False): 
@@ -259,7 +248,7 @@ class TNVMC: # stochastic sampling
         COMM.Bcast(self.cix,root=0)
         self.cix = self.cix[0]
 
-        self.sampler.preprocess() 
+        self.sampler.preprocess(self.config) 
 
         self.samples = []
         self.flocal = dict()
@@ -351,6 +340,7 @@ class TNVMC: # stochastic sampling
         if self.vlocal is not None:
             # mean
             self.vlocal = np.array(self.vlocal)
+            #print(RANK,self.vlocal)
             self.vmean = compute_mean(self.vlocal,self.flocal,self.n)
             # var
             vsq_local = self.vlocal**2
@@ -411,8 +401,7 @@ class TNVMC: # stochastic sampling
         self.ncalls = 0
         g0 = self.g.copy()
         def H(x):
-            psi = self.vec2psi(self.x - x * self.num_step)
-            self.amplitude_factory._set_psi(psi)
+            self.amplitude_factory.vec2psi(self.x - x * self.num_step,inplace=True)
             if self.exact_sampling:
                 self.sampe_exact()
             else:

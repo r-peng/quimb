@@ -1,10 +1,9 @@
 import time,itertools,sys
 import numpy as np
 
-from pyblock3.algebra.fermion_ops import vaccum,creation,bonded_vaccum,H1
 from ..tensor_2d import PEPS
-from .utils import psi2vecs
-from .fermion_core import FermionTensor, FermionTensorNetwork, tensor_contract
+from .utils import psi2vecs,vec2psi
+from .fermion_core import FermionTensor, FermionTensorNetwork
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
 from .block_interface import Constructor
 from mpi4py import MPI
@@ -14,20 +13,25 @@ RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 SYMMETRY = 'u11' # sampler symmetry
-flat = True
-PRECISION = 1e-10
 
 # set tensor symmetry
 this = sys.modules[__name__]
-def set_symmetry(symmetry):
-    this.h1 = H1(symmetry=symmetry,flat=flat)
-    this.cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
-    this.cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
-    this.vac = vaccum(n=1,symmetry=symmetry,flat=flat)
-    this.occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
-    this.occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
-    this.occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
-    this.state_map = [vac,occ_a,occ_b,occ_db]
+def set_options(symmetry='u1',flat=True):
+    from pyblock3.algebra.fermion_ops import vaccum,creation,H1
+    cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
+    cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+    vac = vaccum(n=1,symmetry=symmetry,flat=flat)
+    occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
+    occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
+    occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
+    this.data_map = {0:vac,1:occ_a,2:occ_b,3:occ_db,
+                     'cre_a':cre_a,
+                     'cre_b':cre_b,
+                     'ann_a':cre_a.dagger,
+                     'ann_b':cre_b.dagger,
+                     'h1':H1(symmetry=symmetry,flat=flat)}
+    this.flat = flat
+    return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
 
@@ -48,6 +52,7 @@ def get_vaccum(Lx,Ly):
     this function only works for half filled case with U1 symmetry
     Note energy of this wfn is 0
     """
+    from pyblock3.algebra.fermion_ops import bonded_vaccum
     tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1)
     ftn = FermionTensorNetwork([])
     ind_to_pattern_map = dict()
@@ -97,11 +102,12 @@ def get_product_state(Lx,Ly,spin_map):
     return fpeps
 def get_constructors_2d(fpeps):
     constructors = [None] * (fpeps.Lx * fpeps.Ly)
+    
     for i,j in itertools.product(range(fpeps.Lx),range(fpeps.Ly)):
         data = fpeps[fpeps.site_tag(i,j)].data
         bond_infos = [data.get_bond_info(ax,flip=False) \
                       for ax in range(data.ndim)]
-        cons = Constructor.from_bond_infos(bond_infos,data.pattern)
+        cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=this.flat)
         dq = data.dq
         size = cons.vector_size(dq)
         ix = flatten(i,j,fpeps.Ly)
@@ -114,7 +120,7 @@ def get_constructors_2d(fpeps):
 def get_bra_tsr(fpeps,ci,i,j):
     inds = fpeps.site_ind(i,j),
     tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
-    data = state_map[ci].dagger
+    data = data_map[ci].dagger
     return FermionTensor(data=data,inds=inds,tags=tags)
 def get_mid_env(i,fpeps,config):
     row = fpeps.select(fpeps.row_tag(i)).copy()
@@ -219,11 +225,13 @@ def site_grad(ftn_plq,i,j):
     ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
     tid = ket.get_fermion_info()[0]
     ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
-    try:
-        g = ftn_plq.contract(output_inds=ket.inds[::-1])
-        return g.data.dagger 
-    except (ValueError,IndexError):
-        return None
+    #try:
+    #    g = ftn_plq.contract(output_inds=ket.inds[::-1])
+    #    return g.data.dagger 
+    #except (ValueError,IndexError):
+    #    return None
+    g = ftn_plq.contract(output_inds=ket.inds[::-1])
+    return g.data.dagger 
 def compute_fpeps_parity(fs,start,stop):
     if start==stop:
         return 0
@@ -231,25 +239,40 @@ def compute_fpeps_parity(fs,start,stop):
     tsrs = [fs.tensor_order[tid][0] for tid in tids] 
     return sum([tsr.parity for tsr in tsrs]) % 2
 class AmplitudeFactory2D:
-    def __init__(self,psi=None,x_bsz=2,y_bsz=2,**contract_opts):
+    def __init__(self,psi,x_bsz=2,y_bsz=2,**contract_opts):
         self.contract_opts=contract_opts
         self.x_bsz = x_bsz
         self.y_bsz = y_bsz
-        if psi is not None:
-            self._set_psi(psi)
-    def _set_psi(self,psi):
-        self.Lx,self.Ly = psi.Lx,psi.Ly
-        self.constructors = get_constructors_2d(psi)
-        self.psi = psi.reorder(direction='row',inplace=True)
-        self.psi.add_tag('KET')
 
+        self.Lx,self.Ly = psi.Lx,psi.Ly
+        psi.reorder(direction='row',inplace=True)
+        psi.add_tag('KET')
+        self.constructors = get_constructors_2d(psi)
+
+        self._set_psi(psi) # current state stored in self.psi
+        self.parity_cum = self.get_parity_cum()
+    def get_parity_cum(self):
         parity = []
         fs = self.psi.fermion_space
         for i in range(1,self.Lx): # only need parity of row 1,...,Lx-1
             start,stop = i*self.Ly,(i+1)*self.Ly
             parity.append(compute_fpeps_parity(fs,start,stop))
-        self.parity_cum = np.cumsum(np.array(parity[::-1]))
-
+        return np.cumsum(np.array(parity[::-1]))
+    def get_x(self):
+        return self._psi2vec()
+    def update(self,x):
+        psi = self._vec2psi(x,inplace=True)
+        self._set_psi(psi) 
+        return psi
+    def _psi2vec(self,psi=None):
+        psi = self.psi if psi is None else psi
+        return np.concatenate(psi2vecs(self.constructors,psi)) 
+    def _vec2psi(self,x,inplace=True):
+        psi = self.psi if inplace else self.psi.copy()
+        psi = vec2psi(self.constructors,x,psi=psi)
+        return psi
+    def _set_psi(self,psi):
+        self.psi = psi
         self.store = dict()
         self.store_grad = dict()
 
@@ -258,6 +281,10 @@ class AmplitudeFactory2D:
         self.compute_bot = True
         self.compute_top = True
         return
+    def flatten(self,i,j):
+        return flatten(i,j,self.Ly)
+    def flat2site(self,ix):
+        return flat2site(ix,self.Lx,self.Ly)
     def update_scheme(self,benv_dir):
         if benv_dir == 1:
             self.compute_bot = True
@@ -305,14 +332,16 @@ class AmplitudeFactory2D:
             self.unsigned_cx = 0.
         return self.unsigned_cx
     def amplitude(self,config):
-        self.unsigned_ampplitude(config)
+        if config in self.store:
+            return self.store[config]
+        self.unsigned_amplitude(config)
         sign = (-1) ** self.compute_config_parity(config)
         cx = self.unsigned_cx * sign 
         self.store[config] = cx 
         return cx
     def _amplitude(self,fpeps,config):
         for ix,ci in reversed(list(enumerate(config))):
-            i,j = flat2site(ix,self.Lx,self.Ly)
+            i,j = self.flat2site(ix)
             fpeps.add_tensor(get_bra_tsr(fpeps,ci,i,j))
         try:
             cx = fpeps.contract()
@@ -360,10 +389,11 @@ class AmplitudeFactory2D:
         plq = self.get_all_plqs(config)
         # amplitude
         ftn_plq = plq[0,0].copy()
-        try:
-            self.unsigned_cx = ftn_plq.contract()
-        except (IndexError,ValueError):
-            self.unsigned_cx = 0.
+        #try:
+        #    self.unsigned_cx = ftn_plq.contract()
+        #except (IndexError,ValueError):
+        #    self.unsigned_cx = 0.
+        self.unsigned_cx = ftn_plq.contract()
         # gradient
         gx = dict()
         for i0,j0 in plq:
@@ -406,6 +436,7 @@ class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
+        self.h1 = data_map['h1']
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def hop_coeff(self,site1,site2):
@@ -419,7 +450,7 @@ class Hubbard2D:
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
             ftn_plq[ftn_plq.site_tag(*site),'BRA'].reindex_({kix:bix})
-        ftn_plq.add_tensor(FermionTensor(h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
+        ftn_plq.add_tensor(FermionTensor(self.h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
         try:
             return self.hop_coeff(site1,site2) * ftn_plq.contract()
         except (ValueError,IndexError):
@@ -446,6 +477,7 @@ class Hubbard2D:
                     j0 -= 1
                 ftn_plq = plq[i0,j0]
                 e += self.hop(ftn_plq.copy(),config,site1,site2)
+        amplitude_factory.plq = None
         return e/cx
     def compute_local_energy(self,config,amplitude_factory):
         e = self.nn(config,amplitude_factory) 
@@ -473,147 +505,6 @@ class PN2D(Hubbard2D):
 ####################################################################################
 # sampler 
 ####################################################################################
-#class ExchangeSampler2D:
-#    def __init__(self,Lx,Ly,nelec,sweep=True,seed=None,burn_in=0):
-#        self.Lx = Lx
-#        self.Ly = Ly
-#        self.nelec = nelec 
-#        self.nsite = self.Lx * self.Ly
-#
-#        self.sweep = sweep 
-#        self.blocks = [(i,j) for i in range(self.Lx-1) for j in range(self.Ly-1)] 
-#
-#        self.rng = np.random.default_rng(seed)
-#        self.exact = False
-#        self.dense = False
-#        self.burn_in = burn_in 
-#    def _set_amplitude_factory(self,amplitude_factory,config):
-#        self.amplitude_factory = amplitude_factory
-#        self.amplitude_factory.update_scheme(0)
-#        self.prob_fn = self.amplitude_factory.prob
-#        if config is None:
-#            self.config = self.get_rand_config()
-#        else:
-#            assert len(config)==self.nsite
-#            self.config = config
-#        self.px = self.prob_fn(self.config)
-#        #print(f'initialize nonvanishing config. Start at {self.config},{self.px}.')
-#        cnt = 0
-#        maxcnt = 5
-#        while self.px < PRECISION:
-#            self.config,self.px = self.sample()
-#            cnt += 1
-#            if cnt > maxcnt:
-#                raise ValueError(f'failes to generate nonvanishing config. Final at {self.config},{self.px}.') 
-#    def preprocess(self):
-#        self._burn_in()
-#    def _burn_in(self,batchsize=None):
-#        batchsize = self.burn_in if batchsize is None else batchsize
-#        if batchsize==0:
-#            return
-#        t0 = time.time()
-#        for n in range(batchsize):
-#            self.config,self.omega = self.sample()
-#        if RANK==SIZE-1:
-#            print('\tburn in time=',time.time()-t0)
-#            print('\tsaved amplitudes=',len(self.amplitude_factory.store))
-#        #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
-#    def flatten(self,i,j):
-#        return flatten(i,j,self.Ly)
-#    def flat2site(self,ix):
-#        return flat2site(ix,self.Lx,self.Ly)
-#    def get_rand_config(self):
-#        if SYMMETRY=='u1':
-#            return self.get_rand_config_u1()
-#        elif SYMMETRY=='u11':
-#            return self.get_rand_config_u11()
-#        else:
-#            raise NotImplementedError
-#    def get_rand_config_u11(self):
-#        assert isinstance(self.nelec,tuple)
-#        config = np.zeros((self.nsite,2),dtype=int)
-#        sites = np.array(range(self.nsite),dtype=int)
-#        for spin in (0,1):
-#            occ = self.rng.choice(sites,size=self.nelec[spin],
-#                                  replace=False,shuffle=False)
-#            for ix in occ:
-#                config[ix,spin] = 1
-#        config = [config_map[tuple(config[i,:])] for i in range(self.nsite)]
-#        return tuple(config)
-#    def get_rand_config_u1(self):
-#        if isinstance(self.nelec,tuple):
-#            self.nelec = sum(self.nelec)
-#        sites = np.array(range(self.nsite),dtype=int)
-#        occ = self.rng.choice(sites,size=self.nelec,replace=False,shuffle=False)
-#        for ix in occ:
-#            config[ix] = 1
-#        configa,configb = config[:self.nsite],config[self.nsite:]
-#        config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
-#        return tuple(config)
-#    def new_pair(self,i1,i2):
-#        if SYMMETRY=='u11':
-#            return self.new_pair_u11(i1,i2)
-#        else:
-#            raise NotImplementedError
-#    def new_pair_u11(self,i1,i2):
-#        n = abs(pn_map[i1]-pn_map[i2])
-#        if n==1:
-#            i1_new,i2_new = i2,i1
-#        else:
-#            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
-#            i1_new,i2_new = self.rng.choice(choices)
-#        return i1_new,i2_new 
-#    def new_pair_u1(self,i1,i2):
-#        return
-#    def sample_pair(self,site1,site2):
-#        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-#        i1,i2 = self.config[ix1],self.config[ix2]
-#        if i1==i2:
-#            return 
-#        i1_new,i2_new = self.new_pair(i1,i2)
-#        config_new = list(self.config)
-#        config_new[ix1] = i1_new
-#        config_new[ix2] = i2_new
-#        config_new = tuple(config_new)
-#        py = self.prob_fn(config_new)
-#        try:
-#            acceptance = py / self.px
-#        except ZeroDivisionError:
-#            acceptance = 1. if py > self.px else 0.
-#        #print(py,self.px,acceptance)
-#        if self.rng.uniform() < acceptance:
-#            self.config = config_new
-#            self.px = py
-#    def sweep_row(self):
-#        for i in range(self.Lx):
-#            for j in range(self.Ly-1):
-#                site1,site2 = (i,j),(i,j+1)
-#                self.sample_pair(site1,site2)
-#    def sweep_col(self):
-#        for j in range(self.Ly):
-#            for i in range(self.Lx-1):
-#                site1,site2 = (i,j),(i+1,j)
-#                self.sample_pair(site1,site2)
-#    def sample_sweep(self):
-#        first = self.rng.integers(low=0,high=1,endpoint=True)
-#        if first==0:
-#            self.sweep_row()
-#            self.sweep_col()
-#        else:
-#            self.sweep_col()
-#            self.sweep_row()
-#    def sample_rand(self):
-#        blocks = self.rng.permutation(self.blocks)
-#        for i,j in blocks:
-#            site1 = i,j
-#            site2 = [(i,j+1),(i+1,j)][self.rgn.integers(low=0,high=1,endpoint=True)]
-#            self.sample_pair(site1,site2)
-#    def sample(self):
-#        if self.sweep:
-#            self.sample_sweep()
-#        else:
-#            self.sample_rand()
-#        return self.config,self.px
 class ExchangeSampler2D:
     def __init__(self,Lx,Ly,nelec,seed=None,burn_in=0):
         self.Lx = Lx
@@ -626,8 +517,8 @@ class ExchangeSampler2D:
         self.dense = False
         self.burn_in = burn_in 
         self.amplitude_factory = None
-        self.alternate = None
-    def initialize(self,config):
+        self.alternate = False # True if autodiff else False
+    def initialize(self,config,thresh=1e-10):
         # randomly choses the initial sweep direction
         self.sweep_row_dir = self.rng.choice([-1,1]) 
         # setup to compute all opposite envs for initial sweep
@@ -635,21 +526,23 @@ class ExchangeSampler2D:
         self.px = self.amplitude_factory.prob(config)
         self.config = config
         # force to initialize with a better config
-        if self.px < PRECISION:
+        if self.px < thresh:
             raise ValueError 
-    def preprocess(self):
-        self._burn_in()
-    def _burn_in(self,batchsize=None):
-        self.alternate = True
+    def preprocess(self,config):
+        self._burn_in(config)
+    def _burn_in(self,config,batchsize=None):
         batchsize = self.burn_in if batchsize is None else batchsize
+        self.initialize(config)
         if batchsize==0:
             return
         t0 = time.time()
+        _alternate = self.alternate 
+        self.alternate = True # always do alternate sweep in burn in 
         for n in range(batchsize):
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
-        self.alternate = False 
+        self.alternate = _alternate
         #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
@@ -820,7 +713,6 @@ class ExchangeSampler2D:
             row1 = row2_new
     def sample(self):
         self.sweep_col_dir = -1 # randomly choses the col sweep direction
-        #print(self.sweep_row_dir,self.sweep_col_dir)
         if self.sweep_row_dir == 1:
             self.sweep_row_forward()
         else:
@@ -834,7 +726,7 @@ class ExchangeSampler2D:
             self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler2D:
-    def __init__(self,Lx,Ly,nelec,exact=False,seed=None):
+    def __init__(self,Lx,Ly,nelec,exact=False,seed=None,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
         self.nelec = nelec 
@@ -860,6 +752,7 @@ class DenseSampler2D:
         self.dense = True
         self.exact = exact 
         self.amplitude_factory = None
+        self.thresh = thresh
     def initialize(self,config=None):
         pass
     def preprocess(self):
@@ -877,7 +770,10 @@ class DenseSampler2D:
         plocal = np.array(plocal)
          
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
-        nonzeros = np.nonzero(ptotal)[0]
+        nonzeros = []
+        for ix,px in enumerate(ptotal):
+            if px > self.thresh:
+                nonzeros.append(ix) 
         n = np.sum(ptotal)
         ptotal /= n 
         self.p = ptotal
