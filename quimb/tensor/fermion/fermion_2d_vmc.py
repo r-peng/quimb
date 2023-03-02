@@ -225,11 +225,6 @@ def site_grad(ftn_plq,i,j):
     ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
     tid = ket.get_fermion_info()[0]
     ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
-    #try:
-    #    g = ftn_plq.contract(output_inds=ket.inds[::-1])
-    #    return g.data.dagger 
-    #except (ValueError,IndexError):
-    #    return None
     g = ftn_plq.contract(output_inds=ket.inds[::-1])
     return g.data.dagger 
 def compute_fpeps_parity(fs,start,stop):
@@ -239,11 +234,8 @@ def compute_fpeps_parity(fs,start,stop):
     tsrs = [fs.tensor_order[tid][0] for tid in tids] 
     return sum([tsr.parity for tsr in tsrs]) % 2
 class AmplitudeFactory2D:
-    def __init__(self,psi,x_bsz=2,y_bsz=2,**contract_opts):
+    def __init__(self,psi,**contract_opts):
         self.contract_opts=contract_opts
-        self.x_bsz = x_bsz
-        self.y_bsz = y_bsz
-
         self.Lx,self.Ly = psi.Lx,psi.Ly
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
@@ -298,6 +290,16 @@ class AmplitudeFactory2D:
             self.compute_bot = True 
         else:
             raise NotImplementedError
+    def get_all_benvs(self,config,x_bsz=1):
+        env_bot = None
+        env_top = None
+        if self.compute_bot: 
+            env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-1-x_bsz,
+                                       **self.contract_opts)
+        if self.compute_top:
+            env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=x_bsz,
+                                       **self.contract_opts)
+        return env_bot,env_top
     def compute_config_parity(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
@@ -320,22 +322,16 @@ class AmplitudeFactory2D:
             return self.store[config]
         if self.compute_bot and self.compute_top:
             raise ValueError
+        env_bot,env_top = self.get_all_benvs(config,x_bsz=1)
+        if env_bot is None and env_top is None:
+            unsigned_cx = 0.
+            self.store[config] = unsigned_cx
+            return unsigned_cx  
         if self.compute_bot: 
             row = get_mid_env(self.Lx-1,self.psi,config)
-            env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-2,
-                                       **self.contract_opts)
-            if env_bot is None:
-                unsigned_cx = 0.
-                self.store[config] = unsigned_cx
-                return unsigned_cx  
             ftn = FermionTensorNetwork([env_bot,row],virtual=False)
         if self.compute_top:
             row = get_mid_env(0,self.psi,config)
-            env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=1,**self.contract_opts)
-            if env_top is None:
-                unsigned_cx = 0.
-                self.store[config] = unsigned_cx
-                return unsigned_cx 
             ftn = FermionTensorNetwork([row,env_top],virtual=False)
         try:
             unsigned_cx = ftn.contract()
@@ -356,68 +352,64 @@ class AmplitudeFactory2D:
         except (ValueError,IndexError):
             cx = 0.
         return cx 
-    def get_all_plqs(self,config):
+    def get_plq_from_benvs(self,config,x_bsz,y_bsz):
         #if self.compute_bot and self.compute_top:
         #    raise ValueError
-        if self.compute_bot: 
-            get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-1-self.x_bsz,
-                             **self.contract_opts)
-        if self.compute_top:
-            get_all_top_envs(self.psi,config,self.cache_top,imin=self.x_bsz,
-                             **self.contract_opts)
         first_col = self.psi.col_tag(0)
-
-        imax = self.Lx-self.x_bsz
-        jmax = self.Ly-self.y_bsz
-        plq = dict()
+        imax = self.Lx-x_bsz
+        jmax = self.Ly-y_bsz
+        plq = {'bsz':(x_bsz,y_bsz)}
         for i in range(imax+1):
             ls = []
             if i>0:
                 ls.append(self.cache_bot[config[:i*self.Ly]])
-            ls += [get_mid_env(i+ix,self.psi,config) for ix in range(self.x_bsz)]
+            ls += [get_mid_env(i+ix,self.psi,config) for ix in range(x_bsz)]
             if i<imax:
-                ls.append(self.cache_top[config[(i+self.x_bsz)*self.Ly:]])
+                ls.append(self.cache_top[config[(i+x_bsz)*self.Ly:]])
             ftn = FermionTensorNetwork(ls,virtual=False).view_like_(self.psi)
             ftn.reorder('col',inplace=True)
-            renvs = get_all_renvs(ftn.copy(),jmin=self.y_bsz)
+            renvs = get_all_renvs(ftn.copy(),jmin=y_bsz)
             for j in range(jmax+1): 
-                tags = [first_col]+[ftn.col_tag(j+ix) for ix in range(self.y_bsz)]
+                tags = [first_col]+[ftn.col_tag(j+ix) for ix in range(y_bsz)]
                 cols = [ftn.select(tags,which='any').copy()]
                 if j<jmax:
-                    cols.append(renvs[j+self.y_bsz].copy())
+                    cols.append(renvs[j+y_bsz].copy())
                 plq[i,j] = FermionTensorNetwork(cols,virtual=True).view_like_(self.psi) 
                 if j<jmax: 
                     tags = first_col if j==0 else (first_col,ftn.col_tag(j))
                     ftn ^= tags 
         return plq
-    def grad(self,config):
+    def grad(self,config,plq=None):
+        # currently not called
+        raise NotImplementedError
         sign = self.compute_config_sign(config)
         if config in self.store_grad:
             unsigned_cx = self.store[config]
-            unsigned_gx = self.store_grad[config]
-            return sign * unsigned_cx, sign * unsigned_gx
-        plq = self.get_all_plqs(config)
-        # amplitude
-        ftn_plq = plq[0,0].copy()
-        #try:
-        #    unsigned_cx = ftn_plq.contract()
-        #except (IndexError,ValueError):
-        #    unsigned_cx = 0.
-        unsigned_cx = ftn_plq.contract()
-        self.store[config] = unsigned_cx
+            vx = self.store_grad[config]
+            return sign * unsigned_cx, vx
+        if plq is None:
+            self.get_all_benvs(config,x_bsz=1)
+            plq = self.get_plq_from_benvs(config,x_bsz=1,y_bsz=1)
+        unsigned_cx,vx,_ =  get_grad_from_plqs(config,plq)
+        return unsigned_cx * sign, vx
+    def get_grad_from_plq(self,config,plq):
         # gradient
-        gx = dict()
+        vx = dict()
+        cx = dict()
+        x_bsz,y_bsz = plq.pop('bsz')
         for i0,j0 in plq:
-            ftn_plq = plq[i0,j0]
-            for i in range(i0,i0+self.x_bsz):
-                for j in range(j0,j0+self.y_bsz):
-                    if (i,j) in gx:
+            ftn_plq = plq[i0,j0] 
+            cx[i0,j0] = ftn_plq.copy().contract()
+            for i in range(i0,i0+x_bsz):
+                for j in range(j0,j0+y_bsz):
+                    if (i,j) in vx:
                         continue
-                    gx[i,j] = site_grad(ftn_plq.copy(),i,j) 
-        self.plq = plq
-        unsigned_gx = np.concatenate(psi2vecs(self.constructors,gx)) 
-        self.store_grad[config] = unsigned_gx
-        return unsigned_cx * sign, unsigned_gx * sign
+                    vx[i,j] = site_grad(ftn_plq.copy(),i,j) / cx[i0,j0] 
+        vx = np.concatenate(psi2vecs(self.constructors,vx)) 
+        unsigned_cx = sum(cx.values()) / len(cx)
+        self.store[config] = unsigned_cx
+        self.store_grad[config] = vx
+        return unsigned_cx, vx, cx
     def prob(self, config):
         """Calculate the probability of a configuration.
         """
@@ -447,67 +439,55 @@ class Hubbard2D:
         return flatten(i,j,self.Ly)        
     def hop_coeff(self,site1,site2):
         return -self.t
-    def hop(self,ftn_plq,config,site1,site2):
+    def hop(self,ftn_plq,config,site1,site2,cx=None):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
         if i1==i2: # no hopping possible
             return 0.
-        cx = ftn_plq.copy().contract()
+        cx = ftn_plq.copy().contract() if cx is None else cx
         kixs = [ftn_plq.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
             ftn_plq[ftn_plq.site_tag(*site),'BRA'].reindex_({kix:bix})
         ftn_plq.add_tensor(FermionTensor(self.h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
         try:
-            return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx
+            return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx 
         except (ValueError,IndexError):
             return 0.
-    def nn(self,config,amplitude_factory):
-        plq = amplitude_factory.plq 
+    def nnh(self,config,plq,inplace=True,cx=None):
         e = 0.
         # all horizontal bonds
         for i in range(self.Lx):
             for j in range(self.Ly-1):
                 site1,site2 = (i,j),(i,j+1)
-                i0,j0 = i,j
-                if i0==self.Lx-1:
-                    i0 -= 1
-                ftn_plq = plq[i0,j0]
-                e += self.hop(ftn_plq.copy(),config,site1,site2)
+                ftn_plq = plq[i,j] if inplace else plq[i,j].copy()
+                cx_ij = None if cx is None else cx[i,j]
+                e += self.hop(ftn_plq,config,site1,site2,cx_ij)
+        return e
+    def nnv(self,config,plq,inplace=True,cx=None):
         # all vertical bonds
+        e = 0.
         for i in range(self.Lx-1):
             for j in range(self.Ly):
                 site1,site2 = (i,j),(i+1,j)
-                i0,j0 = i,j
-                if j0==self.Ly-1:
-                    j0 -= 1
-                ftn_plq = plq[i0,j0]
-                e += self.hop(ftn_plq.copy(),config,site1,site2)
+                ftn_plq = plq[i,j] if inplace else plq[i,j].copy()
+                cx_ij = None if cx is None else cx[i,j]
+                e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
     def compute_local_energy(self,config,amplitude_factory):
-        e = self.nn(config,amplitude_factory) 
+        amplitude_factory.get_all_benvs(config,x_bsz=1) 
+        # form all (1,2),(2,1) plqs
+        plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
+        plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
+        # get gradient form plq12
+        _,vx,cx12 = amplitude_factory.get_grad_from_plq(config,plq12) 
+        # get h/v bonds
+        eh = self.nnh(config,plq12,inplace=True,cx=cx12) 
+        ev = self.nnv(config,plq21,inplace=True,cx=None) 
         # onsite terms
         config = np.array(config,dtype=int)
-        e += self.u*len(config[config==3])
-        amplitude_factory.plq = None
-        return e 
-class PN2D(Hubbard2D):
-    def __init__(self,Lx,Ly,spin='a'):
-        super().__init__(Lx,Ly,0.,0.)
-        self.spin = spin
-    def config_coupling(self,config):
-        config = np.array(config,dtype=int)
-
-        na = len(config[config==1])
-        nb = len(config[config==2])
-        ndb = len(config[config==3])
-        if self.spin=='a':
-            coeff = na + ndb 
-        elif self.spin=='b':
-            coeff = nb + ndb
-        else: # total pn
-            coeff = na + nb + ndb
-        return [None],[coeff]
+        eu = self.u*len(config[config==3])
+        return eh+ev+eu,vx 
 ####################################################################################
 # sampler 
 ####################################################################################

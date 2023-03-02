@@ -204,10 +204,9 @@ class TNVMC: # stochastic sampling
         #print('\tDIIS error vector norm=',np.linalg.norm(e))  
         print('\tDIIS extrapolated x norm=',np.linalg.norm(self.x))  
     def update_local(self,config):
-        cx,gx = self.amplitude_factory.grad(config)
-        self.vlocal.append(gx/cx)
-        ex = self.ham.compute_local_energy(config,self.amplitude_factory)
+        ex,vx = self.ham.compute_local_energy(config,self.amplitude_factory)
         self.elocal.append(ex)
+        self.vlocal.append(vx)
     def sample(self,energy_only=False):
         self.sampler.amplitude_factory = self.amplitude_factory
         if self.exact_sampling:

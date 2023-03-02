@@ -198,8 +198,8 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
         sign = self.compute_config_sign(config)
         if config in self.store_grad:
             unsigned_cx = self.store[config]
-            unsigned_gx = self.store_grad[config]
-            return sign * unsigned_cx, sign * unsigned_gx
+            vx = self.store_grad[config]
+            return sign * unsigned_cx, vx
         variables_ad = tree_map(self.to_variable,self.variables) # torch arrays
         self.psi_ad = self._inject(variables_ad,inplace=True) # ad cls with torch arrays
         imin = 1
@@ -210,20 +210,20 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
                 env_top = self.get_top_env(i,row,env_top)
             if env_top is None:
                 unsigned_cx = 0.
-                unsigned_gx = np.zeros(self.nparam) 
+                vx = np.zeros(self.nparam) 
                 self.store[config] = unsigned_cx
-                self.store_grad[config] = unsigned_gx
-                return unsigned_cx,unsigned_gx
+                self.store_grad[config] = vx
+                return unsigned_cx,vx
             row = self.get_mid_env(0,self.psi_ad,config)
             ftn = FermionTensorNetwork([row,env_top],virtual=True)
             try:
                 unsigned_cx = ftn.contract()
             except (ValueError,IndexError):
                 unsigned_cx = 0.
-                unsigned_gx = np.zeros(self.nparam) 
+                vx = np.zeros(self.nparam) 
                 self.store[config] = unsigned_cx
-                self.store_grad[config] = unsigned_gx
-                return unsigned_cx,unsigned_gx
+                self.store_grad[config] = vx
+                return unsigned_cx,vx
         unsigned_cx.backward()
         gx = [None] * self.nsite
         for ix1,blks in enumerate(variables_ad):
@@ -239,10 +239,10 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
                     gix1[ix2] = to_numpy(gt)
             gx[ix1] = gix1
         unsigned_cx = to_numpy(unsigned_cx)
-        unsigned_gx = self.vectorizer.pack(gx).copy()
+        vx = self.vectorizer.pack(gx).copy() / unsigned_cx
         self.store[config] = unsigned_cx
-        self.store_grad[config] = unsigned_gx
-        return unsigned_cx*sign,unsigned_gx*sign
+        self.store_grad[config] = vx
+        return unsigned_cx*sign,vx
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -298,6 +298,13 @@ class Hubbard2D(Hubbard2D):
                 ev += self.hop(config,site1,site2,unsigned_amp_fn,sign_fn=sign_fn)
         ev /= sign_cx * unsigned_cx
         return eh+ev
+    def compute_local_energy(self,config,amplitude_factory):
+        _,vx = amplitude_factory.grad(config)
+        ehop = self.nn(config,amplitude_factory)
+        # onsite terms
+        config = np.array(config,dtype=int)
+        eu = self.u*len(config[config==3])
+        return ehop+eu,vx 
 class ExchangeSampler2D(ExchangeSampler2D):
     def __init__(self,Lx,Ly,nelec,seed=None,burn_in=0,sweep=True):
         super().__init__(Lx,Ly,nelec,seed=seed,burn_in=burn_in)
