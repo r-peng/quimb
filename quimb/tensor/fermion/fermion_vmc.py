@@ -210,7 +210,6 @@ class TNVMC: # stochastic sampling
         self.elocal.append(ex)
     def sample(self,energy_only=False):
         self.sampler.amplitude_factory = self.amplitude_factory
-        self.sampler.initialize(self.config)
         if self.exact_sampling:
             self.sample_exact(energy_only=energy_only)
         else:

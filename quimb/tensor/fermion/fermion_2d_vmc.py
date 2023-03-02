@@ -251,6 +251,7 @@ class AmplitudeFactory2D:
 
         self._set_psi(psi) # current state stored in self.psi
         self.parity_cum = self.get_parity_cum()
+        self.sign = dict()
     def get_parity_cum(self):
         parity = []
         fs = self.psi.fermion_space
@@ -305,40 +306,47 @@ class AmplitudeFactory2D:
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
         return np.dot(parity[1:],parity_cum) % 2
+    def compute_config_sign(self,config):
+        if config in self.sign:
+            return self.sign[config]
+        sign = (-1) ** self.compute_config_parity(config)
+        self.sign[config] = sign
+        return sign
     def unsigned_amplitude(self,config):
         # should only be used to:
         # 1. compute dense probs
         # 2. initialize MH sampler
         if config in self.store:
             return self.store[config]
+        if self.compute_bot and self.compute_top:
+            raise ValueError
         if self.compute_bot: 
             row = get_mid_env(self.Lx-1,self.psi,config)
             env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-2,
                                        **self.contract_opts)
             if env_bot is None:
-                self.unsigned_cx = 0.
-                return self.unsigned_cx
+                unsigned_cx = 0.
+                self.store[config] = unsigned_cx
+                return unsigned_cx  
             ftn = FermionTensorNetwork([env_bot,row],virtual=False)
         if self.compute_top:
             row = get_mid_env(0,self.psi,config)
             env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=1,**self.contract_opts)
-            ftn = FermionTensorNetwork([row,env_top],virtual=False)
             if env_top is None:
-                self.unsigned_cx = 0.
-                return self.unsigned_cx
+                unsigned_cx = 0.
+                self.store[config] = unsigned_cx
+                return unsigned_cx 
+            ftn = FermionTensorNetwork([row,env_top],virtual=False)
         try:
-            self.unsigned_cx = ftn.contract()
+            unsigned_cx = ftn.contract()
         except (ValueError,IndexError):
-            self.unsigned_cx = 0.
-        return self.unsigned_cx
+            unsigned_cx = 0.
+        self.store[config] = unsigned_cx
+        return unsigned_cx
     def amplitude(self,config):
-        if config in self.store:
-            return self.store[config]
-        self.unsigned_amplitude(config)
-        sign = (-1) ** self.compute_config_parity(config)
-        cx = self.unsigned_cx * sign 
-        self.store[config] = cx 
-        return cx
+        unsigned_cx = self.unsigned_amplitude(config)
+        sign = self.compute_config_sign(config)
+        return unsigned_cx * sign 
     def _amplitude(self,fpeps,config):
         for ix,ci in reversed(list(enumerate(config))):
             i,j = self.flat2site(ix)
@@ -383,17 +391,20 @@ class AmplitudeFactory2D:
                     ftn ^= tags 
         return plq
     def grad(self,config):
+        sign = self.compute_config_sign(config)
         if config in self.store_grad:
-            return self.store[config],self.store_grad[config]
-
+            unsigned_cx = self.store[config]
+            unsigned_gx = self.store_grad[config]
+            return sign * unsigned_cx, sign * unsigned_gx
         plq = self.get_all_plqs(config)
         # amplitude
         ftn_plq = plq[0,0].copy()
         #try:
-        #    self.unsigned_cx = ftn_plq.contract()
+        #    unsigned_cx = ftn_plq.contract()
         #except (IndexError,ValueError):
-        #    self.unsigned_cx = 0.
-        self.unsigned_cx = ftn_plq.contract()
+        #    unsigned_cx = 0.
+        unsigned_cx = ftn_plq.contract()
+        self.store[config] = unsigned_cx
         # gradient
         gx = dict()
         for i0,j0 in plq:
@@ -404,14 +415,9 @@ class AmplitudeFactory2D:
                         continue
                     gx[i,j] = site_grad(ftn_plq.copy(),i,j) 
         self.plq = plq
-        self.unsigned_gx = np.concatenate(psi2vecs(self.constructors,gx)) 
-
-        sign = (-1) ** self.compute_config_parity(config)
-        cx = self.unsigned_cx * sign 
-        gx = self.unsigned_gx * sign
-        self.store[config] = cx
-        self.store_grad[config] = gx
-        return cx,gx 
+        unsigned_gx = np.concatenate(psi2vecs(self.constructors,gx)) 
+        self.store_grad[config] = unsigned_gx
+        return unsigned_cx * sign, unsigned_gx * sign
     def prob(self, config):
         """Calculate the probability of a configuration.
         """
@@ -446,18 +452,18 @@ class Hubbard2D:
         i1,i2 = config[ix1],config[ix2] 
         if i1==i2: # no hopping possible
             return 0.
+        cx = ftn_plq.copy().contract()
         kixs = [ftn_plq.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
             ftn_plq[ftn_plq.site_tag(*site),'BRA'].reindex_({kix:bix})
         ftn_plq.add_tensor(FermionTensor(self.h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
         try:
-            return self.hop_coeff(site1,site2) * ftn_plq.contract()
+            return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx
         except (ValueError,IndexError):
             return 0.
     def nn(self,config,amplitude_factory):
         plq = amplitude_factory.plq 
-        cx = amplitude_factory.unsigned_cx
         e = 0.
         # all horizontal bonds
         for i in range(self.Lx):
@@ -477,13 +483,13 @@ class Hubbard2D:
                     j0 -= 1
                 ftn_plq = plq[i0,j0]
                 e += self.hop(ftn_plq.copy(),config,site1,site2)
-        amplitude_factory.plq = None
-        return e/cx
+        return e
     def compute_local_energy(self,config,amplitude_factory):
         e = self.nn(config,amplitude_factory) 
         # onsite terms
         config = np.array(config,dtype=int)
         e += self.u*len(config[config==3])
+        amplitude_factory.plq = None
         return e 
 class PN2D(Hubbard2D):
     def __init__(self,Lx,Ly,spin='a'):

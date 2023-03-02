@@ -73,30 +73,17 @@ ar.register_function('pyblock3','to_numpy',lambda x:x)
 # amplitude fxns 
 ####################################################################################
 from .fermion_2d_vmc import (
-    pn_map,
+    RANK,pn_map,
     get_mid_env,
     contract_mid_env,
-    get_top_env,
-    get_all_top_env, 
+    #get_top_env,
+    get_all_top_envs, 
     compute_fpeps_parity,
     AmplitudeFactory2D,
     ExchangeSampler2D,DenseSampler2D,
     Hubbard2D,
 )
 from .fermion_core import FermionTensor, FermionTensorNetwork
-def contract_top_down(fpeps,**compress_opts):
-    # form top env
-    fpeps = contract_mid_env(fpeps.Lx-1,fpeps)
-    if fpeps is None:
-        return fpeps
-    try:
-        for i in range(fpeps.Lx-2,-1,-1):
-            fpeps = contract_mid_env(i,fpeps)
-            if i>0:
-                fpeps.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,fpeps.Ly-1),**compress_opts)
-        return fpeps.contract()
-    except (ValueError,IndexError):
-        return None
 from ..optimize import contract_backend,tree_map,to_numpy,_VARIABLE_TAG,Vectorizer
 #######################################################################################
 # torch amplitude factory 
@@ -129,23 +116,20 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
 
         # initialize parameters
         self.variables = self._get_variables(self.psi_ad) # numpy arrays
-        self.variables_ad = tree_map(self.to_variable,self.variables) # torch arrays
-        self.psi_ad = self._inject(self.variables_ad,inplace=True) # ad cls with torch arrays
-
         self.vectorizer = Vectorizer(self.variables) 
         self.nparam = len(self.vectorizer.pack(self.variables))
+        self.sign = dict()
         self.store = dict()
         self.store_grad = dict()
         self.cache_top = dict()
+        self.compute_top = True
+        self.compute_bot = False
     def get_x(self):
         return self.vectorizer.pack(self.variables).copy() 
     def update(self,x):
         self.variables = self.vectorizer.unpack(vector=x) # numpy arrays
         self.psi_ad = self._inject(self.variables,inplace=True) # numpy arrays
         self.psi = self.convert_psi(self.psi_ad)
-
-        self.variables_ad = tree_map(self.to_variable,self.variables) # torch arrays
-        self.psi_ad = self._inject(self.variables_ad,inplace=True) # numpy arrays
         self.store = dict()
         self.store_grad = dict()
         self.cache_top = dict()
@@ -156,6 +140,8 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
         raise NotImplementedError
     def _set_psi(self):
         raise NotImplementedError
+    def update_scheme(self,benv_dir=None):
+        pass
     def _get_variables(self,psi):
         variables = [None] * self.nsite
         for ix in range(self.nsite):
@@ -182,55 +168,81 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
         return torch.tensor(x).to(self.device).requires_grad_()
     def to_constant(self, x):
         return torch.tensor(x).to(self.device)
-    def get_bra_tsr(self,ci,ix):
-        i,j = self.flat2site(ix)
+    def get_bra_tsr(self,ci,i,j):
         inds = self.psi.site_ind(i,j),
         tags = self.psi.site_tag(i,j),self.psi.row_tag(i),self.psi.col_tag(j),'BRA'
         data = self.state_map[ci].dagger 
         return FermionTensor(data=data,inds=inds,tags=tags)
-    def unsigned_amplitude(self,config):
-        if config in self.store:
-            return self.store[config]
-        env_prev = get_all_top_envs(self.psi,config,self.cache_top,imin=0,**self.contract_opts)
+    def get_mid_env(self,i,fpeps,config):
+        row = fpeps.select(fpeps.row_tag(i)).copy()
+        key = config[i*fpeps.Ly:(i+1)*fpeps.Ly]
+        # compute mid env for row i
+        for j in range(row.Ly-1,-1,-1):
+            row.add_tensor(self.get_bra_tsr(key[j],i,j),virtual=True)
+        return row
+    def get_top_env(self,i,row,env_prev):
+        row = contract_mid_env(i,row)
+        if i==row.Lx-1:
+            return row
+        if row is None:
+            return row
         if env_prev is None:
-            self.unsigned_cx = 0.
-        else:
-            try:
-                self.unsigned_cx = env_prev.contract()
-            except (ValueError,IndexError):
-                self.unsigned_cx = 0.
-        return self.unsigned_cx
+            return None
+        ftn = FermionTensorNetwork([row,env_prev],virtual=True).view_like_(row)
+        try:
+            ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,row.Ly-1),**self.contract_opts)
+        except (ValueError,IndexError):
+            ftn = None
+        return ftn 
     def grad(self,config):
+        sign = self.compute_config_sign(config)
         if config in self.store_grad:
-            return self.store[config],self.store_grad[config]
-        psi = self.psi_ad.copy()
-        for ix,ci in reversed(list(enumerate(config))):
-            psi.add_tensor(self.get_bra_tsr(ci,ix,use_torch=True))
+            unsigned_cx = self.store[config]
+            unsigned_gx = self.store_grad[config]
+            return sign * unsigned_cx, sign * unsigned_gx
+        variables_ad = tree_map(self.to_variable,self.variables) # torch arrays
+        self.psi_ad = self._inject(variables_ad,inplace=True) # ad cls with torch arrays
+        imin = 1
+        env_top = None
         with contract_backend('torch'): 
-            cx = contract_top_down(psi,**self.contract_opts)
-        if cx is None:
-            cx = 0. 
-            gx = np.zeros(self.nparam) 
-        else: 
-            cx.backward()
-            gx = [None] * self.nsite
-            for ix1,blks in enumerate(self.variables_ad):
-                gix1 = [None] * len(blks) 
-                for ix2,t in enumerate(blks):
-                    if t.grad is None:
-                        gix1[ix2] = np.zeros(t.shape)
-                    else:
-                        gt = t.grad
-                        mask = torch.isnan(gt)
-                        gt.masked_fill_(mask,0.)
-                        #gix1[ix2] = to_numpy(gt).conj()
-                        gix1[ix2] = to_numpy(gt)
-                gx[ix1] = gix1
-            cx = to_numpy(cx)
-            gx = self.vectorizer.pack(gx).copy()
-        self.store[config] = cx
-        self.store_grad[config] = gx
-        return cx,gx
+            for i in range(self.Lx-1,imin-1,-1):
+                row = self.get_mid_env(i,self.psi_ad,config)
+                env_top = self.get_top_env(i,row,env_top)
+            if env_top is None:
+                unsigned_cx = 0.
+                unsigned_gx = np.zeros(self.nparam) 
+                self.store[config] = unsigned_cx
+                self.store_grad[config] = unsigned_gx
+                return unsigned_cx,unsigned_gx
+            row = self.get_mid_env(0,self.psi_ad,config)
+            ftn = FermionTensorNetwork([row,env_top],virtual=True)
+            try:
+                unsigned_cx = ftn.contract()
+            except (ValueError,IndexError):
+                unsigned_cx = 0.
+                unsigned_gx = np.zeros(self.nparam) 
+                self.store[config] = unsigned_cx
+                self.store_grad[config] = unsigned_gx
+                return unsigned_cx,unsigned_gx
+        unsigned_cx.backward()
+        gx = [None] * self.nsite
+        for ix1,blks in enumerate(variables_ad):
+            gix1 = [None] * len(blks) 
+            for ix2,t in enumerate(blks):
+                if t.grad is None:
+                    gix1[ix2] = np.zeros(t.shape)
+                else:
+                    gt = t.grad
+                    mask = torch.isnan(gt)
+                    gt.masked_fill_(mask,0.)
+                    #gix1[ix2] = to_numpy(gt).conj()
+                    gix1[ix2] = to_numpy(gt)
+            gx[ix1] = gix1
+        unsigned_cx = to_numpy(unsigned_cx)
+        unsigned_gx = self.vectorizer.pack(gx).copy()
+        self.store[config] = unsigned_cx
+        self.store_grad[config] = unsigned_gx
+        return unsigned_cx*sign,unsigned_gx*sign
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -246,104 +258,46 @@ def hop(i1,i2):
         sign = i1-i2
         return [(0,3,sign),(3,0,sign)]
 class Hubbard2D(Hubbard2D):
-    def __init__(self,Lx,Ly,t,u):
-        super().__init__(Lx,Ly,t,u)
-        cre_a = data_map['cre_a']
-        cre_b = data_map['cre_b']
-        ann_a = data_map['ann_a']
-        ann_b = data_map['ann_b']
-        self.op_map = {(0,1):[(ann_a,cre_a,-1.)],(1,0):[(cre_a,ann_a,1.)],
-                       (0,2):[(ann_b,cre_b,-1.)],(2,0):[(cre_b,ann_b,1.)],
-                       (0,3):[(ann_a,cre_a,-1.),(ann_b,cre_b,-1.)],
-                       (3,0):[(cre_a,ann_a,1.), (cre_b,ann_b,1.)],
-                       (1,2):[(cre_a,ann_a,1.), (ann_b,cre_b,-1.)],
-                       (2,1):[(cre_b,ann_b,-1.),(ann_a,cre_a,1.)],
-                       (1,3):[(ann_b,cre_b,-1.)],(3,1):[(cre_b,ann_b,1.)],
-                       (2,3):[(ann_a,cre_a,-1.)],(3,2):[(cre_a,ann_a,1.)]}
-    def nnv(self,env_prev,fpeps,config,site1,site2,**compress_opts):
+    def hop(self,config,site1,site2,unsigned_amp_fn,sign_fn=None):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
         if i1==i2: # no hopping possible
             return 0.
         ex = 0.
-        imax = max([site[0] for site in (site1,site2)])
-        #print(site1,site2)
-        for op1,op2,sign in self.op_map[i1,i2]:
-            ftn = env_prev.copy()
-            for site,op in zip((site1,site2),(op1,op2)):
-                pix = fpeps.site_ind(*site)
-                tags = fpeps.row_tag(site[0]),fpeps.col_tag(site[1]),fpeps.site_tag(*site),'OP'
-                ftn.add_tensor(FermionTensor(data=op.copy(),inds=(pix+'*',pix),tags=tags)) 
-            #print(ftn)
-            try:
-                for i in range(imax,-1,-1):
-                    row = get_mid_env(i,fpeps,config) 
-                    if i==site1[0]:
-                        tsr = row[row.site_tag(*site1),'BRA']
-                        pix = row.site_ind(*site1)
-                        tsr.reindex_({pix:pix+'*'})
-                    if i==site2[0]:
-                        tsr = row[row.site_tag(*site2),'BRA']
-                        pix = row.site_ind(*site2)
-                        tsr.reindex_({pix:pix+'*'})
-                    ftn = FermionTensorNetwork([row,ftn],virtual=True).view_like_(fpeps)
-                    #print(ftn)
-                    ftn = contract_mid_env(i,ftn) 
-                    if ftn is None:
-                        break
-                    if i<self.Lx-1:
-                        ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,fpeps.Ly-1),
-                                                        **compress_opts) 
-                if ftn is not None:
-                    ex += sign * ftn.contract()
-            except (ValueError,IndexError):
-                continue 
-        #exit()
-        return ex * self.hop_coeff(site1,site2) 
-    def nnh(self,env_prev,fpeps,config,site1,site2,**compress_opts):
-        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-        i1,i2 = config[ix1],config[ix2] 
-        if i1==i2: # no hopping possible
-            return 0.
-        imax = site1[0]
-        ex = 0.
-        for i1_new,i2_new,sign in hop(i1,i2):
+        for i1_new,i2_new,hop_sign in hop(i1,i2):
             config_new = list(config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
-            benvs = get_top_envs(fpeps,config_new,env_prev=env_prev,imax=imax,imin=0,**compress_opts)
-            ftn = benvs[0]
-            if ftn is None:
-                continue
-            try:
-                ex += sign * self.hop_coeff(site1,site2) * ftn.contract()
-            except (ValueError,IndexError):
-                continue 
-        return ex  
+            config_new = tuple(config_new)
+            unsigned_cy = unsigned_amp_fn(config_new) 
+            sign_cy = 1. if sign_fn is None else sign_fn(config_new) 
+            ex += sign_cy * unsigned_cy * hop_sign
+        parity = sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2
+        return ex * self.hop_coeff(site1,site2) * (-1)**parity 
     def nn(self,config,amplitude_factory):
-        fpeps = amplitude_factory.psi
-        fs = fpeps.fermion_space
-        compress_opts = amplitude_factory.contract_opts
-        benvs = get_top_envs(fpeps,config,imax=self.Lx-1,imin=0,**compress_opts)
-        ftn = benvs[0]
-        cx = ftn.contract() # unsigned 
-        e = 0.
+        unsigned_cx = amplitude_factory.store[config]
+        sign_cx = amplitude_factory.sign[config]
+
+        unsigned_amp_fn = amplitude_factory.unsigned_amplitude
+        sign_fn = amplitude_factory.compute_config_sign
+
         # all horizontal bonds
         # adjacent, no sign in between
-        #for i in range(self.Lx):
-        #    env_prev = None if i==self.Lx-1 else benvs[i+1]
-        #    for j in range(self.Ly-1):
-        #        site1,site2 = (i,j),(i,j+1)
-        #        e += self.nnh(env_prev,fpeps,config,site1,site2,**compress_opts)
-        #        #print(site1,site2,self.hop(config,site1,site2))
+        eh = 0.
+        for i in range(self.Lx):
+            for j in range(self.Ly-1):
+                site1,site2 = (i,j),(i,j+1)
+                eh += self.hop(config,site1,site2,unsigned_amp_fn)
+        eh /= unsigned_cx
+       
         # all vertical bonds
+        ev = 0.
         for i in range(1,self.Lx):
-            env_prev = FermionTensorNetwork([]) if i==self.Lx-1 else benvs[i+1]
             for j in range(self.Ly):
                 site1,site2 = (i-1,j),(i,j)
-                e += self.nnv(env_prev,fpeps,config,site1,site2,**compress_opts)
-        #        #print(site1,site2,self.hop(config,site1,site2))
-        return e/cx
+                ev += self.hop(config,site1,site2,unsigned_amp_fn,sign_fn=sign_fn)
+        ev /= sign_cx * unsigned_cx
+        return eh+ev
 class ExchangeSampler2D(ExchangeSampler2D):
     def __init__(self,Lx,Ly,nelec,seed=None,burn_in=0,sweep=True):
         super().__init__(Lx,Ly,nelec,seed=seed,burn_in=burn_in)
