@@ -18,18 +18,34 @@ SYMMETRY = 'u11' # sampler symmetry
 this = sys.modules[__name__]
 def set_options(symmetry='u1',flat=True):
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
+    from pyblock3.algebra.fermion_encoding import get_state_map
+    from pyblock3.algebra.fermion import eye 
+    state_map = get_state_map(symmetry)
+    bond_info = {}
+    for ix,(qlab,_,sh) in state_map.items():
+        if qlab in bond_info:
+            continue
+        bond_info[qlab] = sh
+
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     vac = vaccum(n=1,symmetry=symmetry,flat=flat)
     occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
     occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
     occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
+
+    eye1 = eye(bond_info,flat=flat)
+    eye2 = np.tensordot(eye1,eye1,axes=([],[]))
+    eye2 = np.transpose(eye2,axes=(0,2,1,3))
+    #add = np.tensordot()
+    
     this.data_map = {0:vac,1:occ_a,2:occ_b,3:occ_db,
                      'cre_a':cre_a,
                      'cre_b':cre_b,
                      'ann_a':cre_a.dagger,
                      'ann_b':cre_b.dagger,
-                     'h1':H1(symmetry=symmetry,flat=flat)}
+                     'h1':H1(symmetry=symmetry,flat=flat),
+                     'eye1':eye1,'eye2':eye2}
     this.flat = flat
     return this.data_map
 pn_map = [0,1,1,2]
@@ -430,11 +446,14 @@ def hop(i1,i2):
     if ndiff==0:
         sign = i1-i2 
         return [(0,3,sign),(3,0,sign)]
+def hop_split(coeff):
+    h1 = data_map['h1']
+    eye = data_map['eye']
+    
 class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
-        self.h1 = data_map['h1']
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def hop_coeff(self,site1,site2):
@@ -444,12 +463,13 @@ class Hubbard2D:
         i1,i2 = config[ix1],config[ix2] 
         if i1==i2: # no hopping possible
             return 0.
+        h1 = data_map['h1']
         cx = ftn_plq.copy().contract() if cx is None else cx
         kixs = [ftn_plq.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
             ftn_plq[ftn_plq.site_tag(*site),'BRA'].reindex_({kix:bix})
-        ftn_plq.add_tensor(FermionTensor(self.h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
+        ftn_plq.add_tensor(FermionTensor(h1.copy(),inds=bixs+kixs,left_inds=bixs),virtual=True)
         try:
             return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx 
         except (ValueError,IndexError):
