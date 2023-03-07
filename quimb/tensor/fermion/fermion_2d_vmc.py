@@ -3,7 +3,7 @@ import numpy as np
 
 from ..tensor_2d import PEPS
 from .utils import psi2vecs,vec2psi
-from .fermion_core import FermionTensor, FermionTensorNetwork
+from .fermion_core import FermionTensor, FermionTensorNetwork, rand_uuid, tensor_contract
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
 from .block_interface import Constructor
 from mpi4py import MPI
@@ -18,34 +18,19 @@ SYMMETRY = 'u11' # sampler symmetry
 this = sys.modules[__name__]
 def set_options(symmetry='u1',flat=True):
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
-    from pyblock3.algebra.fermion_encoding import get_state_map
-    from pyblock3.algebra.fermion import eye 
-    state_map = get_state_map(symmetry)
-    bond_info = {}
-    for ix,(qlab,_,sh) in state_map.items():
-        if qlab in bond_info:
-            continue
-        bond_info[qlab] = sh
-
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     vac = vaccum(n=1,symmetry=symmetry,flat=flat)
     occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
     occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
     occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
-
-    eye1 = eye(bond_info,flat=flat)
-    eye2 = np.tensordot(eye1,eye1,axes=([],[]))
-    eye2 = np.transpose(eye2,axes=(0,2,1,3))
-    #add = np.tensordot()
-    
     this.data_map = {0:vac,1:occ_a,2:occ_b,3:occ_db,
                      'cre_a':cre_a,
                      'cre_b':cre_b,
                      'ann_a':cre_a.dagger,
                      'ann_b':cre_b.dagger,
-                     'h1':H1(symmetry=symmetry,flat=flat),
-                     'eye1':eye1,'eye2':eye2}
+                     'h1':H1(symmetry=symmetry,flat=flat)}
+    this.symmetry = symmetry
     this.flat = flat
     return this.data_map
 pn_map = [0,1,1,2]
@@ -433,23 +418,51 @@ class AmplitudeFactory2D:
 ####################################################################################
 # ham class 
 ####################################################################################
-def hop(i1,i2):
-    if i1==i2:
-        return []
-    n1,n2 = pn_map[i1],pn_map[i2]
-    nsum,ndiff = n1+n2,abs(n1-n2)
-    if ndiff==1:
-        sign = 1 if nsum==1 else -1
-        return [(i2,i1,sign)]
-    if ndiff==2:
-        return [(1,2,-1),(2,1,1)] 
-    if ndiff==0:
-        sign = i1-i2 
-        return [(0,3,sign),(3,0,sign)]
-def hop_split(coeff):
+def set_mpo_tsrs(): 
+    vac = data_map[0]
+    occ = data_map[3]
     h1 = data_map['h1']
-    eye = data_map['eye']
-    
+
+    from pyblock3.algebra.fermion_encoding import get_state_map
+    from pyblock3.algebra.fermion import eye 
+    state_map = get_state_map(symmetry)
+    bond_info = dict()
+    for qlab,_,sh in state_map.values():
+        if qlab not in bond_info:
+            bond_info[qlab] = sh
+    I = eye(bond_info,flat=flat)
+    _0I = np.tensordot(vac,I,axes=([],[]))
+    _0I0 = np.tensordot(_0I,vac.dagger,axes=([],[]))
+    _I1 = np.tensordot(I,occ.dagger,axes=([],[]))
+    _1I1 = np.tensordot(occ,_I1,axes=([],[]))
+
+    ux,xsx,xv = h1.tensor_svd((0,2))
+    if xsx is not None:
+        xv = np.tensordot(xsx,xv,axes=([-1],[0]))
+    print(ux)
+    print()
+    print(xv)
+    exit()
+    _xv0 = np.tensordot(xv,vac.dagger,axes=([],[]))
+    _1ux = np.tensordot(occ,ux,axes=([],[]))
+
+    ADD = np.tensordot(vac,np.tensordot(vac.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
+        + np.tensordot(occ,np.tensordot(occ.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
+        + np.tensordot(occ,np.tensordot(vac.dagger,occ.dagger,axes=([],[])),axes=([],[]))
+    this.mpo_map = {'0I': _0I,
+                    '0I0':_0I0,
+                    'I1': _I1,
+                    '1I1':_1I1,
+                    'ux': ux,
+                    'xv': xv,
+                    '1ux':_1ux,
+                    'xv0':_xv0,
+                    'ADD':ADD}
+    return
+def get_data(coeff_v,coeff_u):
+    return mpo_map['0I0'] + mpo_map['1I1'] + coeff_v * mpo_map['xv0'] + coeff_u * mpo_map['1ux']
+def get_data_head(coeff_u):
+    return coeff_u * mpo_map['ux'] + mpo
 class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly

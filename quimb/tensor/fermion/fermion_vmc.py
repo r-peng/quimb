@@ -338,7 +338,6 @@ class TNVMC: # stochastic sampling
         if self.vlocal is not None:
             # mean
             self.vlocal = np.array(self.vlocal)
-            #print(RANK,self.vlocal)
             self.vmean = compute_mean(self.vlocal,self.flocal,self.n)
             # var
             vsq_local = self.vlocal**2

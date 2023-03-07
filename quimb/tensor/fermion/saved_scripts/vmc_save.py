@@ -1,4 +1,65 @@
 
+def get_key_from_qlab(qlab):
+    # isinstance(qlab,pyblock3.algebra.symmerty.SZ)
+    n = qlab.n 
+    if n==0:
+        return 0
+    if n==2:
+        return 3
+    sz = qlab.twos  
+    if sz==1:
+        return 1
+    elif sz==-1:
+        return 2
+    else:
+        raise ValueError(f'n={n},sz={sz}')
+def build_mpo(self,n,cutoff=1e-9):
+    from pyblock3.hamiltonian import Hamiltonian
+    from pyblock3.fcidump import FCIDUMP
+    fcidump = FCIDUMP(pg='c1',n_sites=n,n_elec=0,twos=0,ipg=0,orb_sym=[0]*n)
+    hamil = Hamiltonian(fcidump,flat=False)
+    def generate_terms(n_sites,c,d):
+        for i in range(0,n_sites):
+            for s in (0,1):
+                if i-1>=0:
+                    yield -self.t*c[i,s]*d[i-1,s]
+                if i+1<n_sites:
+                    yield -self.t*c[i,s]*d[i+1,s]
+    mpo = hamil.build_mpo(generate_terms,cutoff=cutoff).to_sparse()
+    mpo,err = mpo.compress(cutoff=cutoff)
+    
+    from pyblock3.algebra.core import SubTensor
+    from pyblock3.algebra.fermion import SparseFermionTensor
+    for i,tsr in enumerate(mpo.tensors):
+        print(i)
+        print(tsr)
+        #odd_blks = tsr.odd.to_sparse().blocks
+        #even_blks = tsr.even.to_sparse().blocks
+        #blk_dict = dict()
+        #for blk in odd_blks:
+        #    blk_dict = update_blk_dict(blk_dict,blk)
+        #for blk in even_blks:
+        #    blk_dict = update_blk_dict(blk_dict,blk)
+        #blks = [SubTensor(reduced=arr,q_labels=qlabs) for qlabs,arr in blk_dict.items()]
+        #tsr_new = SparseFermionTensor(blocks=blks,pattern='++--')
+        #print(tsr_new)
+def update_blk_dict(blk_dict,blk):
+    # isinstance(blk,pyblock3.algebra.core.SubTensor)
+    arr = np.asarray(blk)
+    assert arr.size==1
+    nax = len(blk.q_labels)
+    qlabs = [None] * nax
+    ixs = [None] * nax 
+    shs = [None] * nax
+    for ax,qlab in enumerate(blk.q_labels):
+        key = get_key_from_qlab(qlab)
+        qlabs[ax],ixs[ax],shs[ax] = state_map[key]    
+    qlabs = tuple(qlabs)
+    if qlabs not in blk_dict:
+        blk_dict[qlabs] = np.zeros(shs,dtype=arr.dtype)
+    ixs = tuple(ixs)
+    blk_dict[qlabs][ixs] += arr[(0,)*nax]
+    return blk_dict
 def _correlated_local_sampling(info,psi,ham,contract_opts,_compute_g):
     samples,f = info
 
