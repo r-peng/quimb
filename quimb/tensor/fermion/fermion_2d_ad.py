@@ -89,7 +89,6 @@ from ..optimize import contract_backend,tree_map,to_numpy,_VARIABLE_TAG,Vectoriz
 # torch amplitude factory 
 #######################################################################################
 import torch
-torch.set_num_threads(28)
 ar.register_function('torch','conjugate',torch.conj)
 warnings.filterwarnings(action='ignore',category=torch.jit.TracerWarning)
 class TorchAmplitudeFactory2D(AmplitudeFactory2D):
@@ -233,10 +232,10 @@ class TorchAmplitudeFactory2D(AmplitudeFactory2D):
                     gix1[ix2] = np.zeros(t.shape)
                 else:
                     gt = t.grad
-                    mask = torch.isnan(gt)
-                    gt.masked_fill_(mask,0.)
-                    #gix1[ix2] = to_numpy(gt).conj()
-                    gix1[ix2] = to_numpy(gt)
+                    #mask = torch.isnan(gt)
+                    #gt.masked_fill_(mask,0.)
+                    gix1[ix2] = to_numpy(gt).conj()
+                    #gix1[ix2] = to_numpy(gt)
             gx[ix1] = gix1
         unsigned_cx = to_numpy(unsigned_cx)
         vx = self.vectorizer.pack(gx).copy() / unsigned_cx
@@ -304,7 +303,7 @@ class Hubbard2D(Hubbard2D):
         # onsite terms
         config = np.array(config,dtype=int)
         eu = self.u*len(config[config==3])
-        return ehop+eu,vx 
+        return ehop+eu,vx,None 
 class ExchangeSampler2D(ExchangeSampler2D):
     def __init__(self,Lx,Ly,nelec,seed=None,burn_in=0,sweep=True):
         super().__init__(Lx,Ly,nelec,seed=seed,burn_in=burn_in)

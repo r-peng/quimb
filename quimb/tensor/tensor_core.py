@@ -39,7 +39,6 @@ except ImportError:
 _CONTRACT_STRATEGY = 'greedy'
 _TEMP_CONTRACT_STRATEGIES = collections.defaultdict(list)
 
-
 def get_contract_strategy():
     r"""Get the default contraction strategy - the option supplied as
     ``optimize`` to ``opt_einsum``.

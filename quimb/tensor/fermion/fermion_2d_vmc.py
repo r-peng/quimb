@@ -3,7 +3,10 @@ import numpy as np
 
 from ..tensor_2d import PEPS
 from .utils import psi2vecs,vec2psi
-from .fermion_core import FermionTensor, FermionTensorNetwork, rand_uuid, tensor_contract
+from .fermion_core import (
+    FermionTensor, FermionTensorNetwork, 
+    rand_uuid, tensor_split,
+)
 from .fermion_2d import FPEPS,FermionTensorNetwork2D
 from .block_interface import Constructor
 from mpi4py import MPI
@@ -359,7 +362,7 @@ class AmplitudeFactory2D:
         first_col = self.psi.col_tag(0)
         imax = self.Lx-x_bsz
         jmax = self.Ly-y_bsz
-        plq = {'bsz':(x_bsz,y_bsz)}
+        plq = dict()
         for i in range(imax+1):
             ls = []
             if i>0:
@@ -375,7 +378,7 @@ class AmplitudeFactory2D:
                 cols = [ftn.select(tags,which='any').copy()]
                 if j<jmax:
                     cols.append(renvs[j+y_bsz].copy())
-                plq[i,j] = FermionTensorNetwork(cols,virtual=True).view_like_(self.psi) 
+                plq[(i,j),(x_bsz,y_bsz)] = FermionTensorNetwork(cols,virtual=True).view_like_(self.psi) 
                 if j<jmax: 
                     tags = first_col if j==0 else (first_col,ftn.col_tag(j))
                     ftn ^= tags 
@@ -391,16 +394,14 @@ class AmplitudeFactory2D:
         if plq is None:
             self.get_all_benvs(config,x_bsz=1)
             plq = self.get_plq_from_benvs(config,x_bsz=1,y_bsz=1)
-        unsigned_cx,vx,_ =  get_grad_from_plqs(config,plq)
+        unsigned_cx,vx,_ = self.get_grad_from_plqs(plq,config=config)
         return unsigned_cx * sign, vx
-    def get_grad_from_plq(self,config,plq):
+    def get_grad_from_plq(self,plq,config=None,compute_cx=True):
         # gradient
         vx = dict()
         cx = dict()
-        x_bsz,y_bsz = plq.pop('bsz')
-        for i0,j0 in plq:
-            ftn_plq = plq[i0,j0] 
-            cx[i0,j0] = ftn_plq.copy().contract()
+        for ((i0,j0),(x_bsz,y_bsz)),ftn_plq in plq.items():
+            cx[i0,j0] = ftn_plq.copy().contract() if compute_cx else 1.
             for i in range(i0,i0+x_bsz):
                 for j in range(j0,j0+y_bsz):
                     if (i,j) in vx:
@@ -408,8 +409,9 @@ class AmplitudeFactory2D:
                     vx[i,j] = site_grad(ftn_plq.copy(),i,j) / cx[i0,j0] 
         vx = np.concatenate(psi2vecs(self.constructors,vx)) 
         unsigned_cx = sum(cx.values()) / len(cx)
-        self.store[config] = unsigned_cx
-        self.store_grad[config] = vx
+        if config is not None:
+            self.store[config] = unsigned_cx
+            self.store_grad[config] = vx
         return unsigned_cx, vx, cx
     def prob(self, config):
         """Calculate the probability of a configuration.
@@ -418,7 +420,7 @@ class AmplitudeFactory2D:
 ####################################################################################
 # ham class 
 ####################################################################################
-def set_mpo_tsrs(): 
+def set_pepo_tsrs(): 
     vac = data_map[0]
     occ = data_map[3]
     h1 = data_map['h1']
@@ -430,45 +432,174 @@ def set_mpo_tsrs():
     for qlab,_,sh in state_map.values():
         if qlab not in bond_info:
             bond_info[qlab] = sh
-    I = eye(bond_info,flat=flat)
-    _0I = np.tensordot(vac,I,axes=([],[]))
-    _0I0 = np.tensordot(_0I,vac.dagger,axes=([],[]))
-    _I1 = np.tensordot(I,occ.dagger,axes=([],[]))
-    _1I1 = np.tensordot(occ,_I1,axes=([],[]))
-
-    ux,xsx,xv = h1.tensor_svd((0,2))
-    if xsx is not None:
-        xv = np.tensordot(xsx,xv,axes=([-1],[0]))
-    print(ux)
-    print()
-    print(xv)
-    exit()
-    _xv0 = np.tensordot(xv,vac.dagger,axes=([],[]))
-    _1ux = np.tensordot(occ,ux,axes=([],[]))
+    I1 = eye(bond_info,flat=flat)
+    I2 = np.tensordot(I1,I1,axes=([],[]))
+    P0 = np.tensordot(vac,vac.dagger,axes=([],[]))
+    P1 = np.tensordot(occ,occ.dagger,axes=([],[]))
 
     ADD = np.tensordot(vac,np.tensordot(vac.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
         + np.tensordot(occ,np.tensordot(occ.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
         + np.tensordot(occ,np.tensordot(vac.dagger,occ.dagger,axes=([],[])),axes=([],[]))
-    this.mpo_map = {'0I': _0I,
-                    '0I0':_0I0,
-                    'I1': _I1,
-                    '1I1':_1I1,
-                    'ux': ux,
-                    'xv': xv,
-                    '1ux':_1ux,
-                    'xv0':_xv0,
-                    'ADD':ADD}
+    ADD.shape = (4,)*3
+    this.pepo_map = {'I1':I1,'I2':I2,'P0':P0,'P1':P1,
+                     'h1':np.transpose(h1,axes=(0,2,1,3)),
+                     'ADD':ADD,'occ':occ,'vac':vac}
     return
-def get_data(coeff_v,coeff_u):
-    return mpo_map['0I0'] + mpo_map['1I1'] + coeff_v * mpo_map['xv0'] + coeff_u * mpo_map['1ux']
-def get_data_head(coeff_u):
-    return coeff_u * mpo_map['ux'] + mpo
+def get_data(coeff):
+    data = np.tensordot(pepo_map['P0'],pepo_map['I2'],axes=([],[])) \
+         + np.tensordot(pepo_map['P1'],pepo_map['h1'],axes=([],[])) * coeff
+    data.shape = (4,)*6
+    return data
+def get_mpo(coeffs):
+    # add h1
+    ls = [None] * len(coeffs)
+    for ix,coeff in enumerate(coeffs):
+        data = get_data(coeff)
+        inds = f'v{ix}*',f'v{ix}',f'k{ix}*',f'k{ix}',f'k{ix+1}*',f'k{ix+1}'
+        tags = f'L{ix}',f'L{ix+1}','h'
+        ls[ix] = FermionTensor(data=data,inds=inds,tags=tags)
+    mpo = FermionTensorNetwork(ls[::-1],virtual=True)
+    # add ADD
+    npair = len(coeffs)
+    bix = [rand_uuid() for ix in range(npair)]
+    for ix in range(1,npair):
+        tags = f'L{ix}',f'L{ix+1}','a'
+        inds = bix[ix]+'*',f'v{ix}*',bix[ix-1]+'*'
+        mpo.add_tensor(FermionTensor(data=pepo_map['ADD'].copy(),inds=inds,tags=tags))
+        inds = bix[ix-1],f'v{ix}',bix[ix]
+        mpo.add_tensor(FermionTensor(data=pepo_map['ADD'].dagger,inds=inds,tags=tags))
+    # reindex vir
+    mpo['L0','L1','h'].reindex_({'v0':bix[0],'v0*':bix[0]+'*'}) 
+    # reindex phys
+    for ix in range(1,npair):
+        mpo[f'L{ix-1}',f'L{ix}','h'].reindex_({f'k{ix}':f'k{ix}_'})
+        mpo[f'L{ix}',f'L{ix+1}','h'].reindex_({f'k{ix}*':f'k{ix}_'})
+    for ix in range(1,npair):
+        mpo.contract_tags((f'L{ix}',f'L{ix+1}'),which='all',inplace=True)
+    mpo[f'L{npair-1}',f'L{npair}'].reindex_({bix[-1]:'v',bix[-1]+'*':'v*'})
+
+    # compress
+    mpo.drop_tags(('h','a'))
+    for ix in range(npair):
+        tid = mpo[f'L{ix}',f'L{ix+1}'].get_fermion_info()[0]
+        tsr = mpo._pop_tensor(tid,remove_from_fermion_space='end')
+        rix = f'k{ix}*',f'k{ix}'
+        if ix>0:
+            rix = rix+(bix,)
+        bix = rand_uuid()
+        tl,tr = tensor_split(tsr,left_inds=None,right_inds=rix,bond_ind=bix,method='svd',get='tensors')
+        tr.modify(tags=f'L{ix}')
+        tl.modify(tags=(f'L{ix+1}',f'L{ix+2}'))
+        mpo.add_tensor(tr,virtual=True)
+        mpo.add_tensor(tl,virtual=True)
+        mpo.contract_tags((f'L{ix+1}',f'L{ix+2}'),which='all',inplace=True)
+    mpo[f'L{npair}',f'L{npair+1}'].drop_tags(f'L{npair+1}')
+    return mpo
+def get_comb(mpos):
+    # add mpo
+    pepo = FermionTensorNetwork([])
+    L = mpos[0].num_tensors
+    tag = f'L{L-1}'
+    for ix1,mpo in enumerate(mpos):
+        for ix2 in range(L):
+            mpo[f'L{ix2}'].reindex_({f'k{ix2}':f'mpo{ix1}_k{ix2}',f'k{ix2}*':f'mpo{ix1}_k{ix2}*'})
+        mpo[tag].reindex_({'v':f'v{ix1}','v*':f'v{ix1}*'})
+        mpo.add_tag(f'mpo{ix1}')
+        pepo.add_tensor_network(mpo,virtual=True)
+    # add ADD
+    nmpo = len(mpos)
+    bix = [rand_uuid() for ix in range(nmpo)]
+    pepo['mpo0',tag].reindex_({'v0':bix[0],'v0*':bix[0]+'*'})
+    for ix in range(1,nmpo):
+        tags = f'mpo{ix}',tag 
+        inds = bix[ix]+'*',f'v{ix}*',bix[ix-1]+'*'
+        pepo.add_tensor(FermionTensor(data=pepo_map['ADD'].copy(),inds=inds,tags=tags))
+        inds = bix[ix-1],f'v{ix}',bix[ix]
+        pepo.add_tensor(FermionTensor(data=pepo_map['ADD'].dagger,inds=inds,tags=tags))
+    for ix in range(1,nmpo):
+        pepo.contract_tags((f'mpo{ix}',tag),which='all',inplace=True)
+    pepo[f'mpo{nmpo-1}',tag].reindex_({bix[-1]:'v',bix[-1]+'*':'v*'})
+
+    # compress
+    for ix in range(nmpo-1):
+        tid = pepo[f'mpo{ix}',tag].get_fermion_info()[0]
+        tsr = pepo._pop_tensor(tid,remove_from_fermion_space='end')
+        rix = set(tsr.inds).difference({bix[ix],bix[ix]+'*'})
+        tl,tr = tensor_split(tsr,left_inds=None,right_inds=rix,method='svd',get='tensors')
+        tl.modify(tags=(f'mpo{ix+1}',tag))
+        pepo.add_tensor(tr,virtual=True)
+        pepo.add_tensor(tl,virtual=True)
+        pepo.contract_tags((f'mpo{ix+1}',tag),which='all',inplace=True)
+    return pepo
+def comb2PEPO(comb,fpeps,comb_type):
+    if comb_type=='row':
+        def get_comb_tag(i,j):
+            return f'mpo{i}',f'L{j}'
+        def get_comb_ind(i,j):
+            return f'mpo{i}_k{j}'
+    else:
+        def get_comb_tag(i,j):
+            return f'mpo{j}',f'L{i}'
+        def get_comb_ind(i,j):
+            return f'mpo{j}_k{i}'
+    for i in range(fpeps.Lx):
+        for j in range(fpeps.Ly):
+            tsr = comb[get_comb_tag(i,j)]
+            ind_old,ind_new = get_comb_ind(i,j),fpeps.site_ind(i,j)
+            tsr.reindex_({ind_old:ind_new,ind_old+'*':ind_new+'*'}) 
+            tsr.modify(tags=(fpeps.row_tag(i),fpeps.col_tag(j),fpeps.site_tag(i,j)))
+    comb.view_like_(fpeps)
+    return comb
+def combine(top,bot):
+    Lx,Ly = bot.Lx,bot.Ly
+    for i in range(Lx):
+        for j in range(Ly): 
+            pix = top.site_ind(i,j)
+            top[i,j].reindex_({pix:pix+'_'})
+            bot[i,j].reindex_({pix+'*':pix+'_'})
+    top[Lx-1,Ly-1].reindex_({'v':'vt','v*':'vt*'})
+    bot[Lx-1,Ly-1].reindex_({'v':'vb','v*':'vb*'})
+
+    pepo = bot
+    pepo.add_tensor_network(top,virtual=True)
+    tags = pepo.site_tag(Lx-1,Ly-1)
+    pepo.add_tensor(
+        FermionTensor(data=pepo_map['ADD'].copy(),inds=('v*','vt*','vb*'),tags=tags),virtual=True) 
+    pepo.add_tensor(
+        FermionTensor(data=pepo_map['ADD'].dagger,inds=('vb','vt','v'),tags=tags),virtual=True) 
+    for i in range(Lx):
+        for j in range(Ly): 
+            pepo.contract_tags(pepo.site_tag(i,j),inplace=True) 
+    return pepo 
 class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
+        self.compute_Hv = False
+    def initialize_pepo(self,fpeps):
+        set_pepo_tsrs()
+
+        # row mpos
+        mpos = [get_mpo(-self.t*np.ones(self.Ly-1)) for i in range(self.Lx)]
+        pepo_row = get_comb(mpos)
+        pepo_row = comb2PEPO(pepo_row,fpeps,'row')
+        # col mpos
+        mpos = [get_mpo(-self.t*np.ones(self.Lx-1)) for j in range(self.Ly)]
+        pepo_col = get_comb(mpos)
+        pepo_col = comb2PEPO(pepo_col,fpeps,'col')
+        
+        pepo = combine(pepo_row,pepo_col)
+
+        tags = pepo.site_tag(self.Lx-1,self.Ly-1)
+        pepo.add_tensor(FermionTensor(data=data_map[3].dagger,inds=('v*',),tags=tags),virtual=True)
+        pepo.add_tensor(FermionTensor(data=data_map[3].copy(),inds=('v',),tags=tags),virtual=True)
+        pepo.contract_tags(tags,inplace=True)
+        self.pepo = pepo
+        self.compute_Hv = True
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
+    def flat2site(self,ix):
+        return flat2site(ix,self.Lx,self.Ly)
     def hop_coeff(self,site1,site2):
         return -self.t
     def hop(self,ftn_plq,config,site1,site2,cx=None):
@@ -489,21 +620,27 @@ class Hubbard2D:
             return 0.
     def nnh(self,config,plq,inplace=True,cx=None):
         e = 0.
+        x_bsz,y_bsz = 1,2
         # all horizontal bonds
         for i in range(self.Lx):
             for j in range(self.Ly-1):
                 site1,site2 = (i,j),(i,j+1)
-                ftn_plq = plq[i,j] if inplace else plq[i,j].copy()
+                ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
+                if not inplace:
+                    ftn_plq = ftn_plq.copy()
                 cx_ij = None if cx is None else cx[i,j]
                 e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
     def nnv(self,config,plq,inplace=True,cx=None):
         # all vertical bonds
         e = 0.
+        x_bsz,y_bsz = 2,1
         for i in range(self.Lx-1):
             for j in range(self.Ly):
                 site1,site2 = (i,j),(i+1,j)
-                ftn_plq = plq[i,j] if inplace else plq[i,j].copy()
+                ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
+                if not inplace:
+                    ftn_plq = ftn_plq.copy()
                 cx_ij = None if cx is None else cx[i,j]
                 e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
@@ -513,14 +650,38 @@ class Hubbard2D:
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
         plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
         # get gradient form plq12
-        _,vx,cx12 = amplitude_factory.get_grad_from_plq(config,plq12) 
+        unsigned_cx,vx,cx12 = amplitude_factory.get_grad_from_plq(plq12,config=config) 
         # get h/v bonds
         eh = self.nnh(config,plq12,inplace=True,cx=cx12) 
         ev = self.nnv(config,plq21,inplace=True,cx=None) 
         # onsite terms
         config = np.array(config,dtype=int)
         eu = self.u*len(config[config==3])
-        return eh+ev+eu,vx 
+
+        ex = eh+ev+eu
+        if not self.compute_Hv: 
+            return ex,vx,None 
+        sign = amplitude_factory.compute_config_sign(tuple(config)) 
+        # make bra
+        bra = self.pepo.copy()
+        fpeps = amplitude_factory.psi.copy()
+        for ix,ci in reversed(list(enumerate(config))):
+            i,j = self.flat2site(ix)
+            tsr = get_bra_tsr(fpeps,ci,i,j)
+            tsr.reindex_({f'k{i},{j}':f'k{i},{j}*'})
+            bra.add_tensor(tsr,virtual=True) 
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                bra.contract_tags(bra.site_tag(i,j),inplace=True)
+        norm = fpeps 
+        norm.add_tensor_network(bra,virtual=True)
+        plq = norm._compute_plaquette_environments_row_first(1,1,**amplitude_factory.contract_opts)
+        for key in plq:
+            plq[key].view_like_(fpeps)
+        _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        Hvx /= sign * unsigned_cx
+        Hvx += eu * vx
+        return ex,vx,Hvx
 ####################################################################################
 # sampler 
 ####################################################################################
