@@ -121,7 +121,7 @@ class TNVMC: # stochastic sampling
         for step in range(start,stop):
             self.step = step
             self.sample()
-            if RANK==self.cix:
+            if RANK==self.dest[0]:
                 self.propagate_rate_cond()
                 self.transform_gradients()
                 self.regularize()
@@ -129,8 +129,8 @@ class TNVMC: # stochastic sampling
                 if self.conditioner is not None:
                     self.conditioner(self.x)
                 print('\tx norm=',np.linalg.norm(self.x))
-            COMM.Bcast(self.x,root=self.cix) 
-            COMM.Bcast(self.delta_norm,root=self.cix) 
+            COMM.Bcast(self.x,root=self.dest[0]) 
+            COMM.Bcast(self.delta_norm,root=self.dest[0]) 
             psi = self.amplitude_factory.update(self.x)
             if RANK==0:
                 if tmpdir is not None: # save psi to disc
@@ -203,27 +203,21 @@ class TNVMC: # stochastic sampling
         self.x = self.diis.update(self.x,xerr=xerr)
         #print('\tDIIS error vector norm=',np.linalg.norm(e))  
         print('\tDIIS extrapolated x norm=',np.linalg.norm(self.x))  
-    def update_local(self,config):
-        ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory)
-        self.elocal.append(ex)
-        self.vlocal.append(vx)
-        if self.compute_Hv:
-            self.Hv_local.append(Hvx)
     def sample(self):
         self.sampler.amplitude_factory = self.amplitude_factory
+        # figure out the control(dest) index 
+        self.dest = np.random.randint(low=0,high=SIZE,size=1)
+        COMM.Bcast(self.dest,root=0)
+        # get corresponding sources 
+        self.sources = list(set(range(SIZE)).difference({self.dest[0]}))
         if self.exact_sampling:
             self.sample_exact()
         else:
             self.sample_stochastic()
     def sample_stochastic(self): 
-        # randomly select a process to be the control process
-        self.cix = np.random.randint(low=0,high=SIZE,size=1)
-        COMM.Bcast(self.cix,root=0)
-        self.cix = self.cix[0]
-
         self.terminate = np.array([0])
-        self.rix = np.array([RANK])
-        if RANK==self.cix:
+        self.rank = np.array([RANK])
+        if RANK==self.dest[0]:
             self._ctr()
         else:
             self._sample()
@@ -232,65 +226,55 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         ncurr = 0
         ntotal = self.batchsize * SIZE
-        tdest = list(set(range(SIZE)).difference({RANK}))
         while self.terminate[0]==0:
-            COMM.Recv(self.rix,tag=0)
+            COMM.Recv(self.rank,tag=0)
             ncurr += 1
             if ncurr > ntotal: # send termination message to all workers
                 self.terminate[0] = 1
-                for worker in tdest:
+                for worker in self.sources:
                     COMM.Bsend(self.terminate,dest=worker,tag=1)
             else:
-                COMM.Bsend(self.terminate,dest=self.rix[0],tag=1)
+                COMM.Bsend(self.terminate,dest=self.rank[0],tag=1)
         print('\tstochastic sample time=',time.time()-t0)
 
-        # gather sample sizes
-        sendbuf = np.array([0])
-        recvbuf = np.array([0]*SIZE)
-        COMM.Gather(sendbuf,recvbuf,root=self.cix)
-
         t0 = time.time()
-        self.recv(sources=tdest,sizes=recvbuf)
-        self.f = np.concatenate(self.f,axis=0) 
-        self.e = np.concatenate(self.e,axis=0) 
-        self.v = np.concatenate(self.v,axis=0) 
+        self.samples = []
+        self.gather_sizes()
+        self.f = None
+        self.e = []
+        self.v = []
+        self.Hv = [] if self.compute_Hv else None
+        self.recv()
         self.extract_energy_gradient()
         print('\tcollect data time=',time.time()-t0)
     def _sample(self):
         self.sampler.preprocess(self.config) 
 
         self.samples = []
-        self.flocal = dict()
+        self.flocal = None
         self.elocal = []
         self.vlocal = []
-        if self.compute_Hv:
-            self.Hv_local = []
+        self.Hv_local = [] if self.compute_Hv else None
 
+        self.store = dict()
         while self.terminate[0]==0:
-            self.config,omega = self.sampler.sample()
-            #if omega < 1e-10:
-            #    raise ValueError(f'omega={omega}')
-            if self.config in self.flocal:
-                self.flocal[self.config] += 1
+            config,omega = self.sampler.sample()
+            self.samples.append(config)
+            if config in self.store:
+                ex,vx,Hvx = self.store[config]
             else:
-                self.flocal[self.config] = 1
-                self.samples.append(self.config)
-                self.update_local(self.config)
+                ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory)
+                self.store[config] = ex,vx,Hvx
+            self.elocal.append(ex)
+            self.vlocal.append(vx)
+            if self.Hv_local is not None:
+                self.Hv_local.append(Hvx)
 
-            COMM.Bsend(self.rix,dest=self.cix,tag=0) 
-            COMM.Recv(self.terminate,source=self.cix,tag=1)
+            COMM.Bsend(self.rank,dest=self.dest[0],tag=0) 
+            COMM.Recv(self.terminate,source=self.dest[0],tag=1)
 
-        # gather sample sizes
-        sendbuf = np.array([len(self.samples)])
-        recvbuf = np.array([0]*SIZE)
-        COMM.Gather(sendbuf,recvbuf,root=self.cix)
-
-        self.flocal = np.array([self.flocal[config] for config in self.samples])
-        self.elocal = np.array(self.elocal)
-        self.vlocal = np.array(self.vlocal)
-        if self.compute_Hv:
-            self.Hv_local = np.array(self.Hv_local)
-        self.send(dest=self.cix)
+        self.gather_sizes()
+        self.send()
     def sample_exact(self): 
         self.sampler.compute_dense_prob() # runs only for dense sampler 
 
@@ -298,75 +282,71 @@ class TNVMC: # stochastic sampling
         all_configs = self.sampler.all_configs
         ixs = self.sampler.nonzeros
 
-        self.flocal = []
         self.samples = []
+        self.flocal = []
         self.elocal = []
         self.vlocal = []
-        if self.compute_Hv:
-            self.Hv_local = [] 
+        self.Hv_local = [] if self.compute_Hv else None
 
         t0 = time.time()
+        self.store = dict()
         for ix in ixs:
             self.flocal.append(p[ix])
-            self.config = all_configs[ix]
-            self.samples.append(self.config) 
-            self.update_local(self.config)
+            config = all_configs[ix]
+            self.samples.append(config) 
+            ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory)
+            self.elocal.append(ex)
+            self.vlocal.append(vx)
+            if self.Hv_local is not None:
+                self.Hv_local.append(Hvx)
         if RANK==SIZE-1:
             print('\texact sample time=',time.time()-t0)
 
-        self.cix = SIZE-1 
-        sendbuf = np.array([len(self.samples)])
-        recvbuf = np.array([0]*SIZE)
-        COMM.Gather(sendbuf,recvbuf,root=self.cix)
-
-        self.flocal = np.array(self.flocal)
-        self.elocal = np.array(self.elocal)
-        self.vlocal = np.array(self.vlocal)
-        if self.compute_Hv:
-            self.Hv_local = np.array(self.Hv_local)
         t0 = time.time()
-        if RANK<self.cix:
-            self.send(dest=self.cix)
+        self.gather_sizes()
+        if RANK!=self.dest[0]:
+            self.send()
             return
-        self.recv(sources=range(self.cix),sizes=recvbuf)  
-        self.f.append(self.flocal)
-        self.e.append(self.elocal)
-        self.v.append(self.vlocal)
-        if self.compute_Hv:
-            self.Hv.append(self.Hv_local)
-        self.f = np.concatenate(self.f,axis=0) 
-        self.e = np.concatenate(self.e,axis=0) 
-        self.v = np.concatenate(self.v,axis=0) 
+        self.f = [np.array(self.flocal)]
+        self.e = [np.array(self.elocal)]
+        self.v = [np.array(self.vlocal)]
+        self.Hv = None if self.Hv_local is None else [np.array(self.Hv_local)]
+        self.recv()  
         self.extract_energy_gradient()
         print('\tcollect data time=',time.time()-t0)
     def extract_energy_gradient(self):
+        self.e = np.concatenate(self.e,axis=0) 
+        self.v = np.concatenate(self.v,axis=0) 
         if self.exact_sampling:
+            self.f = np.concatenate(self.f,axis=0)
             fe = self.f * self.e
             self.E,self.Eerr,self.n = np.sum(fe),0.,1.
         else:
-            self.E,self.Eerr,fe,self.n = blocking_analysis(self.f,self.e,0,True)
+            self.f = np.ones_like(self.e)
+            self.n = len(self.e)
+            print('\tnormalization=',self.n)
+            self.E,self.Eerr,fe = blocking_analysis(self.f,self.e,0,True)
         self.vmean = np.dot(self.f,self.v) / self.n  
         self.g = np.dot(fe,self.v) / self.n - self.vmean * self.E
         gmax = np.amax(np.fabs(self.g))
         print(f'step={self.step},energy={self.E},err={self.Eerr},gmax={gmax}')
-    def send(self,dest):
-        COMM.Ssend(self.flocal,dest=dest,tag=2)
-        COMM.Ssend(self.elocal,dest=dest,tag=3)
-        COMM.Ssend(self.vlocal,dest=dest,tag=4)
-        if self.compute_Hv:
-            COMM.Ssend(self.Hv_local,dest=dest,tag=5)
-    def recv(self,sources,sizes):
-        self.f = []
-        self.e = []
-        self.v = []
-        if self.compute_Hv:
-            self.Hv = [] 
-        fdtype = float if self.exact_sampling else int
-        for worker in sources:
-            nlocal = sizes[worker]
-            buf = np.zeros(nlocal,dtype=fdtype) 
-            COMM.Recv(buf,source=worker,tag=2)
-            self.f.append(buf)    
+    def gather_sizes(self):
+        self.sizes = np.array([0]*SIZE)
+        COMM.Gather(np.array([len(self.samples)]),self.sizes,root=self.dest[0])
+    def send(self):
+        if self.flocal is not None:
+            COMM.Ssend(np.array(self.flocal),dest=self.dest[0],tag=2)
+        COMM.Ssend(np.array(self.elocal),dest=self.dest[0],tag=3)
+        COMM.Ssend(np.array(self.vlocal),dest=self.dest[0],tag=4)
+        if self.Hv_local is not None:
+            COMM.Ssend(np.array(self.Hv_local),dest=self.dest[0],tag=5)
+    def recv(self):
+        for worker in self.sources:
+            nlocal = self.sizes[worker]
+            if self.f is not None: 
+                buf = np.zeros(nlocal) 
+                COMM.Recv(buf,source=worker,tag=2)
+                self.f.append(buf)    
 
             buf = np.zeros(nlocal) 
             COMM.Recv(buf,source=worker,tag=3)
@@ -375,7 +355,8 @@ class TNVMC: # stochastic sampling
             buf = np.zeros((nlocal,len(self.x)))
             COMM.Recv(buf,source=worker,tag=4)
             self.v.append(buf)    
-            if self.compute_Hv:
+
+            if self.Hv is not None:
                 buf = np.zeros((nlocal,len(self.x)))
                 COMM.Recv(buf,source=worker,tag=5)
                 self.Hv.append(buf)    
@@ -445,8 +426,7 @@ def blocking_analysis(weights, energies, neql, printQ=False):
     weights = weights[neql:]
     energies = energies[neql:]
     weightedEnergies = np.multiply(weights, energies)
-    sumWeights = weights.sum()
-    meanEnergy = weightedEnergies.sum() / sumWeights 
+    meanEnergy = weightedEnergies.sum() / weights.sum()
     if printQ:
         print(f'\nMean energy: {meanEnergy:.8e}')
         print('Block size    # of blocks        Mean                Error')
@@ -474,4 +454,4 @@ def blocking_analysis(weights, energies, neql, printQ=False):
         if plateauError is not None:
             print(f'Stocahstic error estimate: {plateauError:.6e}\n')
 
-    return meanEnergy, plateauError, weightedEnergies, sumWeights
+    return meanEnergy, plateauError, weightedEnergies
