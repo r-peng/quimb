@@ -1,4 +1,4 @@
-import time,h5py,itertools,pickle
+import time,h5py,itertools,pickle,sys
 import numpy as np
 import scipy.sparse.linalg as spla
 from scipy.optimize import line_search
@@ -15,7 +15,7 @@ DEFAULT_RATE_MAX = 1e-1
 DEFAULT_COND_MIN = 1e-3
 DEFAULT_COND_MAX = 1e-3
 DEFAULT_NUM_STEP = 1e-6
-PRECISION = 1e-10
+DISCARD = 1e3
 CG_TOL = 1e-4
 class TNVMC: # stochastic sampling
     def __init__(
@@ -58,13 +58,15 @@ class TNVMC: # stochastic sampling
 
         # parse gradient optimizer
         self.optimizer = optimizer
-        self.compute_Hv = False
-        if self.optimizer=='rgn':
-            self.compute_Hv = kwargs.get('compute_Hv',True) 
-            if self.compute_Hv:
-                self.ham.initialize_pepo(self.amplitude_factory.psi)
-            else:
-                self.num_step = kwargs.get('num_step',DEFAULT_NUM_STEP)
+        self.compute_Hv = True if self.optimizer in ['rgn','lin'] else False
+        if self.compute_Hv:
+            self.ham.initialize_pepo(self.amplitude_factory.psi)
+        if self.optimizer=='lin':
+            self.xi = kwargs.get('xi',None)
+        if self.optimizer=='sr':
+            self.mask = False
+        else:
+            self.mask = kwargs.get('mask',False)
 
         # parse extrapolator
         self.extrapolator = extrapolator 
@@ -257,14 +259,23 @@ class TNVMC: # stochastic sampling
         self.Hv_local = [] if self.compute_Hv else None
 
         self.store = dict()
+        self.p0 = dict()
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
-            self.samples.append(config)
             if config in self.store:
-                ex,vx,Hvx = self.store[config]
+                info = self.store[config]
+                if info is None:
+                    continue
+                ex,vx,Hvx = info 
             else:
-                ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory)
+                cx,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
+                                                          compute_Hv=self.compute_Hv)
+                if np.fabs(ex) > DISCARD:
+                    self.store[config] = None
+                    continue
                 self.store[config] = ex,vx,Hvx
+                self.p0[config] = cx**2
+            self.samples.append(config)
             self.elocal.append(ex)
             self.vlocal.append(vx)
             if self.Hv_local is not None:
@@ -294,7 +305,8 @@ class TNVMC: # stochastic sampling
             self.flocal.append(p[ix])
             config = all_configs[ix]
             self.samples.append(config) 
-            ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory)
+            _,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
+                                                      compute_Hv=self.compute_Hv)
             self.elocal.append(ex)
             self.vlocal.append(vx)
             if self.Hv_local is not None:
@@ -336,8 +348,10 @@ class TNVMC: # stochastic sampling
     def send(self):
         if self.flocal is not None:
             COMM.Ssend(np.array(self.flocal),dest=self.dest[0],tag=2)
-        COMM.Ssend(np.array(self.elocal),dest=self.dest[0],tag=3)
-        COMM.Ssend(np.array(self.vlocal),dest=self.dest[0],tag=4)
+        if self.elocal is not None:
+            COMM.Ssend(np.array(self.elocal),dest=self.dest[0],tag=3)
+        if self.vlocal is not None:
+            COMM.Ssend(np.array(self.vlocal),dest=self.dest[0],tag=4)
         if self.Hv_local is not None:
             COMM.Ssend(np.array(self.Hv_local),dest=self.dest[0],tag=5)
     def recv(self):
@@ -347,33 +361,60 @@ class TNVMC: # stochastic sampling
                 buf = np.zeros(nlocal) 
                 COMM.Recv(buf,source=worker,tag=2)
                 self.f.append(buf)    
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=3)
-            self.e.append(buf)    
-
-            buf = np.zeros((nlocal,len(self.x)))
-            COMM.Recv(buf,source=worker,tag=4)
-            self.v.append(buf)    
-
+            if self.e is not None:
+                buf = np.zeros(nlocal) 
+                COMM.Recv(buf,source=worker,tag=3)
+                self.e.append(buf)    
+            if self.v is not None:
+                buf = np.zeros((nlocal,len(self.x)))
+                COMM.Recv(buf,source=worker,tag=4)
+                self.v.append(buf)    
             if self.Hv is not None:
                 buf = np.zeros((nlocal,len(self.x)))
                 COMM.Recv(buf,source=worker,tag=5)
                 self.Hv.append(buf)    
     def getS(self):
-        def S(x):
-            Sx1 = np.dot(self.f*np.dot(self.v,x),self.v) / self.n
-            Sx2 = self.vmean * np.dot(self.vmean,x)
-            return Sx1-Sx2
+        if self.mask:
+            #matrix = np.einsum('si,sj,s->ij',self.v,self.v,self.f) / self.n
+            #matrix -= np.einsum('i,j->ij',self.vmean,self.vmean)
+            #matrix = self.amplitude_factory.extract_diagonal(matrix)
+            #def S(x):
+            #    return np.dot(matrix,x)
+            maskdot = self.amplitude_factory.maskdot
+            maskouter = self.amplitude_factory.maskouter
+            def S(x):
+                Sx1 = maskdot(self.f,self.v,self.v,x) / self.n 
+                Sx2 = maskouter(self.vmean,self.vmean,x)
+                return Sx1-Sx2
+        else:
+            def S(x):
+                Sx1 = np.dot(self.f*np.dot(self.v,x),self.v) / self.n
+                Sx2 = self.vmean * np.dot(self.vmean,x)
+                return Sx1-Sx2
         return S
     def getH(self):
         Hv = np.concatenate(self.Hv,axis=0) 
-        Hv_mean = np.dot(self.f,Hv) / self.n 
-        def H(x):
-            Hx1 = np.dot(self.f*np.dot(Hv,x),self.v) / self.n
-            Hx2 = self.vmean * np.dot(Hv_mean,x)
-            Hx3 = self.g * np.dot(self.vmean,x)
-            return Hx1-Hx2-Hx3
+        self.Hv_mean = np.dot(self.f,Hv) / self.n 
+        if self.mask:
+            #matrix = np.einsum('si,sj,s->ij',self.v,Hv,self.f) / self.n
+            #matrix -= np.einsum('i,j->ij',self.vmean,self.Hv_mean)
+            #matrix -= np.einsum('i,j->ij',self.g,self.vmean)
+            #matrix = self.amplitude_factory.extract_diagonal(matrix)
+            #def H(x):
+            #    return np.dot(matrix,x)
+            maskdot = self.amplitude_factory.maskdot
+            maskouter = self.amplitude_factory.maskouter
+            def H(x):
+                Hx1 = maskdot(self.f,self.v,Hv,x) / self.n
+                Hx2 = maskouter(self.vmean,self.Hv_mean,x)
+                Hx3 = maskouter(self.g,self.vmean,x)
+                return Hx1-Hx2-Hx3
+        else:
+            def H(x):
+                Hx1 = np.dot(self.f*np.dot(Hv,x),self.v) / self.n
+                Hx2 = self.vmean * np.dot(self.Hv_mean,x)
+                Hx3 = self.g * np.dot(self.vmean,x)
+                return Hx1-Hx2-Hx3
         return H
     def transform_gradients(self):
         if self.optimizer=='sr':
@@ -381,7 +422,7 @@ class TNVMC: # stochastic sampling
         elif self.optimizer=='rgn':
             self._transform_gradients_rgn()
         elif self.optimizer=='lin':
-            raise NotImplementedError
+            self._transform_gradients_lin()
         else:
             self._transform_gradients_sgd()
     def _transform_gradients_sgd(self):
@@ -400,27 +441,114 @@ class TNVMC: # stochastic sampling
         S = self.getS()
         def A(vec):
             return S(vec) + self.cond * vec
-        LinOp = spla.LinearOperator((sh,sh),matvec=A)
+        LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.g.dtype)
         self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
         print('\tSR solver time=',time.time()-t0)
         print('\tSR solver exit status=',info)
     def _transform_gradients_rgn(self):
-        if self.compute_Hv:
-            self._transform_gradients_rgn_WL()
-        else:
-            raise NotImplementedError
-    def _transform_gradients_rgn_WL(self):
         t0 = time.time()
         sh = len(self.g)
         S = self.getS()
         H = self.getH()
         def A(vec):
             return H(vec) - self.E * S(vec) + self.cond * vec 
-        LinOp = spla.LinearOperator((sh,sh),matvec=A)
+        LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.g.dtype)
         self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL)
         print('\tRGN solver time=',time.time()-t0)
         print('\tRGN solver exit status=',info)
+    def _transform_gradients_lin(self):
+        t0 = time.time()
+        sh = len(self.g)
+        S = self.getS()
+        H = self.getH()
 
+        Hi0 = self.g
+        H0j = self.Hv_mean - self.E * self.vmean
+        def A(x):
+            x0,x1 = x[0],x[1:]
+            y0 = self.E * x0 + np.dot(H0j,x1)
+            y1 = x0 * Hi0 + H(x1) + self.cond * x1 
+            vec = np.concatenate([np.array([y0]),y1],axis=0)
+            return vec
+        def B(x):
+            x0,x1 = x[0],x[1:]
+            y0 = x0
+            y1 = S(x1)
+            vec = np.concatenate([np.array([y0]),y1],axis=0)
+            return vec
+        LinOpA = spla.LinearOperator((sh+1,sh+1),matvec=A,dtype=self.g.dtype)
+        LinOpB = spla.LinearOperator((sh+1,sh+1),matvec=B,dtype=self.g.dtype)
+        w,v = spla.eigs(LinOpA,k=1,M=LinOpB,sigma=self.E,tol=CG_TOL)
+        self.deltas = v[1:,0].real/v[0,0].real
+        self.deltas = self.deltas.real
+        if self.xi is None:
+            Ns = self.vmean
+        else:
+            Sp = S(self.deltas)
+            Ns  = - (1.-self.xi) * Sp 
+            Ns /= 1.-self.xi + self.xi * (1.+np.dot(self.deltas,Sp)**.5)
+        denom = 1. - np.dot(Ns,self.deltas)
+        self.deltas /= -denom
+        print('\tEIG solver time=',time.time()-t0)
+        print('\teigenvalue =',w)
+        print('\tscale1=',v[0,0].real)
+        print('\tscale2=',denom)
+        print('\timaginary norm=',np.linalg.norm(v.imag))
+    def sample_correlated(self):
+        if RANK==self.dest[0]:
+            self.v = None 
+            self.Hv = None
+            self.f = [] 
+            self.e = []
+            self.recv()
+            self.f = np.concatenate(self.f,axis=0) 
+            self.e = np.concatenate(self.e,axis=0) 
+            return blocking_analysis(self.f,self.e,0,False)
+        else: 
+            self.flocal = []
+            self.elocal = []
+            self.vlocal = None 
+            self.Hv_local = None
+             
+            self.store = dict()
+            for config in self.samples:
+                if config in self.store:
+                    fx,ex = self.store[config]
+                else:
+                    cx,ex,_,_ = self.ham.compute_local_energy(config,self.amplitude_factory,
+                                                              compute_v=False,compute_Hv=False)
+                    fx = cx**2 / self.p0[config]
+                    self.store[config] = fx,ex
+                self.flocal.append(fx)
+                self.elocal.append(ex)
+            self.send()
+            return None
+    def search(self,xs,params):
+        self.amplitude_factory.update_scheme(0)
+        Es = np.zeros(len(xs))
+        for ix,x in enumerate(xs):
+            info = self.amplitude_factory.update(x) 
+            if RANK==self.dest[0]:
+                E,err,_ = info
+                Es[ix] = E
+                print(f'ix={ix},param={params[ix]},E={E}')
+        if RANK==self.dest[0]:
+            return solve_quad(params,Es)
+        return
+def solve_min(x,y):
+    idx = np.argmin(y)
+    return x[idx],y[idx]
+def solve_quad(x,y):
+    if len(x)!=3:
+        return solve_min(x,y)
+    m = np.stack([np.square(x),x,np.ones(3)],axis=1)
+    a,b,c = list(np.dot(np.linalg.inv(m),y))
+    if a < 0. or a*b > 0.:
+        x0,y0 = solve_min(x,y)
+    else:
+        x0,y0 = -b/(2.*a),-b**2/(4.*a)+c
+    print(f'\ta={a},b={b},x0={x0},y0={y0}')
+    return x0,y0
 def blocking_analysis(weights, energies, neql, printQ=False):
     nSamples = weights.shape[0] - neql
     weights = weights[neql:]

@@ -417,6 +417,30 @@ class AmplitudeFactory2D:
         """Calculate the probability of a configuration.
         """
         return self.unsigned_amplitude(config) ** 2
+    def extract_diagonal(self,matrix):
+        start = 0
+        for ix,(_,_,size,_) in enumerate(self.constructors):
+            stop = start+size 
+            matrix[start:stop,:start] = 0.
+            matrix[start:stop,stop:] = 0.
+            start = stop
+        return matrix
+    def maskdot(self,f,v1,v2,x):
+        ls = []
+        start = 0
+        for ix,(_,_,size,_) in enumerate(self.constructors):
+            stop = start+size 
+            ls.append(np.dot(f*np.dot(v2[:,start:stop],x[start:stop]),v1[:,start:stop]))
+            start = stop
+        return np.concatenate(ls,axis=0)
+    def maskouter(self,v1,v2,x):
+        ls = []
+        start = 0
+        for ix,(_,_,size,_) in enumerate(self.constructors):
+            stop = start+size 
+            ls.append(v1[start:stop] * np.dot(v2[start:stop],x[start:stop]))
+            start = stop
+        return np.concatenate(ls,axis=0)
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -575,7 +599,6 @@ class Hubbard2D:
     def __init__(self,Lx,Ly,t,u):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
-        self.compute_Hv = False
     def initialize_pepo(self,fpeps):
         set_pepo_tsrs()
 
@@ -595,7 +618,6 @@ class Hubbard2D:
         pepo.add_tensor(FermionTensor(data=data_map[3].copy(),inds=('v',),tags=tags),virtual=True)
         pepo.contract_tags(tags,inplace=True)
         self.pepo = pepo
-        self.compute_Hv = True
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def flat2site(self,ix):
@@ -644,13 +666,18 @@ class Hubbard2D:
                 cx_ij = None if cx is None else cx[i,j]
                 e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
-    def compute_local_energy(self,config,amplitude_factory):
+    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
         plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
         # get gradient form plq12
-        unsigned_cx,vx,cx12 = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+        vx = None
+        if compute_v:
+            unsigned_cx,vx,cx12 = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+        else:
+            cx12 = {key:ftn_plq.copy().contract() for key,ftn_plq in plq12.items()}
+            unsigned_cx = sum(cx12.values()) / len(cx12)
         # get h/v bonds
         eh = self.nnh(config,plq12,inplace=True,cx=cx12) 
         ev = self.nnv(config,plq21,inplace=True,cx=None) 
@@ -659,8 +686,8 @@ class Hubbard2D:
         eu = self.u*len(config[config==3])
 
         ex = eh+ev+eu
-        if not self.compute_Hv: 
-            return ex,vx,None 
+        if not compute_Hv: 
+            return unsigned_cx,ex,vx,None 
         sign = amplitude_factory.compute_config_sign(tuple(config)) 
         # make bra
         bra = self.pepo.copy()
@@ -681,7 +708,7 @@ class Hubbard2D:
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
-        return ex,vx,Hvx
+        return unsigned_cx,ex,vx,Hvx
 ####################################################################################
 # sampler 
 ####################################################################################
@@ -706,6 +733,8 @@ class ExchangeSampler2D:
         self.px = self.amplitude_factory.prob(config)
         self.config = config
         # force to initialize with a better config
+        #print(self.px)
+        #exit()
         if self.px < thresh:
             raise ValueError 
     def preprocess(self,config):
