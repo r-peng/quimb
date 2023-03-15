@@ -89,10 +89,10 @@ class TNVMC: # stochastic sampling
         self.search_rate = search_rate 
         self.search_cond = search_cond
     def run(self,start,stop,tmpdir=None,
-            rate_min=DEFAULT_RATE_MIN,
-            rate_max=DEFAULT_RATE_MAX,
-            cond_min=DEFAULT_COND_MIN,
-            cond_max=DEFAULT_COND_MAX,
+            rate_start=DEFAULT_RATE_MIN,
+            rate_stop=DEFAULT_RATE_MAX,
+            cond_start=DEFAULT_COND_MIN,
+            cond_stop=DEFAULT_COND_MAX,
             rate_itv=None, # prapagate rate over rate_itv
             cond_itv=None, # propagate cond over cond_itv
         ):
@@ -100,25 +100,16 @@ class TNVMC: # stochastic sampling
         self.start = start
         self.stop = stop
         steps = stop - start
-        self.rate_min = rate_min
-        self.rate_max = rate_max
+        self.rate_start = rate_start
+        self.rate_stop = rate_stop
         self.rate_itv = steps if rate_itv is None else rate_itv
-        self.rate_base = (self.rate_max/self.rate_min)**(1./self.rate_itv)
-        self.cond_min = cond_min
-        self.cond_max = cond_max
+        self.rate_base = (self.rate_stop/self.rate_start)**(1./self.rate_itv)
+        self.cond_start = cond_start
+        self.cond_stop = cond_stop
         self.cond_itv = steps if cond_itv is None else cond_itv
-        self.cond_base = (self.rate_max/self.rate_min)**(1./self.rate_itv)
-        self.rate = self.rate_min
-        self.cond = self.cond_min 
-        if RANK==0:
-            print('rate_min=', self.rate_min)
-            print('rate_max=', self.rate_max)
-            print('rate_itv=', self.rate_itv)
-            print('rate_base=',self.rate_base)
-            print('cond_min=', self.cond_min)
-            print('cond_max=', self.cond_max)
-            print('cond_itv=', self.cond_itv)
-            print('cond_base=',self.cond_base)
+        self.cond_base = (self.rate_stop/self.rate_start)**(1./self.rate_itv)
+        self.rate = self.rate_start
+        self.cond = self.cond_start
         self.delta_norm = np.zeros(1)
         for step in range(start,stop):
             self.step = step
@@ -155,8 +146,8 @@ class TNVMC: # stochastic sampling
         self.delta_norm = delta_norm
         if cnt>0:
             print(f'\tregularized delta norm={delta_norm[0]}')
-            self.rate = self.rate_min
-            self.cond = self.cond_min
+            self.rate = self.rate_start
+            self.cond = self.cond_start
     def propagate_rate_cond(self):
         if self.step < self.start + self.rate_itv:
             self.rate *= self.rate_base

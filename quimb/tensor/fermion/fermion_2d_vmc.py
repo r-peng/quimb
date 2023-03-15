@@ -207,8 +207,11 @@ def get_all_lenvs(ftn,jmax=None):
     lenvs = [None] * ftn.Ly
     for j in range(jmax+1): 
         tags = first_col if j==0 else (first_col,ftn.col_tag(j))
-        ftn ^= tags
-        lenvs[j] = ftn.select(first_col).copy()
+        try:
+            ftn ^= tags
+            lenvs[j] = ftn.select(first_col).copy()
+        except (ValueError,IndexError):
+            return lenvs
     return lenvs
 def get_all_renvs(ftn,jmin=None):
     jmin = 1 if jmin is None else jmin
@@ -216,8 +219,11 @@ def get_all_renvs(ftn,jmin=None):
     renvs = [None] * ftn.Ly
     for j in range(ftn.Ly-1,jmin-1,-1): 
         tags = last_col if j==ftn.Ly-1 else (ftn.col_tag(j),last_col)
-        ftn ^= tags
-        renvs[j] = ftn.select(last_col).copy()
+        try:
+            ftn ^= tags
+            renvs[j] = ftn.select(last_col).copy()
+        except (ValueError,IndexError):
+            return renvs
     return renvs
 def replace_sites(ftn,sites,cis):
     for (i,j),ci in zip(sites,cis): 
@@ -372,16 +378,20 @@ class AmplitudeFactory2D:
                 ls.append(self.cache_top[config[(i+x_bsz)*self.Ly:]])
             ftn = FermionTensorNetwork(ls,virtual=False).view_like_(self.psi)
             ftn.reorder('col',inplace=True)
+            lenvs = get_all_lenvs(ftn.copy(),jmax=jmax-1)
             renvs = get_all_renvs(ftn.copy(),jmin=y_bsz)
             for j in range(jmax+1): 
-                tags = [first_col]+[ftn.col_tag(j+ix) for ix in range(y_bsz)]
+                tags = [ftn.col_tag(j+ix) for ix in range(y_bsz)]
                 cols = [ftn.select(tags,which='any').copy()]
-                if j<jmax:
-                    cols.append(renvs[j+y_bsz].copy())
-                plq[(i,j),(x_bsz,y_bsz)] = FermionTensorNetwork(cols,virtual=True).view_like_(self.psi) 
-                if j<jmax: 
-                    tags = first_col if j==0 else (first_col,ftn.col_tag(j))
-                    ftn ^= tags 
+                try:
+                    if j>0:
+                        cols.insert(0,lenvs[j-1].copy())
+                    if j<jmax:
+                        cols.append(renvs[j+y_bsz].copy())
+                    plq[(i,j),(x_bsz,y_bsz)] = \
+                        FermionTensorNetwork(cols,virtual=True).view_like_(self.psi)
+                except AttributeError: # lenv/renv is None
+                    continue
         return plq
     def grad(self,config,plq=None):
         # currently not called
@@ -640,31 +650,45 @@ class Hubbard2D:
             return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx 
         except (ValueError,IndexError):
             return 0.
-    def nnh(self,config,plq,inplace=True,cx=None):
-        e = 0.
-        x_bsz,y_bsz = 1,2
-        # all horizontal bonds
-        for i in range(self.Lx):
-            for j in range(self.Ly-1):
-                site1,site2 = (i,j),(i,j+1)
-                ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
-                if not inplace:
-                    ftn_plq = ftn_plq.copy()
-                cx_ij = None if cx is None else cx[i,j]
-                e += self.hop(ftn_plq,config,site1,site2,cx_ij)
-        return e
-    def nnv(self,config,plq,inplace=True,cx=None):
+    #def nnh(self,config,plq,inplace=True,cx=None):
+    #    e = 0.
+    #    x_bsz,y_bsz = 1,2
+    #    # all horizontal bonds
+    #    for i in range(self.Lx):
+    #        for j in range(self.Ly-1):
+    #            site1,site2 = (i,j),(i,j+1)
+    #            if 
+    #            ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
+    #            if not inplace:
+    #                ftn_plq = ftn_plq.copy()
+    #            cx_ij = None if cx is None else cx[i,j]
+    #            e += self.hop(ftn_plq,config,site1,site2,cx_ij)
+    #    return e
+    #def nnv(self,config,plq,inplace=True,cx=None):
+    #    # all vertical bonds
+    #    e = 0.
+    #    x_bsz,y_bsz = 2,1
+    #    for i in range(self.Lx-1):
+    #        for j in range(self.Ly):
+    #            site1,site2 = (i,j),(i+1,j)
+    #            ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
+    #            if not inplace:
+    #                ftn_plq = ftn_plq.copy()
+    #            cx_ij = None if cx is None else cx[i,j]
+    #            e += self.hop(ftn_plq,config,site1,site2,cx_ij)
+    #    return e
+    def nn(self,config,plq,x_bsz,y_bsz,inplace=True,cx=None):
         # all vertical bonds
         e = 0.
-        x_bsz,y_bsz = 2,1
-        for i in range(self.Lx-1):
-            for j in range(self.Ly):
-                site1,site2 = (i,j),(i+1,j)
-                ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
-                if not inplace:
-                    ftn_plq = ftn_plq.copy()
-                cx_ij = None if cx is None else cx[i,j]
-                e += self.hop(ftn_plq,config,site1,site2,cx_ij)
+        for i in range(self.Lx+1-x_bsz):
+            for j in range(self.Ly+1-y_bsz):
+                site1,site2 = (i,j),(i+x_bsz-1,j+y_bsz-1)
+                if ((i,j),(x_bsz,y_bsz)) in plq:
+                    ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
+                    if not inplace:
+                        ftn_plq = ftn_plq.copy()
+                    cx_ij = None if cx is None else cx[i,j]
+                    e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
@@ -676,11 +700,11 @@ class Hubbard2D:
         if compute_v:
             unsigned_cx,vx,cx12 = amplitude_factory.get_grad_from_plq(plq12,config=config) 
         else:
-            cx12 = {key:ftn_plq.copy().contract() for key,ftn_plq in plq12.items()}
+            cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()}
             unsigned_cx = sum(cx12.values()) / len(cx12)
         # get h/v bonds
-        eh = self.nnh(config,plq12,inplace=True,cx=cx12) 
-        ev = self.nnv(config,plq21,inplace=True,cx=None) 
+        eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
+        ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
         # onsite terms
         config = np.array(config,dtype=int)
         eu = self.u*len(config[config==3])
@@ -950,9 +974,7 @@ class DenseSampler2D:
         self.count = np.array([batchsize]*SIZE)
         if remain > 0:
             self.count[-remain:] += 1
-        self.disp = [0]
-        for batchsize in self.count[:-1]:
-            self.disp.append(self.disp[-1]+batchsize)
+        self.disp = np.concatenate([np.array([0]),np.cumsum(self.count[:-1])])
         self.start = self.disp[RANK]
         self.stop = self.start + self.count[RANK]
 
