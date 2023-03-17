@@ -435,22 +435,25 @@ class AmplitudeFactory2D:
             matrix[start:stop,stop:] = 0.
             start = stop
         return matrix
-    def maskdot(self,f,v1,v2,x):
-        ls = []
+    def maskdot(self,v1,v2,x,f=None):
+        y = np.zeros_like(x)
         start = 0
         for ix,(_,_,size,_) in enumerate(self.constructors):
             stop = start+size 
-            ls.append(np.dot(f*np.dot(v2[:,start:stop],x[start:stop]),v1[:,start:stop]))
+            v2x = np.dot(v2[:,start:stop],x[start:stop])
+            if f is not None:
+                v2x *= f
+            y[start:stop] = np.dot(v2x,v1[:,start:stop])
             start = stop
-        return np.concatenate(ls,axis=0)
+        return y
     def maskouter(self,v1,v2,x):
-        ls = []
+        y = np.zeros_like(x)
         start = 0
         for ix,(_,_,size,_) in enumerate(self.constructors):
             stop = start+size 
-            ls.append(v1[start:stop] * np.dot(v2[start:stop],x[start:stop]))
+            y[start:stop] = v1[start:stop] * np.dot(v2[start:stop],x[start:stop])
             start = stop
-        return np.concatenate(ls,axis=0)
+        return y
 ####################################################################################
 # ham class 
 ####################################################################################
