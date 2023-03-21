@@ -1,7 +1,7 @@
-import time,h5py,itertools,pickle,sys
+import time,h5py,itertools,pickle,sys,scipy
 import numpy as np
 import scipy.sparse.linalg as spla
-from scipy.optimize import line_search
+#from scipy.optimize import line_search
 
 from quimb.utils import progbar as Progbar
 from .utils import load_ftn_from_disc,write_ftn_to_disc
@@ -24,6 +24,7 @@ class TNVMC: # stochastic sampling
         extrapolator=None,
         search_rate=False,
         search_cond=False,
+        full_matrix=False,
         **kwargs,
     ):
         # parse ham
@@ -38,6 +39,7 @@ class TNVMC: # stochastic sampling
         # parse wfn 
         self.amplitude_factory = amplitude_factory         
         self.x = self.amplitude_factory.get_x()
+        self.nparam = len(self.x)
 
         # if need to condition, try making the element of psi-vec O(1)
         if conditioner == 'auto':
@@ -55,15 +57,17 @@ class TNVMC: # stochastic sampling
             self.ham.initialize_pepo(self.amplitude_factory.psi)
         if self.optimizer=='lin':
             self.xi = kwargs.get('xi',None)
+        self.full_matrix = full_matrix
         if self.optimizer=='sr':
+            self.mask = False
+        elif self.exact_sampling:
+            self.mask = False
+        elif self.full_matrix:
             self.mask = False
         else:
             self.mask = kwargs.get('mask',False)
-        # broadcast==1: must form full matrix first
-        # broadcast==2: can form full matrix, or compute matvec directly
-        self.broadcast = kwargs.get('broadcast',2)
-        self.full_matrix = kwargs.get('full_matrix',False)
-        self.sparse_solve = kwargs.get('sparse_solve',True)
+        if self.mask:
+            self.block_dict = self.amplitude_factory.get_block_dict()
 
         # parse extrapolator
         self.extrapolator = extrapolator 
@@ -325,304 +329,201 @@ class TNVMC: # stochastic sampling
             print('\texact sample time=',time.time()-t0)
     def extract_energy_gradient(self):
         t0 = time.time()
-        if self.exact_sampling:
-            if self.broadcast==1:
-                self._extract_energy_gradient_exact_1()
-            elif self.broadcast==2:
-                self._extract_energy_gradient_exact_2()
-            else:
-                raise NotImplementedError
-        else:
-            if self.broadcast==1:
-                self._extract_energy_gradient_stochastic_1()
-            elif self.broadcast==2:
-                self._extract_energy_gradient_stochastic_2()
-            else:
-                raise NotImplementedError
+        self.extract_energy()
+        self.extract_gradient()
+        if self.optimizer in ['sr','rgn','lin']:
+            self.extract_S()
+        if self.optimizer in ['rgn','lin']:
+            self.extract_H()
         if RANK==0:
             print('\tcollect data time=',time.time()-t0)
             print('\tnormalization=',self.n)
             print(f'step={self.step},energy={self.E},err={self.Eerr}')
             self.gnorm = np.linalg.norm(self.g)
             print('\tgradient norm=',self.gnorm)
-    def parse_matrix(self,matrix):
-        if self.mask:
-            matrix = self.amplitude_factory.extract_diagonal(matrix)
-        if self.sparse_solve:
-            def matvec(x):
-                return np.dot(matrix,x)
-            return matvec
-        else:
-            return matrix
-    def _extract_energy_gradient_stochastic_1(self):
-        # sum up local components 
-        if RANK==0:
-            nlocal = 1
-            elocal = np.zeros(1)
-            sh = len(self.x)
-            vsum_ = np.zeros(sh)
-            vesum_ = np.zeros(sh)
-            if self.optimizer in ['sr','rgn','lin']:
-                vvsum_ = np.zeros((sh,sh))
-            if self.optimizer in ['rgn','lin']:
-                Hvsum_ = np.zeros(sh)
-                vHvsum_ = np.zeros((sh,sh))
-        else:
-            nlocal = len(self.samples)
-            elocal = np.array(self.elocal)
-            v = np.array(self.vlocal)
-            vT = v.T
-            vsum_ = v.sum(axis=0)
-            vesum_ = np.dot(vT,elocal)
-            if self.optimizer in ['sr','rgn','lin']:
-                vvsum_ = np.dot(vT,v)
-            if self.optimizer in ['rgn','lin']:
-                Hv = np.array(self.Hv_local) 
-                Hvsum_ = Hv.sum(axis=0)
-                vHvsum_ = np.dot(vT,Hv)
-
-        # gather sizes
+    def gather_sizes(self):
         self.count = np.array([0]*SIZE)
-        COMM.Allgather(np.array([nlocal]),self.count)
+        COMM.Allgather(np.array([self.nlocal]),self.count)
         self.disp = np.concatenate([np.array([0]),np.cumsum(self.count[:-1])])
-        # gather local quantities
-        n = self.count.sum()
-        e = np.zeros(n)
-        COMM.Gatherv(elocal,[e,self.count,self.disp,MPI.DOUBLE],root=0)
-        vsum = np.zeros_like(vsum_)
-        COMM.Reduce(vsum_,vsum,op=MPI.SUM,root=0)
-        vesum = np.zeros_like(vesum_)
-        COMM.Reduce(vesum_,vesum,op=MPI.SUM,root=0)
-        if self.optimizer in ['sr','rgn','lin']:
-            vvsum = np.zeros_like(vvsum_)
-            COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
-        if self.optimizer in ['rgn','lin']:
-            Hvsum = np.zeros_like(Hvsum_)
-            COMM.Reduce(Hvsum_,Hvsum,op=MPI.SUM,root=0)
-            vHvsum = np.zeros_like(vHvsum_)
-            COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
-
+    def extract_energy(self):
+        if self.exact_sampling:
+            self._extract_energy_exact()
+        else:
+            self._extract_energy_stochastic()
+    def _extract_energy_stochastic(self):
+        # collect all energies for blocking analysis 
+        if RANK==0:
+            self.nlocal = 1
+            self.elocal = np.zeros(1)
+        else:
+            self.nlocal = len(self.samples)
+            self.elocal = np.array(self.elocal)
+        self.gather_sizes()
+        self.n = self.count.sum()
+        e = np.zeros(self.n)
+        COMM.Gatherv(self.elocal,[e,self.count,self.disp,MPI.DOUBLE],root=0)
         if RANK>0:
             return
         e = e[1:]
-        n -= 1
-        self.n = n
+        self.n -= 1
         self.E,self.Eerr = blocking_analysis(np.ones_like(e),e,0,True)
-        vmean = vsum / n 
-        self.g = vesum / n - self.E * vmean 
-        if self.optimizer in ['sr','rgn','lin']:
-            self.S = vvsum / n - np.outer(vmean,vmean) 
-            self.S = self.parse_matrix(self.S)
-        if self.optimizer in ['rgn','lin']:
-            self.H = vHvsum / n - np.outer(vmean,Hvsum/n)
-            self.H -= np.outer(self.g,vmean)
-            self.H = self.parse_matrix(self.H)
-    def _extract_energy_gradient_exact_1(self):
-        # compute local quantities
-        nlocal = len(self.samples)
-        flocal = np.array(self.flocal)
-        ef = np.array(self.elocal) * flocal
-        e = np.array([ef.sum()])
-        v = np.array(self.vlocal)
-        vmean_ = np.dot(flocal,v) 
-        vemean_ = np.dot(ef,v)
-        if self.optimizer in ['sr','rgn','lin']:
-            vvmean_ = np.einsum('s,si,sj->ij',flocal,v,v)
-        if self.optimizer in ['rgn','lin']:
-            Hv = np.array(self.Hv_local) 
-            Hvmean_ = np.dot(flocal,Hv)
-            vHvmean_ = np.einsum('s,si,sj->ij',flocal,v,Hv)
+    def _extract_energy_exact(self):
+        # reduce scalar energy
+        self.nlocal = len(self.samples)
+        self.gather_sizes()
 
-        # gather sizes
-        count = np.array([0]*SIZE)
-        COMM.Allgather(np.array([nlocal]),count)
-        disp = np.concatenate([np.array([0]),np.cumsum(count[:-1])])
-        # gather local quantities
-        n = count.sum()
-        f = np.zeros(n)
-        COMM.Gatherv(flocal,[f,count,disp,MPI.DOUBLE],root=0)
+        self.elocal = np.array(self.elocal)
+        self.flocal = np.array(self.flocal)
+        e = np.array([np.dot(self.elocal,self.flocal)])
         self.E = np.zeros_like(e) 
         COMM.Reduce(e,self.E,op=MPI.SUM,root=0)
-        vmean = np.zeros_like(vmean_)
-        COMM.Reduce(vmean_,vmean,op=MPI.SUM,root=0)
-        vemean = np.zeros_like(vemean_)
-        COMM.Reduce(vemean_,vemean,op=MPI.SUM,root=0)
-        if self.optimizer in ['sr','rgn','lin']:
-            vvmean = np.zeros_like(vvmean_)
-            COMM.Reduce(vvmean_,vvmean,op=MPI.SUM,root=0)
-        if self.optimizer in ['rgn','lin']:
-            Hvmean = np.zeros_like(Hvmean_)
-            COMM.Reduce(Hvmean_,Hvmean,op=MPI.SUM,root=0)
-            vHvmean = np.zeros_like(vHvmean_)
-            COMM.Reduce(vHvmean_,vHvmean,op=MPI.SUM,root=0)
-
         if RANK>0:
             return
         self.E = self.E[0]
-        self.g = vemean - self.E * vmean 
         self.Eerr = 0.
-        if self.optimizer in ['sr','rgn','lin']:
-            self.S = vvmean - np.outer(vmean,vmean) 
-            self.S = self.parse_matrix(self.S)
-        if self.optimizer in ['rgn','lin']:
-            self.H = vHvmean - np.outer(vmean,Hvmean)
-            self.H -= np.outer(self.g,vmean)
-            self.H = self.parse_matrix(self.H)
-    def _extract_energy_gradient_stochastic_2(self):
-        if RANK==0:
-            nlocal = 0
+        self.n = 1.
+    def extract_gradient(self):
+        # reduce vectors
+        if self.exact_sampling:
+            self.vlocal = np.array(self.vlocal)
+            vsum_ = np.dot(self.flocal,self.vlocal) 
+            vesum_ = np.dot(self.elocal * self.flocal,self.vlocal)
         else:
-            nlocal = len(self.samples)
-            elocal = np.array(self.elocal)
-            vlocal = np.array(self.vlocal)
-            if self.optimizer in ['rgn','lin']:
-                Hv_local = np.array(self.Hv_local)
-
-        self.count = np.array([0]*SIZE)
-        COMM.Gather(np.array([nlocal]),self.count,root=0)
+            if RANK==0:
+                vsum_ = np.zeros(self.nparam)
+                vesum_ = np.zeros(self.nparam)
+            else:
+                self.vlocal = np.array(self.vlocal)
+                vsum_ = self.vlocal.sum(axis=0)
+                vesum_ = np.dot(self.elocal,self.vlocal)
+        self.vmean = np.zeros_like(vsum_)
+        COMM.Reduce(vsum_,self.vmean,op=MPI.SUM,root=0)
+        vesum = np.zeros_like(vesum_)
+        COMM.Reduce(vesum_,vesum,op=MPI.SUM,root=0)
         if RANK>0:
-            COMM.Ssend(np.array(elocal),dest=0,tag=3)
-            COMM.Ssend(np.array(vlocal),dest=0,tag=4)
-            if self.optimizer in ['rgn','lin']:
-                COMM.Ssend(np.array(Hv_local),dest=0,tag=5)
             return
-        e = []
-        v = []
-        sh = len(self.x)
-        if self.optimizer in ['rgn','lin']:
-            Hv = []
+        self.vmean /= self.n
+        self.g = vesum / self.n - self.E * self.vmean 
+    def extract_S(self):
+        if self.mask:
+            assert not self.exact_sampling
+            self._extract_S_mask()
+        else:
+            if self.full_matrix:
+                self.S = self._get_Smatrix()
+            else:
+                self._extract_S_full()
+    def _get_Smatrix(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop
+        if RANK==0:
+            sh = stop-start
+            vvsum_ = np.zeros((sh,)*2)
+        else:
+            v = self.vlocal[:,start:stop] 
+            vvsum_ = np.dot(v.T,v)
+        vvsum = np.zeros_like(vvsum_)
+        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
+        S = None
+        if RANK==0:
+            vmean = self.vmean[start:stop]
+            S = vvsum / self.n - np.outer(vmean,vmean)
+        return S
+    def _extract_S_mask(self):
+        # stochastic only, collect matrix blocks
+        ls = [None] * len(self.block_dict)
+        for ix,(start,stop) in enumerate(self.block_dict):
+            ls[ix] = self._get_Smatrix(start=start,stop=stop)
+        self.S = ls
+    def _extract_S_full(self):
+        if self.exact_sampling:
+            self.f = np.zeros(self.count.sum())
+            COMM.Gatherv(self.flocal,[self.f,self.count,self.disp,MPI.DOUBLE],root=0)
+        # construct matvec
+        if RANK>0:
+            COMM.Ssend(self.vlocal,dest=0,tag=4)
+            return
+        v = [self.vlocal] if self.exact_sampling else []
         for worker in range(1,SIZE):
             nlocal = self.count[worker]
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=3)
-            e.append(buf) 
-
-            buf = np.zeros((nlocal,sh))
+            buf = np.zeros((nlocal,self.nparam))
             COMM.Recv(buf,source=worker,tag=4)
             v.append(buf)    
-
-            if self.optimizer in ['rgn','lin']:
-                buf = np.zeros((nlocal,sh))
-                COMM.Recv(buf,source=worker,tag=5)
-                Hv.append(buf)    
-        e = np.concatenate(e,axis=0) 
-        v = np.concatenate(v,axis=0) 
-        n = self.count.sum()
-        self.n = n
-        self.E,self.Eerr = blocking_analysis(np.ones_like(e),e,0,True)
-        vmean = v.sum(axis=0) / n  
-        self.g = np.dot(e,v) / n - vmean * self.E
-        if self.optimizer in ['sr','rgn','lin']:
+        self.v = np.concatenate(v,axis=0) 
+        if self.exact_sampling:
+            def matvec(x):
+                return np.dot(self.f * np.dot(self.v,x),self.v) - self.vmean * np.dot(self.vmean,x)
+        else:
+            def matvec(x):
+                return np.dot(np.dot(self.v,x),self.v) / self.n - self.vmean * np.dot(self.vmean,x)
+        self.S = matvec
+    def extract_H(self):
+        self._extract_Hvmean()
+        if self.mask:
+            assert not self.exact_sampling
+            self._extract_H_mask()
+        else:
             if self.full_matrix:
-                vT = v.T
-                self.S = np.dot(vT,v) / n - np.outer(vmean,vmean) 
-                self.S = self.parse_matrix(self.S)
+                self.H = self._get_Hmatrix()
             else:
-                if self.mask:
-                    maskdot = self.amplitude_factory.maskdot
-                    maskouter = self.amplitude_factory.maskouter
-                    def matvec(x):
-                        return maskdot(v,v,x) / n - maskouter(vmean,vmean,x)
-                else:
-                    def matvec(x):
-                        return np.dot(np.dot(v,x),v) / n - vmean * np.dot(vmean,x)
-                self.S = matvec
-        if self.optimizer in ['rgn','lin']:
-            Hv = np.concatenate(Hv,axis=0)
-            Hvmean = Hv.sum(axis=0) / n
-            if self.full_matrix:
-                self.H = np.dot(vT,Hv) / n - np.outer(vmean,Hvmean)
-                self.H -= np.outer(self.g,vmean)
-                self.H = self.parse_matrix(self.H)
+                self._extract_H_full()
+    def _extract_Hvmean(self):
+        if self.exact_sampling:
+            self.Hv_local = np.array(self.Hv_local)
+            Hvsum_ = np.dot(self.flocal,self.Hv_local)
+        else:
+            if RANK==0:
+                Hvsum_ = np.zeros(self.nparam)
             else:
-                if self.mask:
-                    def matvec(x):
-                        return maskdot(v,Hv,x) / n - maskouter(vmean,Hvmean,x) \
-                                                   - maskouter(self.g,vmean,x)
-                else:
-                    def matvec(x):
-                        return np.dot(np.dot(Hv,x),v) / n - vmean * np.dot(Hvmean,x) \
-                                                          - self.g * np.dot(vmean,x)
-                self.H = matvec
-    def _extract_energy_gradient_exact_2(self):
-        nlocal = len(self.samples)
-        flocal = np.array(self.flocal)
-        elocal = np.array(self.elocal)
-        vlocal = np.array(self.vlocal)
-        if self.optimizer in ['rgn','lin']:
-            Hv_local = np.array(self.Hv_local)
-        count = np.array([0]*SIZE)
-        COMM.Gather(np.array([nlocal]),count,root=0)
+                self.Hv_local = np.array(self.Hv_local)
+                Hvsum_ = self.Hv_local.sum(axis=0)
+        self.Hvmean = np.zeros_like(Hvsum_)
+        COMM.Reduce(Hvsum_,self.Hvmean,op=MPI.SUM,root=0)
+        if RANK==0:
+            self.Hvmean /= self.n
+    def _get_Hmatrix(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop
+        if RANK==0:
+            sh = stop-start
+            vHvsum_ = np.zeros((sh,)*2)
+        else:
+            v = self.vlocal[:,start:stop] 
+            Hv = self.Hv_local[:,start:stop] 
+            vHvsum_ = np.dot(v.T,Hv)
+        vHvsum = np.zeros_like(vHvsum_)
+        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
+        H = None
+        if RANK==0:
+            Hvmean = self.Hvmean[start:stop]
+            vmean = self.vmean[start:stop]
+            g = self.g[start:stop]
+            H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
+        return H
+    def _extract_H_mask(self):
+        ls = [None] * len(self.block_dict)
+        for ix,(start,stop) in enumerate(self.block_dict):
+            ls[ix] = self._get_Hmatrix(start=start,stop=stop)
+        self.H = ls
+    def _extract_H_full(self):
         if RANK>0:
-            COMM.Ssend(np.array(flocal),dest=0,tag=2)
-            COMM.Ssend(np.array(elocal),dest=0,tag=3)
-            COMM.Ssend(np.array(vlocal),dest=0,tag=4)
-            if self.optimizer in ['rgn','lin']:
-                COMM.Ssend(np.array(Hv_local),dest=0,tag=5)
+            COMM.Ssend(self.Hv_local,dest=0,tag=5)
             return
-        f = [flocal]
-        e = [elocal]
-        v = [vlocal]
-        sh = len(self.x)
-        if self.optimizer in ['rgn','lin']:
-            Hv = [Hv_local]
+        Hv = [self.Hv_local] if self.exact_sampling else []
         for worker in range(1,SIZE):
-            nlocal = count[worker]
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=2)
-            f.append(buf) 
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=3)
-            e.append(buf) 
-
-            buf = np.zeros((nlocal,sh))
-            COMM.Recv(buf,source=worker,tag=4)
-            v.append(buf)    
-            if self.optimizer in ['rgn','lin']:
-                buf = np.zeros((nlocal,sh))
-                COMM.Recv(buf,source=worker,tag=5)
-                Hv.append(buf)    
-        f = np.concatenate(f,axis=0) 
-        e = np.concatenate(e,axis=0) 
-        v = np.concatenate(v,axis=0) 
-        self.E = np.dot(e,f)
-        vmean = np.dot(f,v)  
-        self.g = np.dot(e*f,v) - vmean * self.E
-        self.Eerr = 0.
-        if self.optimizer in ['sr','rgn','lin']:
-            if self.full_matrix:
-                self.S = np.einsum('s,si,sj->ij',f,v,v) - np.outer(vmean,vmean) 
-                self.S = self.parse_matrix(self.S)
-            else:
-                if self.mask:
-                    maskdot = self.amplitude_factory.maskdot
-                    maskouter = self.amplitude_factory.maskouter
-                    def matvec(x):
-                        return maskdot(v,v,x,f=f) - maskouter(vmean,vmean,x)
-                else:
-                    def matvec(x):
-                        return np.dot(f*np.dot(v,x),v) - vmean * np.dot(vmean,x)
-                self.S = matvec
-        if self.optimizer in ['rgn','lin']:
-            Hv = np.concatenate(Hv,axis=0)
-            Hvmean = np.dot(f,Hv)
-            if self.full_matrix:
-                self.H = np.einsum('s,si,sj->ij',f,v,Hv) - np.outer(vmean,Hvmean)
-                self.H -= np.outer(self.g,vmean)
-                self.H = self.parse_matrix(self.H)
-            else:
-                if self.mask:
-                    def matvec(x):
-                        return maskdot(v,Hv,x,f=f) - maskouter(vmean,Hvmean,x) \
-                                                   - maskouter(self.g,vmean,x)
-                else:
-                    def matvec(x):
-                        return np.dot(f*np.dot(Hv,x),v) - vmean * np.dot(Hvmean,x) \
-                                                        - self.g * np.dot(vmean,x)
-                self.H = matvec
+            nlocal = self.count[worker]
+            buf = np.zeros((nlocal,self.nparam))
+            COMM.Recv(buf,source=worker,tag=5)
+            Hv.append(buf)    
+        Hv = np.concatenate(Hv,axis=0) 
+        if self.exact_sampling:
+            def matvec(x):
+                return np.dot(self.f * np.dot(Hv,x),self.v) - self.vmean * np.dot(self.Hvmean,x) \
+                                                            - self.g * np.dot(self.vmean,x)
+        else:
+            def matvec(x):
+                return np.dot(np.dot(Hv,x),self.v) / self.n - self.vmean * np.dot(self.Hvmean,x) \
+                                                            - self.g * np.dot(self.vmean,x)
+        self.Hv = Hv
+        self.H = matvec
     def transform_gradients(self,cond):
         if RANK>0:
             return 
@@ -646,64 +547,115 @@ class TNVMC: # stochastic sampling
             raise NotImplementedError
     def _transform_gradients_sr(self,cond):
         t0 = time.time()
-        sh = len(self.g)
-        if self.sparse_solve:
-            def A(x):
-                return self.S(x) + cond * x
-            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.g.dtype)
-            self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
-            print('\tSR solver exit status=',info)
-        else:
-            A = self.S + cond * np.eye(sh)
-            self.deltas = np.linalg.solve(A,self.g)
+        def A(x):
+            return self.S(x) + cond * x
+        LinOp = spla.LinearOperator((self.nparam,self.nparam),matvec=A,dtype=self.g.dtype)
+        self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
+        print('\tSR solver exit status=',info)
         print('\tSR solver time=',time.time()-t0)
     def _transform_gradients_rgn(self,cond):
         t0 = time.time()
-        sh = len(self.g)
-        if self.sparse_solve:
+        if self.mask:
+            self._transform_gradients_rgn_mask(cond)
+        else:
+            self._transform_gradients_rgn_full(cond)
+        print('\tRGN solver time=',time.time()-t0)
+    def _transform_gradients_rgn_mask(self,cond):
+        #self.deltas = np.zeros_like(self.x)
+        #for ix,(start,stop) in enumerate(self.block_dict):
+        #    H = self.H[ix] - self.E * self.S[ix] + cond * np.eye(stop-start)
+        #    self.deltas[start:stop] = np.linalg.solve(H,self.g[start:stop])
+        H = np.zeros((self.nparam,self.nparam))
+        for ix,(start,stop) in enumerate(self.block_dict):
+            H[start:stop,start:stop] = self.H[ix] - self.E * self.S[ix] + cond * np.eye(stop-start)
+        self.deltas = np.linalg.solve(H,self.g)
+    def _transform_gradients_rgn_full(self,cond):
+        if self.full_matrix:
+            H = self.H - self.E * self.S + cond * np.eye(self.nparam)
+            self.deltas = np.linalg.solve(H,self.g)
+        else:
             def A(x):
                 return self.H(x) - self.E * self.S(x) + cond * x 
-            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.g.dtype)
-            #self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL)
-            self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
+            LinOp = spla.LinearOperator((self.nparam,self.nparam),matvec=A,dtype=self.g.dtype)
+            self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL)
+            #self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
             print('\tRGN solver exit status=',info)
-        else:
-            A = self.H - self.E * self.S + cond * np.eye(sh)
-            self.deltas = np.linalg.solve(A,self.g)
-        print('\tRGN solver time=',time.time()-t0)
     def _transform_gradients_lin(self,cond):
         t0 = time.time()
-        sh = len(self.g)
-        Hi0 = self.g
-        H0j = self.Hv_mean - self.E * self.vmean
-        def A(x):
-            x0,x1 = x[0],x[1:]
-            y = np.zeros_like(x)
-            y[0] = self.E * x0 + np.dot(H0j,x1)
-            y[1:] = Hi0 + self.H(x1) + cond * x1
-            return y
-        def B(x):
-            x0,x1 = x[0],x[1:]
-            y = np.zeros_like(x)
-            y[0] = x0
-            y[1:] = self.S(x1) + cond * x1
-            return y
-        w,v = spla.eigs(A,k=1,M=B,sigma=self.E,tol=CG_TOL)
-        self.deltas = v[1:,0].real/v[0,0].real
+        if self.mask:
+            self._transform_gradients_lin_mask(cond)
+        else:
+            self._transform_gradients_lin_full(cond)
+        print('\tEIG solver time=',time.time()-t0)
+    def _scale_eigenvector(self,v):
+        self.deltas = v[1:].real/v[0].real
         self.deltas = self.deltas.real
         if self.xi is None:
             Ns = self.vmean
         else:
-            Sp = self.S(self.deltas)
+            if self.full_matrix:
+                Sp = np.dot(self.S,self.deltas)
+            else:
+                Sp = self.S(self.deltas)
             Ns  = - (1.-self.xi) * Sp 
             Ns /= 1.-self.xi + self.xi * (1.+np.dot(self.deltas,Sp))**.5
         denom = 1. - np.dot(Ns,self.deltas)
         self.deltas /= -denom
-        print('\tEIG solver time=',time.time()-t0)
-        print('\teigenvalue =',w)
-        print('\tscale1=',v[0,0].real)
+        print('\tscale1=',v[0].real)
         print('\tscale2=',denom)
         print('\timaginary norm=',np.linalg.norm(v.imag))
+    def _select_eigenvalue(self,w,v):
+        #if min(w.real) < self.E - self.revert:
+        #    dist = (w.real-self.E)**2
+        #    idx = np.argmin(dist)
+        #else:
+        #    idx = np.argmin(w.real)
+        z0_sq = v[0,:].real ** 2
+        idx = np.argmax(z0_sq)
+        return w[idx],v[:,idx]
+    def _transform_gradients_lin_mask(self,cond):
+        H = np.zeros((self.nparam,self.nparam))
+        S = np.zeros((self.nparam,self.nparam))
+        for ix,(start,stop) in enumerate(self.block_dict):
+            H[start:stop,start:stop] = self.H[ix] 
+            S[start:stop,start:stop] = self.S[ix] 
+        A = np.block([[np.ones((1,1))*self.E,np.zeros((1,self.nparam))],
+                      [np.zeros((self.nparam,1)),H]])
+        B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
+                      [np.zeros((self.nparam,1)),S+cond*np.eye(self.nparam)]])
+        w,v = scipy.linalg.eig(A,b=B) 
+        w,v = self._select_eigenvalue(w,v)
+        print('\teigenvalue =',w)
+        self._scale_eigenvector(v)
+    def _transform_gradients_lin_full(self,cond):
+        Hi0 = self.g
+        H0j = self.Hvmean - self.E * self.vmean
+        if self.full_matrix:
+            A = np.block([[np.ones((1,1))*self.E,H0j.reshape(1,self.nparam)],
+                          [Hi0.reshape(self.nparam,1),self.H]])
+            B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
+                          [np.zeros((self.nparam,1)),self.S+cond*np.eye(self.nparam)]])
+            w,v = scipy.linalg.eig(A,b=B) 
+            w,v = self._select_eigenvalue(w,v)
+        else:
+            def A(x):
+                x0,x1 = x[0],x[1:]
+                y = np.zeros_like(x)
+                y[0] = self.E * x0 + np.dot(H0j,x1)
+                y[1:] = Hi0 * x0 + self.H(x1) 
+                return y
+            def B(x):
+                x0,x1 = x[0],x[1:]
+                y = np.zeros_like(x)
+                y[0] = x0
+                y[1:] = self.S(x1) + cond * x1
+                return y
+            A = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=A,dtype=self.g.dtype)
+            B = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=B,dtype=self.g.dtype)
+            w,v = spla.eigs(A,k=1,M=B,sigma=self.E,tol=CG_TOL)
+            w,v = w[0],v[:,0]
+        print('\teigenvalue =',w)
+        self._scale_eigenvector(v)
     def sample_correlated(self):
         if self.exact_sampling:
             raise NotImplementedError
@@ -724,13 +676,6 @@ class TNVMC: # stochastic sampling
                 self.elocal.append(ex)
         return self.extract_correlated_energy()
     def extract_correlated_energy(self):
-        if self.broadcast==1:
-            return self._extract_correlated_energy_1()
-        elif self.broadcast==2:
-            return self._extract_correlated_energy_2()
-        else:
-            raise NotImplementedError
-    def _extract_correlated_energy_1(self):
         if RANK==0:
             flocal = np.zeros(1)
             elocal = np.zeros(1)
@@ -738,7 +683,7 @@ class TNVMC: # stochastic sampling
             flocal = np.array(self.flocal)
             elocal = np.array(self.elocal)
         # gather local quantities
-        n = count.sum()
+        n = self.count.sum()
         e = np.zeros(n)
         COMM.Gatherv(elocal,[e,self.count,self.disp,MPI.DOUBLE],root=0)
         f = np.zeros(n)
@@ -747,32 +692,6 @@ class TNVMC: # stochastic sampling
            return blocking_analysis(f[1:],e[1:],0,False)
         else:
             return None,None
-    def _extract_correlated_energy_2(self):
-        if RANK==0:
-            nlocal = 0
-        else:
-            nlocal = len(self.samples)
-            elocal = np.array(self.elocal)
-            flocal = np.array(self.flocal)
-        if RANK>0:
-            COMM.Ssend(np.array(flocal),dest=0,tag=2)
-            COMM.Ssend(np.array(elocal),dest=0,tag=3)
-            return None,None
-        f = []
-        e = []
-        for worker in range(1,SIZE):
-            nlocal = self.count[worker]
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=2)
-            f.append(buf) 
-
-            buf = np.zeros(nlocal) 
-            COMM.Recv(buf,source=worker,tag=3)
-            e.append(buf) 
-        f = np.concatenate(f,axis=0) 
-        e = np.concatenate(e,axis=0) 
-        return blocking_analysis(f,e,0,False)
     def search(self,xs,params):
         self.amplitude_factory.update_scheme(0)
         Es = np.zeros(len(xs))
@@ -780,7 +699,7 @@ class TNVMC: # stochastic sampling
             COMM.Bcast(x,root=0)
             self.amplitude_factory.update(x) 
             t0 = time.time()
-            E,err,_ = self.sample_correlated()
+            E,err = self.sample_correlated()
             if RANK==0:
                 Es[ix] = E
                 print('\tcorrelated sample time=',time.time()-t0)
