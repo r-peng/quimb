@@ -1,4 +1,44 @@
 
+def compute_double_layer_plq(norm,**compress_opts):
+    norm.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
+    Lx,Ly = norm.Lx,norm.Ly
+
+    ftn = norm.copy()
+    last_row = ftn.row_tag(Lx-1)
+    top = [None] * Lx
+    top[-1] = ftn.select(last_row).copy() 
+    for i in range(Lx-2,0,-1):
+        try:
+            ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,Ly-1),**compress_opts)
+            top[i] = ftn.select(last_row).copy()
+        except (ValueError,IndexError):
+            break
+
+    ftn = norm.copy()
+    first_row = ftn.row_tag(0)
+    bot = [None] * Lx
+    bot[0] = ftn.select(first_row).copy()
+    for i in range(1,Lx-1):
+        try:
+            ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,Ly-1),**compress_opts)
+            bot[i] = ftn.select(first_row).copy()
+        except (ValueError,IndexError):
+            break
+
+    plq = dict()  
+    for i in range(Lx):
+        ls = []
+        if i>0:
+            ls.append(bot[i-1])
+        ls.append(norm.select(norm.row_tag(i)).copy())
+        if i<Lx-1:
+            ls.append(top[i+1])
+        try:
+            ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
+        except (AttributeError,TypeError): # top/bot env is None
+            break
+        plq = update_plq_from_3col(plq,ftn,i,1,1,norm)
+    return plq
 def get_key_from_qlab(qlab):
     # isinstance(qlab,pyblock3.algebra.symmerty.SZ)
     n = qlab.n 

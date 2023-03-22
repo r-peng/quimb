@@ -225,6 +225,25 @@ def get_all_renvs(ftn,jmin=None):
         except (ValueError,IndexError):
             return renvs
     return renvs
+def update_plq_from_3col(plq,ftn,i,x_bsz,y_bsz,ftn_instance):
+    jmax = ftn_instance.Ly - y_bsz
+    ftn.reorder('col',inplace=True)
+    lenvs = get_all_lenvs(ftn.copy(),jmax=jmax-1)
+    renvs = get_all_renvs(ftn.copy(),jmin=y_bsz)
+    for j in range(jmax+1): 
+        tags = [ftn.col_tag(j+ix) for ix in range(y_bsz)]
+        cols = [ftn.select(tags,which='any').copy()]
+        try:
+            if j>0:
+                cols.insert(0,lenvs[j-1].copy())
+            if j<jmax:
+                cols.append(renvs[j+y_bsz].copy())
+            plq[(i,j),(x_bsz,y_bsz)] = \
+                FermionTensorNetwork(cols,virtual=True).view_like_(ftn_instance)
+        except (AttributeError,TypeError): # lenv/renv is None
+            #continue
+            return plq
+    return plq
 def replace_sites(ftn,sites,cis):
     for (i,j),ci in zip(sites,cis): 
         bra = ftn[ftn.site_tag(i,j),'BRA']
@@ -601,9 +620,11 @@ def combine(top,bot):
             pepo.contract_tags(pepo.site_tag(i,j),inplace=True) 
     return pepo 
 class Hubbard2D:
-    def __init__(self,Lx,Ly,t,u):
+    def __init__(self,Lx,Ly,t,u,**contract_opts):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
+        # for double layer contraction
+        self.contract_opts = contract_opts
     def initialize_pepo(self,fpeps):
         set_pepo_tsrs()
 
@@ -722,80 +743,16 @@ class Hubbard2D:
         norm = fpeps 
         norm.add_tensor_network(bra,virtual=True)
 
-        # parse double layer contract_opts
-        contract_opts = amplitude_factory.contract_opts.copy()
-        max_bond = contract_opts.get('max_bond',None)
-        if max_bond is not None:
-           max_bond *= 2
-        contract_opts['max_bond'] = max_bond
-
-        #plq = norm._compute_plaquette_environments_row_first(1,1,**contract_opts)
-        #for key in plq:
-        #    plq[key].view_like_(fpeps)
-        plq = compute_double_layer_plq(norm,**contract_opts)  
+        if self.Lx > self.Ly:
+            plq = norm._compute_plaquette_environments_col_first(1,1,**self.contract_opts)
+        else:
+            plq = norm._compute_plaquette_environments_row_first(1,1,**self.contract_opts)
+        for key in plq:
+            plq[key].view_like_(fpeps)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
-def update_plq_from_3col(plq,ftn,i,x_bsz,y_bsz,ftn_instance):
-    jmax = ftn_instance.Ly - y_bsz
-    ftn.reorder('col',inplace=True)
-    lenvs = get_all_lenvs(ftn.copy(),jmax=jmax-1)
-    renvs = get_all_renvs(ftn.copy(),jmin=y_bsz)
-    for j in range(jmax+1): 
-        tags = [ftn.col_tag(j+ix) for ix in range(y_bsz)]
-        cols = [ftn.select(tags,which='any').copy()]
-        try:
-            if j>0:
-                cols.insert(0,lenvs[j-1].copy())
-            if j<jmax:
-                cols.append(renvs[j+y_bsz].copy())
-            plq[(i,j),(x_bsz,y_bsz)] = \
-                FermionTensorNetwork(cols,virtual=True).view_like_(ftn_instance)
-        except (AttributeError,TypeError): # lenv/renv is None
-            #continue
-            return plq
-    return plq
-def compute_double_layer_plq(norm,**compress_opts):
-    norm.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
-    Lx,Ly = norm.Lx,norm.Ly
-
-    ftn = norm.copy()
-    last_row = ftn.row_tag(Lx-1)
-    top = [None] * Lx
-    top[-1] = ftn.select(last_row).copy() 
-    for i in range(Lx-2,0,-1):
-        try:
-            ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,Ly-1),**compress_opts)
-            top[i] = ftn.select(last_row).copy()
-        except (ValueError,IndexError):
-            break
-
-    ftn = norm.copy()
-    first_row = ftn.row_tag(0)
-    bot = [None] * Lx
-    bot[0] = ftn.select(first_row).copy()
-    for i in range(1,Lx-1):
-        try:
-            ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,Ly-1),**compress_opts)
-            bot[i] = ftn.select(first_row).copy()
-        except (ValueError,IndexError):
-            break
-
-    plq = dict()  
-    for i in range(Lx):
-        ls = []
-        if i>0:
-            ls.append(bot[i-1])
-        ls.append(norm.select(norm.row_tag(i)).copy())
-        if i<Lx-1:
-            ls.append(top[i+1])
-        try:
-            ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
-        except (AttributeError,TypeError): # top/bot env is None
-            break
-        plq = update_plq_from_3col(plq,ftn,i,1,1,norm)
-    return plq
 ####################################################################################
 # sampler 
 ####################################################################################

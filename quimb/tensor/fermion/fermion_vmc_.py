@@ -587,46 +587,59 @@ class TNVMC: # stochastic sampling
         else:
             self._transform_gradients_lin_full(cond)
         print('\tEIG solver time=',time.time()-t0)
-    def _scale_eigenvector(self,v):
-        self.deltas = v[1:].real/v[0].real
-        self.deltas = self.deltas.real
+    def _scale_eigenvector(self):
         if self.xi is None:
             Ns = self.vmean
         else:
             if self.full_matrix:
                 Sp = np.dot(self.S,self.deltas)
             else:
-                Sp = self.S(self.deltas)
+                if self.mask:
+                    Sp = np.zeros_like(self.x)
+                    for ix,(start,stop) in enumerate(self.block_dict):
+                        Sp[start:stop] = np.dot(self.S[ix],self.deltas[start:stop])
+                else:
+                    Sp = self.S(self.deltas)
             Ns  = - (1.-self.xi) * Sp 
             Ns /= 1.-self.xi + self.xi * (1.+np.dot(self.deltas,Sp))**.5
         denom = 1. - np.dot(Ns,self.deltas)
         self.deltas /= -denom
-        print('\tscale1=',v[0].real)
         print('\tscale2=',denom)
-        print('\timaginary norm=',np.linalg.norm(v.imag))
-    def _select_eigenvalue(self,w,v):
-        #if min(w.real) < self.E - self.revert:
-        #    dist = (w.real-self.E)**2
-        #    idx = np.argmin(dist)
-        #else:
-        #    idx = np.argmin(w.real)
-        z0_sq = v[0,:].real ** 2
-        idx = np.argmax(z0_sq)
-        return w[idx],v[:,idx]
+    def _select_eigenvector(self,w,v,iprint=1):
+        idx = 0
+        if len(w) > 1:
+            #if min(w) < self.E - self.revert:
+            #    dist = (w-self.E)**2
+            #    idx = np.argmin(dist)
+            #else:
+            #    idx = np.argmin(w)
+            z0_sq = v[0,:] ** 2
+            idx = np.argmax(z0_sq)
+        if iprint > 0:
+            print('\tscale1=',v[0,idx])
+        v = v[1:,idx]/v[0,idx]
+        return w[idx],v,idx
     def _transform_gradients_lin_mask(self,cond):
-        H = np.zeros((self.nparam,self.nparam))
-        S = np.zeros((self.nparam,self.nparam))
+        Hi0 = self.g
+        H0j = self.Hvmean - self.E * self.vmean
+        ws = np.zeros(len(self.block_dict))
+        s1 = np.zeros(len(self.block_dict))
+        self.deltas = np.zeros_like(self.x)
+        imag_norm = 0. 
         for ix,(start,stop) in enumerate(self.block_dict):
-            H[start:stop,start:stop] = self.H[ix] 
-            S[start:stop,start:stop] = self.S[ix] 
-        A = np.block([[np.ones((1,1))*self.E,np.zeros((1,self.nparam))],
-                      [np.zeros((self.nparam,1)),H]])
-        B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
-                      [np.zeros((self.nparam,1)),S+cond*np.eye(self.nparam)]])
-        w,v = scipy.linalg.eig(A,b=B) 
-        w,v = self._select_eigenvalue(w,v)
-        print('\teigenvalue =',w)
-        self._scale_eigenvector(v)
+            sh = stop - start
+            A = np.block([[np.ones((1,1))*self.E,H0j[start:stop].reshape(1,sh)],
+                          [Hi0[start:stop].reshape(sh,1),self.H[ix]]])
+            B = np.block([[np.ones((1,1)),np.zeros((1,sh))],
+                          [np.zeros((sh,1)),self.S[ix]+cond*np.eye(sh)]])
+            w,v = scipy.linalg.eig(A,b=B) 
+            ws[ix],self.deltas[start:stop],idx = self._select_eigenvector(w.real,v.real,iprint=0)
+            imag_norm += np.linalg.norm(v[:,idx].imag)
+            s1[ix] = v[0,idx].real
+        print('\timaginary norm=',imag_norm)
+        print('\teigenvalue =',ws)
+        print('\tscale1=',s1)
+        self._scale_eigenvector()
     def _transform_gradients_lin_full(self,cond):
         Hi0 = self.g
         H0j = self.Hvmean - self.E * self.vmean
@@ -636,7 +649,6 @@ class TNVMC: # stochastic sampling
             B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
                           [np.zeros((self.nparam,1)),self.S+cond*np.eye(self.nparam)]])
             w,v = scipy.linalg.eig(A,b=B) 
-            w,v = self._select_eigenvalue(w,v)
         else:
             def A(x):
                 x0,x1 = x[0],x[1:]
@@ -653,9 +665,10 @@ class TNVMC: # stochastic sampling
             A = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=A,dtype=self.g.dtype)
             B = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=B,dtype=self.g.dtype)
             w,v = spla.eigs(A,k=1,M=B,sigma=self.E,tol=CG_TOL)
-            w,v = w[0],v[:,0]
+        w,self.deltas,idx = self._select_eigenvector(w.real,v.real)
+        print('\timaginary norm=',np.linalg.norm(v[:,idx].imag))
         print('\teigenvalue =',w)
-        self._scale_eigenvector(v)
+        self._scale_eigenvector()
     def sample_correlated(self):
         if self.exact_sampling:
             raise NotImplementedError
