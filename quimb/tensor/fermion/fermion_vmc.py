@@ -91,6 +91,8 @@ class TNVMC: # stochastic sampling
             self.extract_energy_gradient()
             self.transform_gradients(self.cond)
             if RANK==0:
+                print('\tcond=',self.cond)
+                print('\trate=',self.rate)
                 self.x -= self.rate * self.deltas
                 print('\tx norm=',np.linalg.norm(self.x))
             
