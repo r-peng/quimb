@@ -18,7 +18,6 @@ class TNVMC: # stochastic sampling
         sampler,
         amplitude_factory,
         optimizer='sr',
-        full_matrix=False,
         **kwargs,
     ):
         # parse ham
@@ -37,12 +36,21 @@ class TNVMC: # stochastic sampling
 
         # parse gradient optimizer
         self.optimizer = optimizer
+        if self.optimizer=='sr':
+            self.mask = False
+            self.full_matrix = False
         if self.optimizer in ['rgn','lin']:
             self.ham.initialize_pepo(self.amplitude_factory.psi)
+            self.full_matrix = kwargs.get('full_matrix',False)
+            self.mask = kwargs.get('mask',False)
+            # !full_matrix & !mask: iteratively solve full problem
+            #  full_matrix & !mask: directly solve full problem
+            # !full_matrix &  mask: directly solve blocked problem
+            assert not (self.full_matrix and self.mask)
         if self.optimizer=='lin':
             self.xi = kwargs.get('xi',0.5)
-            self.solver = kwargs.get('solver','davidson')
             # only used for iterative full Hessian
+            self.solver = kwargs.get('solver','davidson')
             if self.solver == 'davidson':
                 maxsize = kwargs.get('maxsize',25)
                 maxiter = kwargs.get('maxiter',100)
@@ -50,15 +58,8 @@ class TNVMC: # stochastic sampling
                 from .davidson import davidson
                 self.davidson = functools.partial(davidson,
                     maxsize=maxsize,restart_size=restart_size,maxiter=maxiter,tol=CG_TOL) 
-        self.full_matrix = full_matrix
-        if self.optimizer=='sr':
+        if self.exact_sampling:
             self.mask = False
-        elif self.exact_sampling:
-            self.mask = False
-        elif self.full_matrix:
-            self.mask = False
-        else:
-            self.mask = kwargs.get('mask',False)
         if self.mask:
             self.block_dict = self.amplitude_factory.get_block_dict()
     def run(self,start,stop,tmpdir=None,
@@ -130,9 +131,11 @@ class TNVMC: # stochastic sampling
             if ncurr > ntotal: # send termination message to all workers
                 self.terminate[0] = 1
                 for worker in range(1,SIZE):
-                    COMM.Bsend(self.terminate,dest=worker,tag=1)
+                    COMM.Send(self.terminate,dest=worker,tag=1)
+                    #COMM.Bsend(self.terminate,dest=worker,tag=1)
             else:
-                COMM.Bsend(self.terminate,dest=self.rank[0],tag=1)
+                COMM.Send(self.terminate,dest=self.rank[0],tag=1)
+                #COMM.Bsend(self.terminate,dest=self.rank[0],tag=1)
     def _sample(self):
         self.sampler.preprocess(self.config) 
 
@@ -169,7 +172,8 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hv_local.append(Hvx)
 
-            COMM.Bsend(self.rank,dest=0,tag=0) 
+            COMM.Send(self.rank,dest=0,tag=0) 
+            #COMM.Bsend(self.rank,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
         if RANK==SIZE-1:
             print('\tstochastic sample time=',time.time()-t0)
