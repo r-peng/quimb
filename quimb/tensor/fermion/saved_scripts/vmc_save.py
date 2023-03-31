@@ -1,4 +1,195 @@
 
+class DMRG(TNVMC):
+    def __init__(
+	self,
+	ham,
+	sampler,
+	amplitude_factory,
+	optimizer='lin',
+        ratio=20,
+        **kwargs
+    ):
+	# parse ham
+        self.ham = ham
+
+	# parse sampler
+        self.config = None
+        self.sampler = sampler
+        self.exact_sampling = sampler.exact
+        self.ratio = ratio
+        
+        # parse wfn 
+        self.amplitude_factory = amplitude_factory         
+        self.x = self.amplitude_factory.get_x()
+        self.block_dict = self.amplitude_factory.get_block_dict()
+        
+        # parse gradient optimizer
+        self.optimizer = optimizer
+        self.ham.initialize_pepo(self.amplitude_factory.psi)
+        if self.optimizer=='lin':
+            self.xi = kwargs.get('xi',0.5)
+
+    def set_plqs(self,plqs):
+        self.plqs = plqs 
+        self.nplq = len(plqs)
+        self.plq_ix = 0
+    def set_batchsize(self):
+        plq = self.plqs[self.plq_ix]
+        if RANK==0:
+            print('\tplq=',plq)
+        self.get_plq_info(plq)
+        self.batchsize = self.nparam * self.ratio
+        self.plq_ix = (self.plq_ix + 1) % self.nplq
+    def get_plq_info(self,plq):
+        self.plq_info = []
+        start_ = 0
+        for ix in plq:
+            start,stop = self.block_dict[ix]
+            sh = stop - start
+            stop_ = start_ + sh
+            self.plq_info.append((ix,start_,stop_,start,stop)) 
+            start_ = stop_
+        self.nparam = stop_
+        if RANK==0:
+            print('\tnparam=',self.nparam)
+    def extract_energy_gradient(self):
+        t0 = time.time()
+        self.extract_energy()
+        self.extract_gradient()
+
+        self.S = self.extract_matrix('S')
+        self._extract_Hvmean()
+        self.H = self.extract_matrix('H')
+        if RANK==0:
+            print('\tnormalization=',self.n)
+            print('\tgradient norm=',np.linalg.norm(self.g))
+            print(f'step={self.step},energy={self.E},err={self.Eerr}')
+            print('\tcollect data time=',time.time()-t0)
+    def _get_Smatrix_stochastic(self,start1,stop1,start2,stop2):
+        if RANK==0:
+            sh1,sh2 = stop1-start1,stop2-start2
+            vvsum_ = np.zeros((sh1,sh2))
+        else:
+            v1,v2 = self.vlocal[:,start1:stop1],self.vlocal[:,start2:stop2]
+            vvsum_ = np.dot(v1.T,v2)
+        vvsum = np.zeros_like(vvsum_)
+        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
+        S = None
+        if RANK==0:
+            vmean1,vmean2 = self.vmean[start1:stop1],self.vmean[start2:stop2]
+            S = vvsum / self.n - np.outer(vmean1,vmean2)
+        return S
+    def _get_Smatrix_exact(self,start1,stop1,start2,stop2):
+        v1,v2 = self.vlocal[:,start1:stop1],self.vlocal[:,start2:stop2]
+        vvsum_ = np.einsum('s,si,sj->ij',self.flocal,v1,v2)
+        vvsum = np.zeros_like(vvsum_)
+        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
+        S = None
+        if RANK==0:
+            vmean1,vmean2 = self.vmean[start1:stop1],self.vmean[start2:stop2]
+            S = vvsum - np.outer(vmean1,vmean2)
+        return S
+    def _get_Smatrix(self,start1,stop1,start2,stop2):
+        if self.exact_sampling:
+            return self._get_Smatrix_exact(start1,stop1,start2,stop2)
+        else:
+            return self._get_Smatrix_stochastic(start1,stop1,start2,stop2)
+    def _get_Hmatrix_stochastic(self,start1,stop1,start2,stop2):
+        if RANK==0:
+            sh1,sh2 = stop1-start1,stop2-start2
+            vHvsum_ = np.zeros((sh1,sh2))
+        else:
+            v1,Hv2 = self.vlocal[:,start1:stop1],self.Hv_local[:,start2:stop2]
+            vHvsum_ = np.dot(v1.T,Hv2)
+        vHvsum = np.zeros_like(vHvsum_)
+        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
+        H = None
+        if RANK==0:
+            vmean1,Hvmean2 = self.vmean[start1:stop1],self.Hvmean[start2:stop2]
+            g1,vmean2 = self.g[start1:stop1],self.vmean[start2:stop2]
+            H = vHvsum / self.n - np.outer(vmean1,Hvmean2) - np.outer(g1,vmean2)
+        return H
+    def _get_Hmatrix_exact(self,start1,stop1,start2,stop2):
+        v1,Hv2 = self.vlocal[:,start1:stop1],self.Hv_local[:,start2:stop2]
+        vHvsum_ = np.einsum('s,si,sj->ij',self.flocal,v1,Hv2)
+        vHvsum = np.zeros_like(vHvsum_)
+        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
+        H = None
+        if RANK==0:
+            vmean1,Hvmean2 = self.vmean[start1:stop1],self.Hvmean[start2:stop2]
+            g1,vmean2 = self.g[start1:stop1],self.vmean[start2:stop2]
+            H = vHvsum - np.outer(vmean1,Hvmean2) - np.outer(g1,vmean2)
+        return H
+    def _get_Hmatrix(self,start1,stop1,start2,stop2):
+        if self.exact_sampling:
+            return self._get_Hmatrix_exact(start1,stop1,start2,stop2)
+        else:
+            return self._get_Hmatrix_stochastic(start1,stop1,start2,stop2)
+    def extract_matrix(self,matrix):
+        if matrix=='S':
+            _get_matrix = self._get_Smatrix
+        elif matrix=='H':
+            _get_matrix = self._get_Hmatrix
+        matrix = np.zeros((self.nparam,self.nparam))
+        for ix1 in range(len(self.plq_info)):
+            _,start1_,stop1_,start1,stop1 = self.plq_info[ix1]
+            for ix2 in range(ix1,len(self.plq_info)):
+                _,start2_,stop2_,start2,stop2 = self.plq_info[ix1]
+                sub = _get_matrix(start1,stop1,start2,stop2)
+                if RANK==0:
+                    matrix[start1_:stop1_,start2_:stop2_] = sub    
+                    if ix2 > ix2:
+                        matrix[start2_:stop2_,start1_:stop1_] = sub.T
+        return matrix
+    def extract_vector(self,vec_full):
+        vec = np.zeros(self.nparam)
+        for ix in range(len(self.plq_info)):
+            _,start_,stop_,start,stop = self.plq_info[ix]
+            vec[start_:stop_] = vec_full[start:stop]
+        return vec
+    def expand_vector(self,vec):
+        vec_full = np.zeros_like(self.x)
+        for ix in range(len(self.plq_info)):
+            _,start_,stop_,start,stop = self.plq_info[ix]
+            vec_full[start:stop] = vec[start_:stop_]
+        return vec_full
+    def _transform_gradeints_rgn(self,cond):
+        t0 = time.time()
+        H = self.H - self.E * self.S + cond * np.eye(self.nparam)
+        g = self.extract_vector(self.g) 
+        deltas = np.linalg.solve(H,g) 
+        self.deltas = self.expand_vector(deltas)
+        print('\tRGN solver time=',time.time()-t0)
+    def _transform_gradients_lin(self,cond):
+        t0 = time.time()
+        g = self.extract_vector(self.g) 
+        Hvmean = self.extract_vector(self.Hvmean)
+        vmean = self.extract_vector(self.vmean)
+        Hi0 = g
+        H0j = Hvmean - self.E * vmean
+        A = np.block([[np.ones((1,1))*self.E,H0j.reshape(1,self.nparam)],
+                      [Hi0.reshape(self.nparam,1),self.H]])
+        B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
+                      [np.zeros((self.nparam,1)),self.S+cond*np.eye(self.nparam)]])
+        w,v = scipy.linalg.eig(A,b=B) 
+        w,deltas,idx = _select_eigenvector(w.real,v.real)
+        print('\timaginary norm=',np.linalg.norm(v[:,idx].imag))
+        print('\teigenvalue =',w)
+        print('\tscale1=',v[0,idx].real)
+        self._scale_eigenvector(deltas)
+        self.deltas = self.expand_vector(deltas)
+        print('\tEIG solver time=',time.time()-t0)
+    def _scale_eigenvector(self,deltas):
+        if self.xi is None:
+            Ns = self.vmean
+        else:
+            Sp = np.dot(self.S,deltas)
+            Ns  = - (1.-self.xi) * Sp 
+            Ns /= 1.-self.xi + self.xi * (1.+np.dot(deltas,Sp))**.5
+        denom = 1. - np.dot(Ns,deltas)
+        deltas /= -denom
+        print('\tscale2=',denom)
+        return deltas
 def compute_double_layer_plq(norm,**compress_opts):
     norm.reorder(direction='row',layer_tags=('KET','BRA'),inplace=True)
     Lx,Ly = norm.Lx,norm.Ly

@@ -92,7 +92,7 @@ def get_vaccum(Lx,Ly):
     ftn.view_as_(FPEPS, like=tn)
     return ftn
 def create_particle(fpeps,site,spin):
-    cre = creation(spin=spin,symmetry=symmetry,flat=flat)
+    cre = data_map[f'cre_{spin}'].copy()
     T = fpeps[fpeps.site_tag(*site)]
     trans_order = list(range(1,T.ndim))+[0] 
     data = np.tensordot(cre, T.data, axes=((1,), (-1,))).transpose(trans_order)
@@ -438,33 +438,64 @@ class AmplitudeFactory2D:
             ls[ix] = start,stop
             start = stop
         return ls
-    def extract_diagonal(self,matrix):
-        start = 0
-        for ix,(_,_,size,_) in enumerate(self.constructors):
-            stop = start+size 
-            matrix[start:stop,:start] = 0.
-            matrix[start:stop,stop:] = 0.
-            start = stop
-        return matrix
-    def maskdot(self,v1,v2,x,f=None):
-        y = np.zeros_like(x)
-        start = 0
-        for ix,(_,_,size,_) in enumerate(self.constructors):
-            stop = start+size 
-            v2x = np.dot(v2[:,start:stop],x[start:stop])
-            if f is not None:
-                v2x *= f
-            y[start:stop] = np.dot(v2x,v1[:,start:stop])
-            start = stop
-        return y
-    def maskouter(self,v1,v2,x):
-        y = np.zeros_like(x)
-        start = 0
-        for ix,(_,_,size,_) in enumerate(self.constructors):
-            stop = start+size 
-            y[start:stop] = v1[start:stop] * np.dot(v2[start:stop],x[start:stop])
-            start = stop
-        return y
+#    def extract_diagonal(self,matrix):
+#        start = 0
+#        for ix,(_,_,size,_) in enumerate(self.constructors):
+#            stop = start+size 
+#            matrix[start:stop,:start] = 0.
+#            matrix[start:stop,stop:] = 0.
+#            start = stop
+#        return matrix
+#    def maskdot(self,v1,v2,x,f=None):
+#        y = np.zeros_like(x)
+#        start = 0
+#        for ix,(_,_,size,_) in enumerate(self.constructors):
+#            stop = start+size 
+#            v2x = np.dot(v2[:,start:stop],x[start:stop])
+#            if f is not None:
+#                v2x *= f
+#            y[start:stop] = np.dot(v2x,v1[:,start:stop])
+#            start = stop
+#        return y
+#    def maskouter(self,v1,v2,x):
+#        y = np.zeros_like(x)
+#        start = 0
+#        for ix,(_,_,size,_) in enumerate(self.constructors):
+#            stop = start+size 
+#            y[start:stop] = v1[start:stop] * np.dot(v2[start:stop],x[start:stop])
+#            start = stop
+#        return y
+    def get_plq_fxn(self,**kwargs):
+        x_bsz,y_bsz = kwargs.get('plq_size',(4,4))
+        x_step,y_step = kwargs.get('plq_step',(1,1))
+        assert x_step <= x_bsz
+        assert y_step <= y_bsz
+        x_max,y_max = self.Lx-x_bsz,self.Ly-y_bsz
+        direction = kwargs.get('direction','col') 
+        def get_plq(site):
+            x,y = site
+            x_stop = min(x+x_bsz,self.Lx)
+            y_stop = min(y+y_bsz,self.Ly)
+            sites = [(i,j) for i in range(x,x_stop) for j in range(y,y_stop)] 
+            assert len(sites)!=0
+            if RANK==0:
+                print('\tsites=',sites)
+            if direction=='row':
+                x += x_step
+                if x > x_max:
+                    x = 0
+                    y += y_step
+                    if y > y_max:
+                        y = 0
+            else:
+                y += y_step
+                if y > y_max:
+                    y = 0
+                    x += x_step
+                    if x > x_max:
+                        x = 0
+            return [self.flatten(i,j) for i,j in sites],(x,y)
+        return get_plq,(0,0)
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -666,33 +697,6 @@ class Hubbard2D:
             return self.hop_coeff(site1,site2) * ftn_plq.contract() / cx 
         except (ValueError,IndexError):
             return 0.
-    #def nnh(self,config,plq,inplace=True,cx=None):
-    #    e = 0.
-    #    x_bsz,y_bsz = 1,2
-    #    # all horizontal bonds
-    #    for i in range(self.Lx):
-    #        for j in range(self.Ly-1):
-    #            site1,site2 = (i,j),(i,j+1)
-    #            if 
-    #            ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
-    #            if not inplace:
-    #                ftn_plq = ftn_plq.copy()
-    #            cx_ij = None if cx is None else cx[i,j]
-    #            e += self.hop(ftn_plq,config,site1,site2,cx_ij)
-    #    return e
-    #def nnv(self,config,plq,inplace=True,cx=None):
-    #    # all vertical bonds
-    #    e = 0.
-    #    x_bsz,y_bsz = 2,1
-    #    for i in range(self.Lx-1):
-    #        for j in range(self.Ly):
-    #            site1,site2 = (i,j),(i+1,j)
-    #            ftn_plq = plq[(i,j),(x_bsz,y_bsz)] 
-    #            if not inplace:
-    #                ftn_plq = ftn_plq.copy()
-    #            cx_ij = None if cx is None else cx[i,j]
-    #            e += self.hop(ftn_plq,config,site1,site2,cx_ij)
-    #    return e
     def nn(self,config,plq,x_bsz,y_bsz,inplace=True,cx=None):
         # all vertical bonds
         e = 0.
@@ -744,9 +748,9 @@ class Hubbard2D:
         norm.add_tensor_network(bra,virtual=True)
 
         if self.Lx > self.Ly:
-            plq = norm._compute_plaquette_environments_col_first(1,1,**self.contract_opts)
+            plq = norm._compute_plaquette_environments_col_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
         else:
-            plq = norm._compute_plaquette_environments_row_first(1,1,**self.contract_opts)
+            plq = norm._compute_plaquette_environments_row_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
         for key in plq:
             plq[key].view_like_(fpeps)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
