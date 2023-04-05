@@ -11,6 +11,69 @@ RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 DISCARD = 1e3
 CG_TOL = 1e-4
+##################################################################################################
+# VMC utils
+##################################################################################################
+def _rgn_block_solve(H,E,S,g,cond):
+    # hessian 
+    hess = H - E * S
+    # smallest eigenvalue
+    w = np.linalg.eigvals(hess)
+    idx = np.argmin(w.real)
+    wmin = w[idx]
+    # solve
+    deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
+    # compute model energy
+    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
+    return wmin,deltas,dE
+def _select_eigenvector(w,v):
+    #if min(w) < self.E - self.revert:
+    #    dist = (w-self.E)**2
+    #    idx = np.argmin(dist)
+    #else:
+    #    idx = np.argmin(w)
+    z0_sq = v[0,:] ** 2
+    idx = np.argmax(z0_sq)
+    #v = v[1:,idx]/v[0,idx]
+    v = v[1:,idx]/np.sign(v[0,idx])
+    return w[idx],v,idx
+def blocking_analysis(weights, energies, neql, printQ=False):
+    nSamples = weights.shape[0] - neql
+    weights = weights[neql:]
+    energies = energies[neql:]
+    weightedEnergies = np.multiply(weights, energies)
+    meanEnergy = weightedEnergies.sum() / weights.sum()
+    if printQ:
+        print(f'\nMean energy: {meanEnergy:.8e}')
+        print('Block size    # of blocks        Mean                Error')
+    blockSizes = np.array([ 1, 2, 5, 10, 20, 50, 70, 100, 200, 500 ])
+    prevError = 0.
+    plateauError = None
+    for i in blockSizes[blockSizes < nSamples/2.]:
+        nBlocks = nSamples//i
+        blockedWeights = np.zeros(nBlocks)
+        blockedEnergies = np.zeros(nBlocks)
+        for j in range(nBlocks):
+            blockedWeights[j] = weights[j*i:(j+1)*i].sum()
+            blockedEnergies[j] = weightedEnergies[j*i:(j+1)*i].sum() / blockedWeights[j]
+        v1 = blockedWeights.sum()
+        v2 = (blockedWeights**2).sum()
+        mean = np.multiply(blockedWeights, blockedEnergies).sum() / v1
+        error = (np.multiply(blockedWeights, (blockedEnergies - mean)**2).sum() / (v1 - v2 / v1) / (nBlocks - 1))**0.5
+        if printQ:
+            print(f'  {i:4d}           {nBlocks:4d}       {mean:.8e}       {error:.6e}')
+        if error < 1.05 * prevError and plateauError is None:
+            plateauError = max(error, prevError)
+        prevError = error
+
+    if printQ:
+        if plateauError is not None:
+            print(f'Stocahstic error estimate: {plateauError:.6e}\n')
+
+    return meanEnergy, plateauError
+##################################################################################################
+# VMC engine 
+##################################################################################################
 class TNVMC: # stochastic sampling
     def __init__(
         self,
@@ -74,37 +137,40 @@ class TNVMC: # stochastic sampling
             if RANK==0:
                 if tmpdir is not None: # save psi to disc
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
-    def sample(self):
+    def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
         self.sampler.amplitude_factory = self.amplitude_factory
         if self.exact_sampling:
-            self.sample_exact()
+            self.sample_exact(compute_v=compute_v,compute_Hv=compute_Hv)
         else:
-            self.sample_stochastic()
-    def sample_stochastic(self): 
+            self.sample_stochastic(samplesize=samplesize,compute_v=compute_v,compute_Hv=compute_Hv)
+    def sample_stochastic(self,samplesize=None,compute_v=True,compute_Hv=None): 
         self.terminate = np.array([0])
         self.rank = np.array([RANK])
         if RANK==0:
-            self._ctr()
+            self._ctr(samplesize=samplesize)
         else:
-            self._sample()
-    def _ctr(self):
+            self._sample(compute_v=compute_v,compute_Hv=compute_Hv)
+    def _ctr(self,samplesize=None):
         ncurr = 0
+        samplesize = self.batchsize if samplesize is None else samplesize
         while self.terminate[0]==0:
             COMM.Recv(self.rank,tag=0)
             ncurr += 1
-            if ncurr > self.batchsize: # send termination message to all workers
+            if ncurr > samplesize: # send termination message to all workers
                 self.terminate[0] = 1
                 for worker in range(1,SIZE):
                     COMM.Send(self.terminate,dest=worker,tag=1)
             else:
                 COMM.Send(self.terminate,dest=self.rank[0],tag=1)
-    def _sample(self):
+    def _sample(self,compute_v=True,compute_Hv=None):
         self.sampler.preprocess(self.config) 
 
         self.samples = []
         self.elocal = []
-        self.vlocal = []
-        if self.compute_Hv:
+        if compute_v:
+            self.vlocal = []
+        compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
+        if compute_Hv:
             self.Hv_local = [] 
 
         self.store = dict()
@@ -119,7 +185,7 @@ class TNVMC: # stochastic sampling
                 ex,vx,Hvx = info 
             else:
                 cx,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
-                                                             compute_Hv=self.compute_Hv)
+                                                             compute_v=compute_v,compute_Hv=compute_Hv)
                 if np.fabs(ex) > DISCARD:
                     self.store[config] = None
                     continue
@@ -127,8 +193,9 @@ class TNVMC: # stochastic sampling
                 self.p0[config] = cx**2
             self.samples.append(config)
             self.elocal.append(ex)
-            self.vlocal.append(vx)
-            if self.compute_Hv:
+            if compute_v:
+                self.vlocal.append(vx)
+            if compute_Hv:
                 self.Hv_local.append(Hvx)
 
             COMM.Send(self.rank,dest=0,tag=0) 
@@ -146,7 +213,8 @@ class TNVMC: # stochastic sampling
         self.samples = []
         self.flocal = []
         self.elocal = []
-        self.vlocal = []
+        if compute_v:
+            self.vlocal = []
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
         if compute_Hv:
             self.Hv_local = [] 
@@ -154,7 +222,7 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         self.store = dict()
         if RANK==SIZE-1:
-            print('\tnsamples=',len(ixs))
+            print('\tnsamples per process=',len(ixs))
         for ix in ixs:
             self.flocal.append(p[ix])
             config = all_configs[ix]
@@ -162,7 +230,8 @@ class TNVMC: # stochastic sampling
             _,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
                                                         compute_v=compute_v,compute_Hv=compute_Hv)
             self.elocal.append(ex)
-            self.vlocal.append(vx)
+            if compute_v:
+                self.vlocal.append(vx)
             if compute_Hv:
                 self.Hv_local.append(Hvx)
         if RANK==SIZE-1:
@@ -238,8 +307,8 @@ class TNVMC: # stochastic sampling
             vesum_ = np.dot(self.elocal * self.flocal,self.vlocal)
         else:
             if RANK==0:
-                vsum_ = np.zeros_like(self.x)
-                vesum_ = np.zeros_like(self.x)
+                vsum_ = np.zeros(self.nparam,dtype=self.x.dtype)
+                vesum_ = np.zeros(self.nparam,dtype=self.x.dtype)
             else:
                 self.vlocal = np.array(self.vlocal)
                 vsum_ = self.vlocal.sum(axis=0)
@@ -266,7 +335,7 @@ class TNVMC: # stochastic sampling
         stop = self.nparam if stop is None else stop
         if RANK==0:
             sh = stop-start
-            vvsum_ = np.zeros((sh,)*2)
+            vvsum_ = np.zeros((sh,)*2,dtype=self.x.dtype)
         else:
             v = self.vlocal[:,start:stop] 
             vvsum_ = np.dot(v.T,v)
@@ -337,7 +406,7 @@ class TNVMC: # stochastic sampling
             Hvsum_ = np.dot(self.flocal,self.Hv_local)
         else:
             if RANK==0:
-                Hvsum_ = np.zeros_like(self.x)
+                Hvsum_ = np.zeros(self.nparam,dtype=self.x.dtype)
             else:
                 self.Hv_local = np.array(self.Hv_local)
                 Hvsum_ = self.Hv_local.sum(axis=0)
@@ -417,6 +486,8 @@ class TNVMC: # stochastic sampling
             self._transform_gradients_sgd()
         if RANK==0:
             print(f'\tg={np.linalg.norm(self.g)},del={np.linalg.norm(self.deltas)},dot={np.dot(self.deltas,self.g)},x={np.linalg.norm(self.x)}')
+    def update(self,rate):
+        return self.x - rate * self.deltas
     def _transform_gradients_sgd(self):
         if RANK>0:
             return 
@@ -429,7 +500,7 @@ class TNVMC: # stochastic sampling
             self.deltas = np.sign(g) * np.random.uniform(size=g.shape)
         else:
             raise NotImplementedError
-        self.x -= self.rate1 * self.deltas
+        self.x = self.update(self.rate1)
     def _transform_gradients_sr(self,solve=None):
         if RANK>0:
             return 
@@ -444,7 +515,7 @@ class TNVMC: # stochastic sampling
         else:
             raise NotImplementedError
         print('\tSR solver time=',time.time()-t0)
-        self.x -= self.rate1 * self.deltas
+        self.x = self.update(self.rate1)
     def _transform_gradients_sr_mask(self):
         self.deltas = np.zeros_like(self.x)
         for ix,(start,stop) in enumerate(self.block_dict):
@@ -481,8 +552,9 @@ class TNVMC: # stochastic sampling
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
-    def _transform_gradients_o2(self):
+    def _transform_gradients_o2(self,solve_sr='iterative'):
         xnew_rgn = np.zeros_like(self.x)
+        dEm = 0.
         if RANK==0:
             if self.optimizer=='rgn':
                 dEm = self._transform_gradients_rgn()
@@ -490,24 +562,27 @@ class TNVMC: # stochastic sampling
                 dEm = self._transform_gradients_lin()
             else:
                 raise NotImplementedError
-            xnew_rgn = self.x - self.rate2 * self.deltas    
-        if not self.check_update:
+            xnew_rgn = self.update(self.rate2)    
+        if self.check is None:
             self.x = self.xnew_rgn
             return
         # SR
-        self.extract_S(solve='iterative')
-        self._transform_gradients_sr(solve='iterative')
+        if solve_sr=='iterative':
+            self.extract_S(solve='iterative')
+        self._transform_gradients_sr(solve=solve_sr)
         xnew_sr = self.x
         
         COMM.Bcast(xnew_rgn,root=0) 
-        self.current_energy()
-        self.correlated_energy(xnew_rgn) 
+        self.amplitude_factory.update(xnew_rgn)
+        if self.check=='trust_region':
+            update_rgn = self._check_by_trust_region(dEm)
+        elif self.check=='energy':
+            update_rgn = self._check_by_energy(dEm)
+        else:
+            raise NotImplementedError
         if RANK>0:
             return
-        dE = self.Enew - self.E0
-        rho = dE / dEm
-        print(f'\tpredict={dEm},actual={dE},ratio={rho}')
-        if rho > self.accept_ratio:
+        if update_rgn: 
             self.x = xnew_rgn
         else:
             self.x = xnew_sr
@@ -547,7 +622,7 @@ class TNVMC: # stochastic sampling
         return np.sum(dE)
     def _transform_gradients_rgn_matrix(self):
         w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
-        print('\tleast eigenvalue=',wmin)
+        print('\tleast eigenvalue=',w)
         if self.tmpdir is not None:
             f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('H',data=self.H) 
@@ -711,11 +786,8 @@ class TNVMC: # stochastic sampling
                 self.idxs = list(range(0,nlarge,every))
                 self.elocal = self.elocal[self.idxs]
             self._extract_energy_stochastic() 
-            if RANK==0:
-                self.E0,self.Eerr0 = self.E,self.Eerr
-    def correlated_energy(self,xnew):
+    def correlated_energy(self):
         # samples new energy
-        self.amplitude_factory.update(xnew)
         self.sampler.amplitude_factory = self.amplitude_factory
         if self.exact_sampling:
             self.sample_exact(compute_v=False,compute_Hv=False) 
@@ -726,8 +798,6 @@ class TNVMC: # stochastic sampling
             if RANK>0:
                 self._correlated_sampling(self.idxs)
             self._extract_energy_stochastic(weighted=True)
-            if RANK==0:
-                self.Enew,self.Eerr_new = self.E,self.Eerr 
     def _correlated_sampling(self,idxs):
         self.elocal = []
         self.flocal = []
@@ -738,60 +808,108 @@ class TNVMC: # stochastic sampling
                                                          compute_v=False,compute_Hv=False) 
             self.elocal.append(ex) 
             self.flocal.append(cx**2/self.p0[config])
-def _rgn_block_solve(H,E,S,g,cond):
-    # hessian 
-    hess = H - E * S
-    # smallest eigenvalue
-    w = np.linalg.eigvals(hess)
-    idx = np.argmin(w.real)
-    wmin = w[idx]
-    # solve
-    deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
-    # compute model energy
-    dE = - np.dot(deltas,g) + np.dot(deltas,np.dot(hess,deltas))
-    return wmin,deltas,dE
-def _select_eigenvector(w,v):
-    #if min(w) < self.E - self.revert:
-    #    dist = (w-self.E)**2
-    #    idx = np.argmin(dist)
-    #else:
-    #    idx = np.argmin(w)
-    z0_sq = v[0,:] ** 2
-    idx = np.argmax(z0_sq)
-    #v = v[1:,idx]/v[0,idx]
-    v = v[1:,idx]/np.sign(v[0,idx])
-    return w[idx],v,idx
-def blocking_analysis(weights, energies, neql, printQ=False):
-    nSamples = weights.shape[0] - neql
-    weights = weights[neql:]
-    energies = energies[neql:]
-    weightedEnergies = np.multiply(weights, energies)
-    meanEnergy = weightedEnergies.sum() / weights.sum()
-    if printQ:
-        print(f'\nMean energy: {meanEnergy:.8e}')
-        print('Block size    # of blocks        Mean                Error')
-    blockSizes = np.array([ 1, 2, 5, 10, 20, 50, 70, 100, 200, 500 ])
-    prevError = 0.
-    plateauError = None
-    for i in blockSizes[blockSizes < nSamples/2.]:
-        nBlocks = nSamples//i
-        blockedWeights = np.zeros(nBlocks)
-        blockedEnergies = np.zeros(nBlocks)
-        for j in range(nBlocks):
-            blockedWeights[j] = weights[j*i:(j+1)*i].sum()
-            blockedEnergies[j] = weightedEnergies[j*i:(j+1)*i].sum() / blockedWeights[j]
-        v1 = blockedWeights.sum()
-        v2 = (blockedWeights**2).sum()
-        mean = np.multiply(blockedWeights, blockedEnergies).sum() / v1
-        error = (np.multiply(blockedWeights, (blockedEnergies - mean)**2).sum() / (v1 - v2 / v1) / (nBlocks - 1))**0.5
-        if printQ:
-            print(f'  {i:4d}           {nBlocks:4d}       {mean:.8e}       {error:.6e}')
-        if error < 1.05 * prevError and plateauError is None:
-            plateauError = max(error, prevError)
-        prevError = error
+    def _check_by_trust_region(self,dEm):
+        self.current_energy()
+        if RANK==0:
+            self.E0,self.Eerr0 = self.E,self.Eerr
+        self.correlated_energy()
+        if RANK>0:
+            return 
+        if self.Eerr is None:
+            return False
+        err = (self.Eerr0**2 + self.Eerr**2)**.5
+        dE = self.E - self.E0
+        rho_plus = (dE+err) / dEm 
+        rho_minus = (dE-err) / dEm
+        print(f'\tpredict={dEm},actual={(dE,err)},ratio={(rho_plus,rho_minus)}')
+        if rho_plus < self.accept_ratio and rho_minus < accept_ratio:
+            return False
+        else:
+            return True
+    def _check_by_energy(self,dEm):
+        if RANK==0:
+            self.E0,self.Eerr0 = self.E,self.Eerr
+        self.sample(samplesize=self.batchsize_small,compute_v=False,compute_Hv=False)
+        self.extract_energy()
+        if RANK>0:
+            return 
+        if self.Eerr is None:
+            return False
+        dE = self.E - self.E0
+        err = (self.Eerr0**2 + self.Eerr**2)**.5
+        print(f'\tpredict={dEm},actual={(dE,err)}')
+        if dE + err > 0. and dE - err > 0.:
+            return False
+        else:
+            return True
+class DMRG(TNVMC):
+    def __init__(
+        self,
+        ham,
+        sampler,
+        amplitude_factory,
+        optimizer='sr',
+        **kwargs,
+    ):
+        # parse ham
+        self.ham = ham
 
-    if printQ:
-        if plateauError is not None:
-            print(f'Stocahstic error estimate: {plateauError:.6e}\n')
+        # parse sampler
+        self.sampler = sampler
+        self.exact_sampling = sampler.exact
 
-    return meanEnergy, plateauError
+        # parse wfn 
+        self.amplitude_factory = amplitude_factory         
+        self.x = self.amplitude_factory.get_x()
+        self.block_dict = self.amplitude_factory.get_block_dict()
+        self.ix = 0
+        self.amplitude_factory.ix = self.ix
+        self.set_nparam()
+
+        # parse gradient optimizer
+        self.optimizer = optimizer
+        self.compute_Hv = False
+        self.solve = 'matrix'
+        if self.optimizer in ['rgn','lin']:
+            self.ham.initialize_pepo(self.amplitude_factory.psi)
+            self.compute_Hv = True
+        if self.optimizer=='lin':
+            self.xi = kwargs.get('xi',0.5)
+
+        # to be set before run
+        self.config = None
+        self.batchsize = None
+        self.batchsize_small = None
+        self.rate1 = None # rate for SGD,SR
+        self.rate2 = None # rate for LIN,RGN
+        self.cond1 = None
+        self.cond2 = None
+        self.check_update = None 
+        self.accept_ratio = None
+    def set_nparam(self):
+        start,stop = self.block_dict[self.ix]
+        self.nparam = stop - start
+    def run(self,start,stop,tmpdir=None):
+        for step in range(start,stop):
+            if RANK==0:
+                print(f'ix={self.ix},nparam={self.nparam}')
+            self.step = step
+            self.sample()
+            self.extract_energy_gradient()
+            self.transform_gradients()
+            COMM.Bcast(self.x,root=0) 
+            psi = self.amplitude_factory.update(self.x)
+            self.ham.update_cache(self.ix)
+            if RANK==0:
+                if tmpdir is not None: # save psi to disc
+                    write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
+            self.ix = (self.ix + 1) % len(self.block_dict)
+            self.amplitude_factory.ix = self.ix
+            self.set_nparam()
+    def update(self,rate):
+        start,stop = self.block_dict[self.ix]
+        x = self.x.copy()
+        x[start:stop] -= rate * self.deltas
+        return x 
+    def _transform_gradients_o2(self):
+        super()._transform_gradients_o2(solve_sr='matrix')

@@ -195,8 +195,6 @@ def get_top_env(i,row,env_prev,config,cache,**compress_opts):
 def get_all_top_envs(fpeps,config,cache_top,imin=None,**compress_opts):
     imin = 1 if imin is None else imin
     env_prev = None
-    key_bot = config
-    key_top = tuple()
     for i in range(fpeps.Lx-1,imin-1,-1):
          row = get_mid_env(i,fpeps,config)
          env_prev = get_top_env(i,row,env_prev,config,cache_top,**compress_opts)
@@ -270,9 +268,11 @@ class AmplitudeFactory2D:
         psi.add_tag('KET')
         self.constructors = get_constructors_2d(psi)
 
+        self.ix = None
         self._set_psi(psi) # current state stored in self.psi
         self.parity_cum = self.get_parity_cum()
         self.sign = dict()
+
     def get_parity_cum(self):
         parity = []
         fs = self.psi.fermion_space
@@ -437,65 +437,8 @@ class AmplitudeFactory2D:
             stop = start + size
             ls[ix] = start,stop
             start = stop
+        self.block_dict = ls
         return ls
-#    def extract_diagonal(self,matrix):
-#        start = 0
-#        for ix,(_,_,size,_) in enumerate(self.constructors):
-#            stop = start+size 
-#            matrix[start:stop,:start] = 0.
-#            matrix[start:stop,stop:] = 0.
-#            start = stop
-#        return matrix
-#    def maskdot(self,v1,v2,x,f=None):
-#        y = np.zeros_like(x)
-#        start = 0
-#        for ix,(_,_,size,_) in enumerate(self.constructors):
-#            stop = start+size 
-#            v2x = np.dot(v2[:,start:stop],x[start:stop])
-#            if f is not None:
-#                v2x *= f
-#            y[start:stop] = np.dot(v2x,v1[:,start:stop])
-#            start = stop
-#        return y
-#    def maskouter(self,v1,v2,x):
-#        y = np.zeros_like(x)
-#        start = 0
-#        for ix,(_,_,size,_) in enumerate(self.constructors):
-#            stop = start+size 
-#            y[start:stop] = v1[start:stop] * np.dot(v2[start:stop],x[start:stop])
-#            start = stop
-#        return y
-    def get_plq_fxn(self,**kwargs):
-        x_bsz,y_bsz = kwargs.get('plq_size',(4,4))
-        x_step,y_step = kwargs.get('plq_step',(1,1))
-        assert x_step <= x_bsz
-        assert y_step <= y_bsz
-        x_max,y_max = self.Lx-x_bsz,self.Ly-y_bsz
-        direction = kwargs.get('direction','col') 
-        def get_plq(site):
-            x,y = site
-            x_stop = min(x+x_bsz,self.Lx)
-            y_stop = min(y+y_bsz,self.Ly)
-            sites = [(i,j) for i in range(x,x_stop) for j in range(y,y_stop)] 
-            assert len(sites)!=0
-            if RANK==0:
-                print('\tsites=',sites)
-            if direction=='row':
-                x += x_step
-                if x > x_max:
-                    x = 0
-                    y += y_step
-                    if y > y_max:
-                        y = 0
-            else:
-                y += y_step
-                if y > y_max:
-                    y = 0
-                    x += x_step
-                    if x > x_max:
-                        x = 0
-            return [self.flatten(i,j) for i,j in sites],(x,y)
-        return get_plq,(0,0)
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -656,6 +599,8 @@ class Hubbard2D:
         self.t,self.u = t,u
         # for double layer contraction
         self.contract_opts = contract_opts
+        self.cache_top = dict()
+        self.cache_bot = dict()
     def initialize_pepo(self,fpeps):
         set_pepo_tsrs()
 
@@ -733,6 +678,11 @@ class Hubbard2D:
         if not compute_Hv: 
             return unsigned_cx,ex,vx,None 
         sign = amplitude_factory.compute_config_sign(tuple(config)) 
+        Hvx = self.compute_Hv_hop(config,amplitude_factory)
+        Hvx /= sign * unsigned_cx
+        Hvx += eu * vx
+        return unsigned_cx,ex,vx,Hvx
+    def compute_Hv_hop(self,config,amplitude_factory):
         # make bra
         bra = self.pepo.copy()
         fpeps = amplitude_factory.psi.copy()
@@ -746,7 +696,6 @@ class Hubbard2D:
                 bra.contract_tags(bra.site_tag(i,j),inplace=True)
         norm = fpeps 
         norm.add_tensor_network(bra,virtual=True)
-
         if self.Lx > self.Ly:
             plq = norm._compute_plaquette_environments_col_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
         else:
@@ -754,9 +703,7 @@ class Hubbard2D:
         for key in plq:
             plq[key].view_like_(fpeps)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
-        Hvx /= sign * unsigned_cx
-        Hvx += eu * vx
-        return unsigned_cx,ex,vx,Hvx
+        return Hvx
 ####################################################################################
 # sampler 
 ####################################################################################
