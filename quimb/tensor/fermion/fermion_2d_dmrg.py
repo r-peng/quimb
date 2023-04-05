@@ -3,6 +3,10 @@ from .fermion_2d_vmc import Hubbard2D as Hubbard
 from .fermion_2d_vmc import flat2site,site_grad,get_bra_tsr
 from .fermion_core import FermionTensorNetwork 
 import numpy as np
+from mpi4py import MPI
+COMM = MPI.COMM_WORLD
+SIZE = COMM.Get_size()
+RANK = COMM.Get_rank()
 #####################################################################################
 # double layer cache
 #####################################################################################
@@ -20,7 +24,7 @@ def get_bot_env(i,norm,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,norm.Ly-1),layer_tags=('KET','BRA'),**compress_opts)
+        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),layer_tags=('KET','BRA'),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
@@ -39,7 +43,7 @@ def get_top_env(i,norm,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,norm.Ly-1),layer_tags=('KET','BRA'),**compress_opts)
+        ftn.contract_boundary_from_top_(xrange=(i,i+1),layer_tags=('KET','BRA'),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
@@ -54,15 +58,15 @@ def get_all_top_envs(norm,config,cache_top,imin,**compress_opts):
     for i in range(norm.Lx-1,imin-1,-1):
          env_prev = get_top_env(i,norm,env_prev,config,cache_top,**compress_opts)
     return env_prev
-def get_3col_ftn(norm,config,cache_bot,cache_top,row_ix,**compress_opts):
+def get_3col_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
     norm.reorder('row',inplace=True)
     ls = []
-    if row_ix>0:
-        bot = get_all_bot_envs(norm,config,cache_bot,row_ix-1,**compress_opts)
+    if i>0:
+        bot = get_all_bot_envs(norm,config,cache_bot,i-1,**compress_opts)
         ls.append(bot)
-    ls.append(norm.select(norm.row_tag(row_ix)))
-    if row_ix<norm.Lx-1:
-        top = get_all_top_envs(norm,config,cache_top,row_ix+1,**compress_opts)
+    ls.append(norm.select(norm.row_tag(i)))
+    if i<norm.Lx-1:
+        top = get_all_top_envs(norm,config,cache_top,i+1,**compress_opts)
         ls.append(top)
     ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
     return ftn 
@@ -136,6 +140,9 @@ class Hubbard2D(Hubbard):
             return unsigned_cx,ex,vx,None 
         sign = amplitude_factory.compute_config_sign(tuple(config)) 
         Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory)
+        #if RANK==0:
+        #    print(config,sign,unsigned_cx,Hvx)
+        #exit()
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
@@ -158,14 +165,19 @@ class Hubbard2D(Hubbard):
         i,j = self.flat2site(ix)
         if self.Lx > self.Ly:
             norm.reorder('col',inplace=True)
-            left = norm.compute_environments('left',xrange=(0,self.Lx-1),yrange=(0,j-1),layer_tags=('KET','BRA'),**self.contract_opts)
-            left = left['left',j]
-            right = norm.compute_environments('right',xrange=(0,self.Lx-1),yrange=(j+1,self.Ly-1),layer_tags=('KET','BRA'),**self.contract_opts)
-            left = left['right',j]
-            mid = norm.select(norm.col_tag(j)).copy()
-            ftn = FermionTensorNetwork([left,mid,right],virtual=True).view_like_(norm)
+            for j_ in range(1,j):
+                norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
+            for j_ in range(self.Ly-2,j,-1):
+                norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
+            ftn = norm
         else:
-            ftn = get_3col_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
+            #ftn = get_3col_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
+            norm.reorder('row',inplace=True)
+            for i_ in range(1,i):
+                norm.contract_boundary_from_bottom_(xrange=(i_-1,i_),layer_tags=('KET','BRA'),**self.contract_opts)
+            for i_ in range(self.Lx-2,i,-1):
+                norm.contract_boundary_from_top_(xrange=(i_,i_+1),layer_tags=('KET','BRA'),**self.contract_opts)
+            ftn = norm
         Hvx = site_grad(ftn,i,j)
         cons = amplitude_factory.constructors[ix][0]
         Hvx = cons.tensor_to_vector(Hvx) 

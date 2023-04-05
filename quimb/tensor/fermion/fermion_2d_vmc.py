@@ -157,7 +157,8 @@ def get_bot_env(i,row,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,row.Ly-1),**compress_opts)
+        #ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,row.Ly-1),**compress_opts)
+        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
@@ -187,7 +188,8 @@ def get_top_env(i,row,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,row.Ly-1),**compress_opts)
+        #ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,row.Ly-1),**compress_opts)
+        ftn.contract_boundary_from_top_(xrange=(i,i+1),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
@@ -679,6 +681,9 @@ class Hubbard2D:
             return unsigned_cx,ex,vx,None 
         sign = amplitude_factory.compute_config_sign(tuple(config)) 
         Hvx = self.compute_Hv_hop(config,amplitude_factory)
+        #if RANK==0:
+        #    print(config,sign,unsigned_cx,Hvx[:7])
+        #exit()
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
