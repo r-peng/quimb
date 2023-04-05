@@ -1,52 +1,25 @@
-from .fermion_2d_vmc import AmplitudeFactory2D as AmplitudeFactory
 from .fermion_2d_vmc import Hubbard2D as Hubbard
-from .fermion_2d_vmc import flat2site,site_grad,get_bra_tsr
+from .fermion_2d_vmc import (
+    flat2site,
+    site_grad,
+    get_bra_tsr,
+    get_mid_env,
+    get_all_bot_envs,
+    get_all_top_envs,
+)
 from .fermion_core import FermionTensorNetwork 
 import numpy as np
-######################################################################################
-# DMRG cahce update
-######################################################################################
-def cache_update(cache_bot,cache_top,ix,Lx,Ly):
-    i,_ = flat2site(ix,Lx,Ly) 
-    keys = list(cache_bot.keys())
-    l = i * Ly
-    for key in keys:
-        if len(key) > l:
-            cache_bot.pop(key)
-
-    keys = list(cache_top.keys())
-    l = (Lx - i - 1) * Ly
-    for key in keys:
-        if len(key) > l:
-            cache_top.pop(key)
-    return cache_bot,cache_top
-class AmplitudeFactory2D(AmplitudeFactory):
-    def _set_psi(self,psi):
-        self.psi = psi
-        self.store = dict()
-        self.store_grad = dict()
-
-        self.compute_bot = True
-        self.compute_top = True
-        if self.ix is None:
-            self.cache_bot = dict()
-            self.cache_top = dict()
-            return
-        self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,self.ix,self.Lx,self.Ly)
-    def get_grad_from_plq(self,plq,config=None,compute_cx=True):
-        i,j = self.flat2site(self.ix)
-        _,(x_bsz,y_bsz) = list(plq.keys())[0]
-        i0 = min(self.Lx-x_bsz,i)
-        j0 = min(self.Ly-y_bsz,j)
-        ftn_plq = plq[(i0,j0),(x_bsz,y_bsz)]
-        cx = ftn_plq.copy().contract() if compute_cx else 1.
-        vx = site_grad(ftn_plq.copy(),i,j) / cx 
-        cons = self.constructors[self.ix][0]
-        vx = cons.tensor_to_vector(vx) 
-        if config is not None:
-            self.store[config] = cx
-            self.store_grad[config] = vx
-        return vx 
+def hop(i1,i2):
+    n1,n2 = pn_map[i1],pn_map[i2]
+    nsum,ndiff = n1+n2,abs(n1-n2)
+    if ndiff==1:
+        sign = 1 if nsum==1 else -1
+        return [(i2,i1,sign)]
+    if ndiff==2:
+        return [(1,2,-1),(2,1,1)] 
+    if ndiff==0:
+        sign = i1-i2
+        return [(0,3,sign),(3,0,sign)]
 class Hubbard2D(Hubbard):
     def initialize_pepo(self,fpeps=None):
         pass
@@ -56,13 +29,11 @@ class Hubbard2D(Hubbard):
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
         plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
         # get gradient form plq12
-        cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()}
-        unsigned_cx = sum(cx12.values()) / len(cx12)
         vx = None
         if compute_v:
-            vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+            unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
         # get h/v bonds
-        eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
+        eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=None) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
         # onsite terms
         config = np.array(config,dtype=int)
@@ -71,7 +42,8 @@ class Hubbard2D(Hubbard):
         ex = eh+ev+eu
         if not compute_Hv: 
             return unsigned_cx,ex,vx,None 
-        sign = amplitude_factory.compute_config_sign(tuple(config)) 
+        #sign = amplitude_factory.compute_config_sign(tuple(config)) 
+        sign = 1
         Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory)
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
@@ -80,23 +52,101 @@ class Hubbard2D(Hubbard):
         cache_top = amplitude_factory.cache_top
         cache_bot = amplitude_factory.cache_bot
         ix = amplitude_factory.ix
-        i0,j0 = self.flat2site(ix)
+        grad_site = self.flat2site(ix)
         fpeps = amplitude_factory.psi
         compress_opts = amplitude_facory.contract_opts
-
-        # horizontal,lower
-        top = FermionTensorNetwork([]) if i0==self.Lx-1 else cache_top[config[(i0+1)*self.Ly:]]
-        mid = get_mid_env_(i0,fpeps,config)
-        for i in range(i0-1,-1,-1):
-            env_prev = None if i==0 else cache_bot[config[:i*self.Ly]].copy()
-            for j in range(self.Ly-1):
-                config_new,sign = self.terms(config,i,j)
-                for i_ in range(i,i0):
-                    row = get_mid_env(i_,fpeps,config_new) 
-                    env_prev = get_bot_env(i_,row,env_prev,config_new,cache_bot,**compress_opts)
-                if env_
-                ftn = FermionTensorNetwork([]) 
-        Hvx = site_grad(ftn,i,j)
         cons = amplitude_factory.constructors[ix][0]
-        Hvx = cons.tensor_to_vector(Hvx) 
+        Hvx = 0.
+        # hbonds
+        for i in range(self.Lx):
+            for j in range(self.Ly-1):
+                site1,site2 = (i,j),(i,j+1)
+                if i>grad_site[0]:
+                    Hvx_term = self.Hv_hop_upper(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts)
+                else:
+                    Hvx_term = self.Hv_hop_lower(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts)
+                if Hvx_term is not None:
+                    Hvx += cons.tensor_to_vector(Hvx_term)
+        # vbonds
+        for i in range(self.Lx-1):
+            for j in range(self.Ly):
+                site1,site2 = (i,j),(i+1,j)
+                if i>grad_site[0]:
+                    Hvx_term = self.Hv_hop_upper(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts)
+                else:
+                    Hvx_term = self.Hv_hop_lower(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts)
+                if Hvx_term is not None:
+                    Hvx += cons.tensor_to_vector(Hvx_term)
+        return Hvx
+    def Hv_hop_lower(self,config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts):
+        ix1,ix2 = self.flatten(i1,j1),self.flatten(i2,j2)
+        i1,i2 = config[ix1],config[ix2]
+        if i1==i2:
+            return None 
+
+        top = FermionTensorNetwork([]) if grad_site[0]==self.Lx-1 else \
+              cache_top[config[(grad_site[0]+1)*self.Ly:]]
+        if top is None:
+            return None
+        mid = get_mid_env(grad_site[0],fpeps,config)
+
+        env_prev = None if site1[0]==0 else cache_bot[config[:site1[0]*self.Ly]]
+        Hvx = None
+        coeff = self.hop_coeff(site1,site2)
+        for i1_new,i2_new,hop_sign in hop(i1,i2):
+            config_new = list(config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = tuple(config_new)
+            bot = None if env_prev is None else env_prev.copy()
+            for i in range(site1[0],grad_site[0]):
+                row = get_mid_env(i,fpeps,config_new) 
+                bot = get_bot_env(i,row,bot,config_new,cache_bot,layer_tags=None,**compress_opts)
+            if bot is None:
+                continue
+            ftn = FermionTensorNetwork([bot,mid,top],virtual=False).view_like_(fpeps) 
+            try:
+                Hvx_term = site_grad(ftn,*site_grad) * (hop_sign * coeff)
+                if Hvx is None:
+                    Hvx =  Hvx_term
+                else:
+                    Hvx = Hvx + Hvx_term
+            except (IndexError,ValueError):
+                continue
+        return Hvx
+    def Hv_hop_upper(self,config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts):
+        ix1,ix2 = self.flatten(i1,j1),self.flatten(i2,j2)
+        i1,i2 = config[ix1],config[ix2]
+        if i1==i2:
+            return None 
+
+        bot = FermionTensorNetwork([]) if grad_site[0]==0 else \
+              cache_bot[config[:grad_site[0]*self.Ly]]
+        if bot is None:
+            return None
+        mid = get_mid_env(grad_site[0],fpeps,config)
+
+        env_prev = None if site2[0]==self.Lx-1 else cache_top[config[(site2[0]+1)*self.Ly:]]
+        Hvx = None
+        coeff = self.hop_coeff(site1,site2)
+        for i1_new,i2_new,hop_sign in hop(i1,i2):
+            config_new = list(config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = tuple(config_new)
+            top = None if env_prev is None else env_prev.copy()
+            for i in range(site2[0],grad_site[0],-1):
+                row = get_mid_env(i,fpeps,config_new) 
+                top = get_top_env(i,row,top,config_new,cache_top,layer_tags=None,**compress_opts)
+            if top is None:
+                continue
+            ftn = FermionTensorNetwork([bot,mid,top],virtual=False).view_like_(fpeps) 
+            try:
+                Hvx_term = site_grad(ftn,*site_grad) * (hop_sign * coeff)
+                if Hvx is None:
+                    Hvx = Hvx_term
+                else:
+                    Hvx = Hvx + Hvx_term
+            except (IndexError,ValueError):
+                continue
         return Hvx

@@ -1,6 +1,13 @@
 from .fermion_2d_vmc import AmplitudeFactory2D as AmplitudeFactory
 from .fermion_2d_vmc import Hubbard2D as Hubbard
-from .fermion_2d_vmc import flat2site,site_grad,get_bra_tsr
+from .fermion_2d_vmc import (
+    flat2site,
+    site_grad,
+    get_bra_tsr,
+    get_mid_env,
+    get_all_bot_envs,
+    get_all_top_envs,
+)
 from .fermion_core import FermionTensorNetwork 
 import numpy as np
 from mpi4py import MPI
@@ -10,63 +17,15 @@ RANK = COMM.Get_rank()
 #####################################################################################
 # double layer cache
 #####################################################################################
-def get_bot_env(i,norm,env_prev,config,cache,**compress_opts):
-    # contract mid env for row i with prev bot env 
-    key = config[:(i+1)*norm.Ly]
-    if key in cache: # reusable
-        return cache[key] 
-    row = norm.select(norm.row_tag(i)).copy()
-    if i==0:
-        cache[key] = row 
-        return row
-    if env_prev is None:
-        cache[key] = None 
-        return None
-    ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
-    try:
-        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),layer_tags=('KET','BRA'),**compress_opts)
-    except (ValueError,IndexError):
-        ftn = None
-    cache[key] = ftn
-    return ftn 
-def get_top_env(i,norm,env_prev,config,cache,**compress_opts):
-    # contract mid env for row i with prev top env 
-    key = config[i*norm.Ly:]
-    if key in cache: # reusable
-        return cache[key]
-    row = norm.select(norm.row_tag(i)).copy()
-    if i==row.Lx-1:
-        cache[key] = row 
-        return row
-    if env_prev is None:
-        cache[key] = None 
-        return None
-    ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
-    try:
-        ftn.contract_boundary_from_top_(xrange=(i,i+1),layer_tags=('KET','BRA'),**compress_opts)
-    except (ValueError,IndexError):
-        ftn = None
-    cache[key] = ftn
-    return ftn 
-def get_all_bot_envs(norm,config,cache_bot,imax,**compress_opts):
-    env_prev = None
-    for i in range(imax+1):
-         env_prev = get_bot_env(i,norm,env_prev,config,cache_bot,**compress_opts)
-    return env_prev
-def get_all_top_envs(norm,config,cache_top,imin,**compress_opts):
-    env_prev = None
-    for i in range(norm.Lx-1,imin-1,-1):
-         env_prev = get_top_env(i,norm,env_prev,config,cache_top,**compress_opts)
-    return env_prev
 def get_3col_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
-    norm.reorder('row',inplace=True)
+    norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
     ls = []
     if i>0:
-        bot = get_all_bot_envs(norm,config,cache_bot,i-1,**compress_opts)
+        bot = get_all_bot_envs(norm,config,cache_bot,imax=i-1,layer_tags=('KET','BRA'),append='*',**compress_opts)
         ls.append(bot)
-    ls.append(norm.select(norm.row_tag(i)))
+    ls.append(get_mid_env(i,norm,config,append='*'))
     if i<norm.Lx-1:
-        top = get_all_top_envs(norm,config,cache_top,i+1,**compress_opts)
+        top = get_all_top_envs(norm,config,cache_top,imin=i+1,layer_tags=('KET','BRA'),append='*',**compress_opts)
         ls.append(top)
     ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
     return ftn 
@@ -113,7 +72,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         if config is not None:
             self.store[config] = cx
             self.store_grad[config] = vx
-        return vx 
+        return cx,vx 
 class Hubbard2D(Hubbard):
     def update_cache(self,ix):
         self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,ix,self.Lx,self.Ly)
@@ -127,7 +86,7 @@ class Hubbard2D(Hubbard):
         unsigned_cx = sum(cx12.values()) / len(cx12)
         vx = None
         if compute_v:
-            vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+            _,vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
@@ -138,22 +97,22 @@ class Hubbard2D(Hubbard):
         ex = eh+ev+eu
         if not compute_Hv: 
             return unsigned_cx,ex,vx,None 
-        sign = amplitude_factory.compute_config_sign(tuple(config)) 
-        Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory)
-        #if RANK==0:
-        #    print(config,sign,unsigned_cx,Hvx)
-        #exit()
+        if self.Lx > self.Ly:
+            Hvx = self.compute_Hv_hop_col_first(tuple(config),amplitude_factory)
+            sign = amplitude_factory.compute_config_sign(tuple(config)) 
+        else:
+            Hvx = self.compute_Hv_hop_row_first(tuple(config),amplitude_factory)
+            sign = 1.
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
-    def compute_Hv_hop(self,config,amplitude_factory):
+    def compute_Hv_hop_col_first(self,config,amplitude_factory):
         # make bra
         bra = self.pepo.copy()
         fpeps = amplitude_factory.psi.copy()
         for ix,ci in reversed(list(enumerate(config))):
             i,j = self.flat2site(ix)
-            tsr = get_bra_tsr(fpeps,ci,i,j)
-            tsr.reindex_({f'k{i},{j}':f'k{i},{j}*'})
+            tsr = get_bra_tsr(fpeps,ci,i,j,append='*')
             bra.add_tensor(tsr,virtual=True) 
         for i in range(self.Lx):
             for j in range(self.Ly):
@@ -163,21 +122,23 @@ class Hubbard2D(Hubbard):
 
         ix = amplitude_factory.ix
         i,j = self.flat2site(ix)
-        if self.Lx > self.Ly:
-            norm.reorder('col',inplace=True)
-            for j_ in range(1,j):
-                norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
-            for j_ in range(self.Ly-2,j,-1):
-                norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
-            ftn = norm
-        else:
-            #ftn = get_3col_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
-            norm.reorder('row',inplace=True)
-            for i_ in range(1,i):
-                norm.contract_boundary_from_bottom_(xrange=(i_-1,i_),layer_tags=('KET','BRA'),**self.contract_opts)
-            for i_ in range(self.Lx-2,i,-1):
-                norm.contract_boundary_from_top_(xrange=(i_,i_+1),layer_tags=('KET','BRA'),**self.contract_opts)
-            ftn = norm
+        norm.reorder('col',layer_tags=('KET','BRA'),inplace=True)
+        for j_ in range(1,j):
+            norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
+        for j_ in range(self.Ly-2,j,-1):
+            norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
+        Hvx = site_grad(norm,i,j)
+        cons = amplitude_factory.constructors[ix][0]
+        Hvx = cons.tensor_to_vector(Hvx) 
+        return Hvx
+    def compute_Hv_hop_row_first(self,config,amplitude_factory):
+        # make bra
+        norm = amplitude_factory.psi.copy()
+        norm.add_tensor_network(self.pepo.copy(),virtual=True)
+        ix = amplitude_factory.ix
+        i,j = self.flat2site(ix)
+
+        ftn = get_3col_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
         Hvx = site_grad(ftn,i,j)
         cons = amplitude_factory.constructors[ix][0]
         Hvx = cons.tensor_to_vector(Hvx) 

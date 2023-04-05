@@ -403,8 +403,6 @@ class TNVMC: # stochastic sampling
     def _extract_Hvmean(self):
         if self.exact_sampling:
             self.Hv_local = np.array(self.Hv_local)
-            #if RANK==0:
-            #    print(self.Hv_local[:,:7])
             Hvsum_ = np.dot(self.flocal,self.Hv_local)
         else:
             if RANK==0:

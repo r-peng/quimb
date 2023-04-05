@@ -121,17 +121,17 @@ def get_constructors_2d(fpeps):
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-def get_bra_tsr(fpeps,ci,i,j):
-    inds = fpeps.site_ind(i,j),
+def get_bra_tsr(fpeps,ci,i,j,append=''):
+    inds = fpeps.site_ind(i,j)+append,
     tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
     data = data_map[ci].dagger
     return FermionTensor(data=data,inds=inds,tags=tags)
-def get_mid_env(i,fpeps,config):
+def get_mid_env(i,fpeps,config,append=''):
     row = fpeps.select(fpeps.row_tag(i)).copy()
     key = config[i*fpeps.Ly:(i+1)*fpeps.Ly]
     # compute mid env for row i
     for j in range(row.Ly-1,-1,-1):
-        row.add_tensor(get_bra_tsr(row,key[j],i,j),virtual=True)
+        row.add_tensor(get_bra_tsr(row,key[j],i,j,append=append),virtual=True)
     return row
 def contract_mid_env(i,row):
     try: 
@@ -140,7 +140,7 @@ def contract_mid_env(i,row):
     except (ValueError,IndexError):
         row = None 
     return row
-def get_bot_env(i,row,env_prev,config,cache,**compress_opts):
+def get_bot_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
     # contract mid env for row i with prev bot env 
     key = config[:(i+1)*row.Ly]
     if key in cache: # reusable
@@ -157,21 +157,20 @@ def get_bot_env(i,row,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
     try:
-        #ftn.contract_boundary_from_bottom_(xrange=(i-1,i),yrange=(0,row.Ly-1),**compress_opts)
-        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),**compress_opts)
+        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),layer_tags=layer_tags,**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
     return ftn 
-def get_all_bot_envs(fpeps,config,cache_bot,imax=None,**compress_opts):
+def get_all_bot_envs(fpeps,config,cache_bot,imax=None,layer_tags=None,append='',**compress_opts):
     # imax for bot env
     imax = fpeps.Lx-2 if imax is None else imax
     env_prev = None
     for i in range(imax+1):
-         row = get_mid_env(i,fpeps,config)
-         env_prev = get_bot_env(i,row,env_prev,config,cache_bot,**compress_opts)
+         row = get_mid_env(i,fpeps,config,append=append)
+         env_prev = get_bot_env(i,row,env_prev,config,cache_bot,layer_tags=layer_tags,**compress_opts)
     return env_prev
-def get_top_env(i,row,env_prev,config,cache,**compress_opts):
+def get_top_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
     # contract mid env for row i with prev top env 
     key = config[i*row.Ly:]
     if key in cache: # reusable
@@ -188,18 +187,17 @@ def get_top_env(i,row,env_prev,config,cache,**compress_opts):
         return None
     ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
     try:
-        #ftn.contract_boundary_from_top_(xrange=(i,i+1),yrange=(0,row.Ly-1),**compress_opts)
-        ftn.contract_boundary_from_top_(xrange=(i,i+1),**compress_opts)
+        ftn.contract_boundary_from_top_(xrange=(i,i+1),layer_tags=layer_tags,**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
     return ftn 
-def get_all_top_envs(fpeps,config,cache_top,imin=None,**compress_opts):
+def get_all_top_envs(fpeps,config,cache_top,imin=None,layer_tags=None,append='',**compress_opts):
     imin = 1 if imin is None else imin
     env_prev = None
     for i in range(fpeps.Lx-1,imin-1,-1):
-         row = get_mid_env(i,fpeps,config)
-         env_prev = get_top_env(i,row,env_prev,config,cache_top,**compress_opts)
+         row = get_mid_env(i,fpeps,config,append=append)
+         env_prev = get_top_env(i,row,env_prev,config,cache_top,layer_tags=layer_tags,**compress_opts)
     return env_prev
 def get_all_lenvs(ftn,jmax=None):
     jmax = ftn.Ly-2 if jmax is None else jmax
@@ -326,10 +324,10 @@ class AmplitudeFactory2D:
         env_top = None
         if self.compute_bot: 
             env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-1-x_bsz,
-                                       **self.contract_opts)
+                                       append='',layer_tags=None,**self.contract_opts)
         if self.compute_top:
             env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=x_bsz,
-                                       **self.contract_opts)
+                                       append='',layer_tags=None,**self.contract_opts)
         return env_bot,env_top
     def compute_config_parity(self,config):
         parity = [None] * self.Lx
@@ -622,6 +620,7 @@ class Hubbard2D:
         pepo.add_tensor(FermionTensor(data=data_map[3].copy(),inds=('v',),tags=tags),virtual=True)
         pepo.contract_tags(tags,inplace=True)
         self.pepo = pepo
+        self.pepo.add_tag('BRA')
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def flat2site(self,ix):
@@ -681,9 +680,6 @@ class Hubbard2D:
             return unsigned_cx,ex,vx,None 
         sign = amplitude_factory.compute_config_sign(tuple(config)) 
         Hvx = self.compute_Hv_hop(config,amplitude_factory)
-        #if RANK==0:
-        #    print(config,sign,unsigned_cx,Hvx[:7])
-        #exit()
         Hvx /= sign * unsigned_cx
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
@@ -693,8 +689,7 @@ class Hubbard2D:
         fpeps = amplitude_factory.psi.copy()
         for ix,ci in reversed(list(enumerate(config))):
             i,j = self.flat2site(ix)
-            tsr = get_bra_tsr(fpeps,ci,i,j)
-            tsr.reindex_({f'k{i},{j}':f'k{i},{j}*'})
+            tsr = get_bra_tsr(fpeps,ci,i,j,append='*')
             bra.add_tensor(tsr,virtual=True) 
         for i in range(self.Lx):
             for j in range(self.Ly):
@@ -895,7 +890,7 @@ class ExchangeSampler2D:
             row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
             row2_new = saved_rows.select(fpeps.row_tag(i+1),virtual=True)
             # update new env_h
-            env_bot = get_bot_env(i,row1_new,env_bot,self.config,cache_bot,**compress_opts)
+            env_bot = get_bot_env(i,row1_new,env_bot,self.config,cache_bot,layer_tags=None,**compress_opts)
             row1 = row2_new
     def sweep_row_backward(self):
         fpeps = self.amplitude_factory.psi
@@ -921,7 +916,7 @@ class ExchangeSampler2D:
             row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
             row2_new = saved_rows.select(fpeps.row_tag(i-1),virtual=True)
             # update new env_h
-            env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,**compress_opts)
+            env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,layer_tags=None,**compress_opts)
             row1 = row2_new
     def sample(self):
         self.sweep_col_dir = -1 # randomly choses the col sweep direction
