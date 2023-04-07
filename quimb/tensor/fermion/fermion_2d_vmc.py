@@ -468,17 +468,29 @@ class AmplitudeFactory2DDMRG(AmplitudeFactory2D):
     def get_grad_from_plq(self,plq,config=None,compute_cx=True):
         i,j = self.flat2site(self.ix)
         _,(x_bsz,y_bsz) = list(plq.keys())[0]
-        i0 = min(self.Lx-x_bsz,i)
-        j0 = min(self.Ly-y_bsz,j)
-        ftn_plq = plq[(i0,j0),(x_bsz,y_bsz)]
-        cx = ftn_plq.copy().contract() if compute_cx else 1.
-        vx = site_grad(ftn_plq.copy(),i,j) / cx 
-        cons = self.constructors[self.ix][0]
-        vx = cons.tensor_to_vector(vx) 
+        # all plqs the site could be in 
+        keys = [(i0,j0) for i0 in range(i,i-x_bsz,-1) for j0 in range(j,j-y_bsz,-1)]
+        for i0,j0 in keys:
+            key = (i0,j0),(x_bsz,y_bsz)
+            ftn_plq = plq.get(key,None)
+            if ftn_plq is None:
+                continue
+            # returns as soon as ftn_plq exist
+            cx = ftn_plq.copy().contract() if compute_cx else 1.
+            vx = site_grad(ftn_plq.copy(),i,j) / cx 
+            cons = self.constructors[self.ix][0]
+            vx = cons.tensor_to_vector(vx) 
+            if config is not None:
+                self.store[config] = cx
+                self.store_grad[config] = vx
+            return cx,vx 
+        # ftn_plq doesn't exist due to contraction error
+        start,stop = self.block_dict[self.ix]
+        vx = np.zeros(stop-start)
         if config is not None:
-            self.store[config] = cx
-            self.store_grad[config] = vx
-        return cx,vx 
+            self.store[config] = 0. 
+            self.store_grad[config] = vx 
+        return None,vx
 def get_amplitude_factory_cls(dmrg):
     if dmrg:
         return AmplitudeFactory2DDMRG
@@ -689,7 +701,6 @@ class Hubbard2D:
         except (ValueError,IndexError):
             return 0.
     def nn(self,config,plq,x_bsz,y_bsz,inplace=True,cx=None):
-        # all vertical bonds
         e = 0.
         for i in range(self.Lx+1-x_bsz):
             for j in range(self.Ly+1-y_bsz):
@@ -719,16 +730,13 @@ class Hubbard2D:
         # onsite terms
         config = np.array(config,dtype=int)
         eu = self.u*len(config[config==3])
-
         ex = eh+ev+eu
         if not compute_Hv: 
             return unsigned_cx,ex,vx,None 
-        sign = amplitude_factory.compute_config_sign(tuple(config)) 
-        Hvx = self.compute_Hv_hop(config,amplitude_factory)
-        Hvx /= sign * unsigned_cx
+        Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory,unsigned_cx)
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
-    def compute_Hv_hop(self,config,amplitude_factory):
+    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
         # make bra
         bra = self.pepo.copy()
         fpeps = amplitude_factory.psi.copy()
@@ -748,6 +756,8 @@ class Hubbard2D:
         for key in plq:
             plq[key].view_like_(fpeps)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        sign = amplitude_factory.compute_config_sign(config) 
+        Hvx /= sign * unsigned_cx
         return Hvx
 def get_3col_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
     norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
@@ -764,36 +774,43 @@ def get_3col_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
 class Hubbard2DDMRG(Hubbard2D):
     def update_cache(self,ix):
         self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,ix,self.Lx,self.Ly)
-    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
+    def compute_local_energy(self,config,amplitude_factory,compute_Hv=False,compute_v=None):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
         plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
-        # get gradient form plq12
-        cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()}
-        unsigned_cx = sum(cx12.values()) / len(cx12)
-        vx = None
-        if compute_v:
-            _,vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+        # try gradient from plq12
+        cx12 = None
+        unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
+        if unsigned_cx is None: # try gradient from plq21
+            unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq21,config=config) 
+        # scheme1:
+        #if unsigned_cx is None:
+        #    return (None,)*4
+        # scheme2:
+        if unsigned_cx is None:
+            cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()} 
+            unsigned_cx = sum(cx12.values())/len(cx12)
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
         # onsite terms
         config = np.array(config,dtype=int)
         eu = self.u*len(config[config==3])
-
         ex = eh+ev+eu
         if not compute_Hv: 
             return unsigned_cx,ex,vx,None 
-        if self.Lx > self.Ly:
-            Hvx = self.compute_Hv_hop_col_first(tuple(config),amplitude_factory)
-            sign = amplitude_factory.compute_config_sign(tuple(config)) 
-        else:
-            Hvx = self.compute_Hv_hop_row_first(tuple(config),amplitude_factory)
-            sign = 1.
-        Hvx /= sign * unsigned_cx
+        Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory,unsigned_cx)
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx
+    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
+        if self.Lx > self.Ly:
+            Hvx = self.compute_Hv_hop_col_first(config,amplitude_factory)
+            sign = amplitude_factory.compute_config_sign(config) 
+        else:
+            Hvx = self.compute_Hv_hop_row_first(config,amplitude_factory)
+            sign = 1.
+        return Hvx / (sign * unsigned_cx)
     def compute_Hv_hop_col_first(self,config,amplitude_factory):
         # make bra
         bra = self.pepo.copy()
@@ -845,31 +862,7 @@ def hop(i1,i2):
 class Hubbard2DDMRG_SL(Hubbard2DDMRG):
     def initialize_pepo(self,fpeps=None):
         pass
-    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        amplitude_factory.get_all_benvs(config,x_bsz=1) 
-        # form all (1,2),(2,1) plqs
-        plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
-        plq21 = amplitude_factory.get_plq_from_benvs(config,x_bsz=2,y_bsz=1)
-        # get gradient form plq12
-        vx = None
-        if compute_v:
-            unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq12,config=config) 
-        # get h/v bonds
-        eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=None) 
-        ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        # onsite terms
-        config = np.array(config,dtype=int)
-        eu = self.u*len(config[config==3])
-
-        ex = eh+ev+eu
-        if not compute_Hv: 
-            return unsigned_cx,ex,vx,None 
-        sign = amplitude_factory.compute_config_sign(tuple(config)) 
-        Hvx_h,Hvx_v = self.compute_Hv_hop(tuple(config),amplitude_factory)
-        Hvx = (Hvx_h + Hvx_v * sign) / unsigned_cx
-        Hvx += eu * vx
-        return unsigned_cx,ex,vx,Hvx
-    def compute_Hv_hop(self,config,amplitude_factory):
+    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
         cache_top = amplitude_factory.cache_top
         cache_bot = amplitude_factory.cache_bot
         ix = amplitude_factory.ix
@@ -895,7 +888,10 @@ class Hubbard2DDMRG_SL(Hubbard2DDMRG):
                 Hvx = self.Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=sign_fn,**compress_opts)
                 if Hvx is not None:
                     Hvx_v += cons.tensor_to_vector(Hvx)
-        return Hvx_h,Hvx_v
+
+        sign = sign_fn(config) 
+        Hvx = (Hvx_h + Hvx_v * sign) / unsigned_cx
+        return Hvx
     def Hvx_term(self,config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None,**compress_opts):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
@@ -1163,7 +1159,8 @@ class ExchangeSampler2D:
             env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,layer_tags=None,**compress_opts)
             row1 = row2_new
     def sample(self):
-        self.sweep_col_dir = -1 # randomly choses the col sweep direction
+        #self.sweep_col_dir = -1 # randomly choses the col sweep direction
+        self.sweep_col_dir = self.rng.choice([-1,1]) # randomly choses the col sweep direction
         if self.sweep_row_dir == 1:
             self.sweep_row_forward()
         else:

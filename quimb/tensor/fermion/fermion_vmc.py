@@ -26,6 +26,18 @@ def _rgn_block_solve(H,E,S,g,cond):
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
     return wmin,deltas,dE
+def _lin_block_solve(H,E,S,g,Hvmean,vmean,cond):
+    Hi0 = g
+    H0j = Hvmean - E * vmean
+    sh = len(g)
+
+    A = np.block([[np.array([[E]]),H0j.reshape(1,sh)],
+                  [Hi0.reshape(sh,1),H]])
+    B = np.block([[np.ones((1,1)),np.zeros((1,sh))],
+                  [np.zeros((sh,1)),S+cond*np.eye(sh)]])
+    w,v = scipy.linalg.eig(A,b=B) 
+    w,deltas,idx = _select_eigenvector(w.real,v.real)
+    return w,deltads,v[0,idx],np.linalg.norm(v[:,idx].imag)
 def _select_eigenvector(w,v):
     #if min(w) < self.E - self.revert:
     #    dist = (w-self.E)**2
@@ -124,7 +136,7 @@ class TNVMC: # stochastic sampling
         self.rate2 = None # rate for LIN,RGN
         self.cond1 = None
         self.cond2 = None
-        self.check_update = None 
+        self.check = None 
         self.accept_ratio = None
     def run(self,start,stop,tmpdir=None):
         for step in range(start,stop):
@@ -186,6 +198,9 @@ class TNVMC: # stochastic sampling
             else:
                 cx,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
                                                              compute_v=compute_v,compute_Hv=compute_Hv)
+                if cx is None:
+                    self.store[config] = None
+                    continue
                 if np.fabs(ex) > DISCARD:
                     self.store[config] = None
                     continue
@@ -645,7 +660,7 @@ class TNVMC: # stochastic sampling
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
-        return - np.dot(self.g,self.deltas) + np.dot(self.deltas,hess(self.deltas))
+        return - np.dot(self.g,self.deltas) + .5 * np.dot(self.deltas,hess(self.deltas))
     def _transform_gradients_lin(self,cond):
         t0 = time.time()
         if self.solve=='mask':
@@ -679,71 +694,55 @@ class TNVMC: # stochastic sampling
         Hi0 = self.g
         H0j = self.Hvmean - self.E * self.vmean
 
-        ws = np.zeros(len(self.block_dict))
+        w = np.zeros(len(self.block_dict))
         v0 = np.zeros(len(self.block_dict))
+        inorm = np.zeros(len(self.block_dict))
         self.deltas = np.zeros_like(self.x)
-        imag_norm = 0. 
-        scale = len(self.block_dict)
         for ix,(start,stop) in enumerate(self.block_dict):
-            sh = stop - start
-            A = np.block([[np.ones((1,1))*self.E,H0j[start:stop].reshape(1,sh)*scale],
-            #A = np.block([[np.ones((1,1))*self.E,H0j[start:stop].reshape(1,sh)],
-                          [Hi0[start:stop].reshape(sh,1),self.H[ix]]])
-            B = np.block([[np.ones((1,1)),np.zeros((1,sh))],
-                          [np.zeros((sh,1)),self.S[ix]+cond*np.eye(sh)]])
-            w,v = scipy.linalg.eig(A,b=B) 
-            ws[ix],self.deltas[start:stop],idx = _select_eigenvector(w.real,v.real)
-            imag_norm += np.linalg.norm(v[:,idx].imag)
-            v0[ix] = v[0,idx].real
-        print('\timaginary norm=',imag_norm)
-        print('\teigenvalue =',ws)
+            w[ix],self.deltas[start:stop],v0[ix],inorm[ix] = \
+                _lin_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],
+                                 self.Hvmean[start:stop],self.vmean[start:stop],self.cond2) 
+        print('\timaginary norm=',inorm.sum())
+        print('\teigenvalue =',w)
         print('\tscale1=',v0)
 
-        H = np.zeros((self.nparam,self.nparam))
-        S = np.zeros((self.nparam,self.nparam))
-        for ix,(start,stop) in enumerate(self.block_dict):
-            H[start:stop,start:stop] = self.H[ix] 
-            S[start:stop,start:stop] = self.S[ix]
-        #A = np.block([[np.ones((1,1))*self.E,H0j.reshape(1,self.nparam)],
-        #              [Hi0.reshape(self.nparam,1),H]])
-        #B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
-        #              [np.zeros((self.nparam,1)),S+cond*np.eye(self.nparam)]])
-        #w,v = scipy.linalg.eig(A,b=B) 
-        #w,self.deltas,idx = _select_eigenvector(w.real,v.real)
-        #print('\timaginary norm=',np.linalg.norm(v[:,idx].imag))
-        #print('\teigenvalue =',w)
-        #print('\tscale1=',v[0,idx].real)
-
         if self.tmpdir is not None:
-            f = h5py.File(self.tmpdir+f'msk_step{self.step}','w')
+            H = np.zeros((self.nparam,self.nparam))
+            S = np.zeros((self.nparam,self.nparam))
+            for ix,(start,stop) in enumerate(self.block_dict):
+                H[start:stop,start:stop] = self.H[ix] 
+                S[start:stop,start:stop] = self.S[ix]
+            Hi0 = self.g
+            H0j = self.Hvmean - self.E * self.vmean
+
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('H',data=H) 
             f.create_dataset('S',data=S) 
             f.create_dataset('Hi0',data=Hi0) 
             f.create_dataset('H0j',data=H0j) 
             f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
             f.close()
- 
+        return w.sum()-self.E 
     def _transform_gradients_lin_matrix(self,cond):
-        Hi0 = self.g
-        H0j = self.Hvmean - self.E * self.vmean
-        A = np.block([[np.ones((1,1))*self.E,H0j.reshape(1,self.nparam)],
-                      [Hi0.reshape(self.nparam,1),self.H]])
-        B = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
-                      [np.zeros((self.nparam,1)),self.S+cond*np.eye(self.nparam)]])
-        w,v = scipy.linalg.eig(A,b=B) 
-        w,self.deltas,idx = _select_eigenvector(w.real,v.real)
-        print('\timaginary norm=',np.linalg.norm(v[:,idx].imag))
+        w,self.deltas,v0,inorm = \
+            _lin_block_solve(self.H,self.E,self.S,self.g,self.Hvmean,self.vmean,self.cond2) 
+        print('\timaginary norm=',inorm)
         print('\teigenvalue =',w)
-        print('\tscale1=',v[0,idx].real)
+        print('\tscale1=',v0)
 
         if self.tmpdir is not None:
-            f = h5py.File(self.tmpdir+f'full_step{self.step}','w')
+            Hi0 = self.g
+            H0j = self.Hvmean - self.E * self.vmean
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('H',data=self.H) 
             f.create_dataset('S',data=self.S) 
             f.create_dataset('Hi0',data=Hi0) 
             f.create_dataset('H0j',data=H0j) 
             f.create_dataset('E',data=np.array([self.E])) 
             f.close()
+        return w - self.E
     def _transform_gradients_lin_iterative(self,cond):
         Hi0 = self.g
         H0j = self.Hvmean - self.E * self.vmean
@@ -774,6 +773,12 @@ class TNVMC: # stochastic sampling
             print('\timaginary norm=',np.linalg.norm(v[:,0].imag))
             print('\teigenvalue =',w)
             print('\tscale1=',v[0,0].real)
+        if self.tmpdir is not None:
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return w - self.E
     def current_energy(self):
         if self.exact_sampling:
             if RANK==0:
@@ -862,9 +867,6 @@ class DMRG(TNVMC):
         self.amplitude_factory = amplitude_factory         
         self.x = self.amplitude_factory.get_x()
         self.block_dict = self.amplitude_factory.get_block_dict()
-        self.ix = 0
-        self.amplitude_factory.ix = self.ix
-        self.set_nparam()
 
         # parse gradient optimizer
         self.optimizer = optimizer
@@ -877,20 +879,26 @@ class DMRG(TNVMC):
             self.xi = kwargs.get('xi',0.5)
 
         # to be set before run
+        self.ix = 0 
         self.config = None
         self.batchsize = None
+        self.ratio = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
         self.rate2 = None # rate for LIN,RGN
         self.cond1 = None
         self.cond2 = None
-        self.check_update = None 
+        self.check = None 
         self.accept_ratio = None
     def set_nparam(self):
         start,stop = self.block_dict[self.ix]
         self.nparam = stop - start
+        if self.ratio is not None:
+            self.batchsize = max(self.batchsize_small,self.nparam * self.ratio) 
     def run(self,start,stop,tmpdir=None):
         for step in range(start,stop):
+            self.amplitude_factory.ix = self.ix
+            self.set_nparam()
             if RANK==0:
                 print(f'ix={self.ix},nparam={self.nparam}')
             self.step = step
@@ -904,8 +912,6 @@ class DMRG(TNVMC):
                 if tmpdir is not None: # save psi to disc
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
             self.ix = (self.ix + 1) % len(self.block_dict)
-            self.amplitude_factory.ix = self.ix
-            self.set_nparam()
     def update(self,rate):
         start,stop = self.block_dict[self.ix]
         x = self.x.copy()
