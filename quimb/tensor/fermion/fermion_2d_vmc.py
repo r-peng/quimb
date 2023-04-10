@@ -442,15 +442,23 @@ def cache_update(cache_bot,cache_top,ix,Lx,Ly):
     i,_ = flat2site(ix,Lx,Ly) 
     keys = list(cache_bot.keys())
     l = i * Ly
+    #if RANK==0:
+    #    print('bot before',cache_bot.keys())
     for key in keys:
         if len(key) > l:
             cache_bot.pop(key)
+    #if RANK==0:
+    #    print('bot after',cache_bot.keys())
 
+    #if RANK==0:
+    #    print('top before',cache_top.keys())
     keys = list(cache_top.keys())
     l = (Lx - i - 1) * Ly
     for key in keys:
         if len(key) > l:
             cache_top.pop(key)
+    #if RANK==0:
+    #    print('top after',cache_top.keys())
     return cache_bot,cache_top
 class AmplitudeFactory2DDMRG(AmplitudeFactory2D):
     def _set_psi(self,psi):
@@ -465,6 +473,8 @@ class AmplitudeFactory2DDMRG(AmplitudeFactory2D):
             self.cache_top = dict()
             return
         self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,self.ix,self.Lx,self.Ly)
+        #self.cache_bot = dict()
+        #self.cache_top = dict()
     def get_grad_from_plq(self,plq,config=None,compute_cx=True):
         i,j = self.flat2site(self.ix)
         _,(x_bsz,y_bsz) = list(plq.keys())[0]
@@ -499,6 +509,7 @@ def get_amplitude_factory_cls(dmrg):
 ####################################################################################
 # ham class 
 ####################################################################################
+# PEPO FXN
 def set_pepo_tsrs(): 
     vac = data_map[0]
     occ = data_map[3]
@@ -650,15 +661,113 @@ def combine(top,bot):
         for j in range(Ly): 
             pepo.contract_tags(pepo.site_tag(i,j),inplace=True) 
     return pepo 
+def make_norm(pepo,fpeps,config=None):
+    bra = pepo.copy()
+    if config is not None:
+        for ix,ci in reversed(list(enumerate(config))):
+            i,j = flat2site(ix,fpeps.Lx,fpeps.Ly)
+            tsr = get_bra_tsr(fpeps,ci,i,j,append='*')
+            bra.add_tensor(tsr,virtual=True) 
+        for i in range(fpeps.Lx):
+            for j in range(fpeps.Ly):
+                bra.contract_tags(bra.site_tag(i,j),inplace=True)
+    norm = fpeps 
+    norm.add_tensor_network(bra,virtual=True)
+    return norm
+def get_3row_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
+    norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
+    ls = []
+    if i>0:
+        bot = get_all_bot_envs(norm,config,cache_bot,imax=i-1,layer_tags=('KET','BRA'),append='*',**compress_opts)
+        ls.append(bot)
+    ls.append(get_mid_env(i,norm,config,append='*'))
+    if i<norm.Lx-1:
+        top = get_all_top_envs(norm,config,cache_top,imin=i+1,layer_tags=('KET','BRA'),append='*',**compress_opts)
+        ls.append(top)
+    ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
+    return ftn 
+def get_3col_ftn(norm,j,**compress_opts):
+    norm.reorder('col',layer_tags=('KET','BRA'),inplace=True)
+    for j_ in range(1,j):
+        norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
+    for j_ in range(self.Ly-2,j,-1):
+        norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
+    return norm
+# SINGLE LAYER FXN
+def hop(i1,i2):
+    n1,n2 = pn_map[i1],pn_map[i2]
+    nsum,ndiff = n1+n2,abs(n1-n2)
+    if ndiff==1:
+        sign = 1 if nsum==1 else -1
+        return [(i2,i1,sign)]
+    if ndiff==2:
+        return [(1,2,-1),(2,1,1)] 
+    if ndiff==0:
+        sign = i1-i2
+        return [(0,3,sign),(3,0,sign)]
+def Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None,**compress_opts):
+    ix1,ix2 = flatten(*site1,fpeps.Ly),flatten(*site2,fpeps.Ly)
+    i1,i2 = config[ix1],config[ix2]
+    if i1==i2:
+        return None 
+    imin = min(grad_site[0],site1[0]) 
+    imax = max(grad_site[0],site2[0]) 
+    top = FermionTensorNetwork([]) if imax==fpeps.Lx-1 else \
+          cache_top[config[(imax+1)*fpeps.Ly:]]
+    bot = FermionTensorNetwork([]) if imin==0 else \
+          cache_bot[config[:imin*fpeps.Ly]]
+    Hvx = None
+    parity = sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2
+    coeff = (-1)**parity
+    for i1_new,i2_new,hop_sign in hop(i1,i2):
+        config_new = list(config)
+        config_new[ix1] = i1_new
+        config_new[ix2] = i2_new 
+        config_new = tuple(config_new)
+        sign = 1 if sign_fn is None else sign_fn(config_new)
+
+        bot_term = bot.copy()
+        for i in range(imin,grad_site[0]):
+            row = get_mid_env(i,fpeps,config_new,append='')
+            bot_term = get_bot_env(i,row,bot_term,config_new,cache_bot,layer_tags=None,**compress_opts)
+        if bot_term is None:
+            continue
+
+        top_term = top.copy()
+        for i in range(imax,grad_site[0],-1):
+            row = get_mid_env(i,fpeps,config_new,append='')
+            top_term = get_top_env(i,row,top_term,config_new,cache_top,layer_tags=None,**compress_opts)
+        if top_term is None:
+            continue
+        mid = get_mid_env(grad_site[0],fpeps,config_new,append='')
+        ftn = FermionTensorNetwork([bot_term,mid,top_term],virtual=False).view_like_(fpeps) 
+        try:
+            Hvx_term = site_grad(ftn,*grad_site) * (sign * hop_sign * coeff)
+            if Hvx is None:
+                Hvx =  Hvx_term
+            else:
+                Hvx = Hvx + Hvx_term
+        except (IndexError,ValueError):
+            continue
+    return Hvx
 class Hubbard2D:
-    def __init__(self,Lx,Ly,t,u,**contract_opts):
+    def __init__(self,Lx,Ly,t,u,dmrg=False,single_layer=False,**contract_opts):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
-        # for double layer contraction
+        self.single_layer = single_layer
+        self.dmrg = dmrg
         self.contract_opts = contract_opts
         self.cache_top = dict()
         self.cache_bot = dict()
+    def hop_coeff(self,site1,site2):
+        return -self.t
+    def update_cache(self,ix):
+        self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,ix,self.Lx,self.Ly)
+        #self.cache_bot = dict()
+        #self.cache_top = dict()
     def initialize_pepo(self,fpeps):
+        if self.single_layer:
+            return
         set_pepo_tsrs()
 
         # row mpos
@@ -682,8 +791,6 @@ class Hubbard2D:
         return flatten(i,j,self.Ly)        
     def flat2site(self,ix):
         return flat2site(ix,self.Lx,self.Ly)
-    def hop_coeff(self,site1,site2):
-        return -self.t
     def hop(self,ftn_plq,config,site1,site2,cx=None):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
@@ -712,7 +819,10 @@ class Hubbard2D:
                     cx_ij = None if cx is None else cx[i,j]
                     e += self.hop(ftn_plq,config,site1,site2,cx_ij)
         return e
-    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
+    def compute_local_energy_coulomb(self,config):
+        config = np.array(config,dtype=int)
+        return self.u*len(config[config==3])
+    def compute_local_energy_full(self,config,amplitude_factory,compute_v=True):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
@@ -727,54 +837,8 @@ class Hubbard2D:
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        # onsite terms
-        config = np.array(config,dtype=int)
-        eu = self.u*len(config[config==3])
-        ex = eh+ev+eu
-        if not compute_Hv: 
-            return unsigned_cx,ex,vx,None 
-        Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory,unsigned_cx)
-        Hvx += eu * vx
-        return unsigned_cx,ex,vx,Hvx
-    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
-        # make bra
-        bra = self.pepo.copy()
-        fpeps = amplitude_factory.psi.copy()
-        for ix,ci in reversed(list(enumerate(config))):
-            i,j = self.flat2site(ix)
-            tsr = get_bra_tsr(fpeps,ci,i,j,append='*')
-            bra.add_tensor(tsr,virtual=True) 
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                bra.contract_tags(bra.site_tag(i,j),inplace=True)
-        norm = fpeps 
-        norm.add_tensor_network(bra,virtual=True)
-        if self.Lx > self.Ly:
-            plq = norm._compute_plaquette_environments_col_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
-        else:
-            plq = norm._compute_plaquette_environments_row_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
-        for key in plq:
-            plq[key].view_like_(fpeps)
-        _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
-        sign = amplitude_factory.compute_config_sign(config) 
-        Hvx /= sign * unsigned_cx
-        return Hvx
-def get_3col_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
-    norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
-    ls = []
-    if i>0:
-        bot = get_all_bot_envs(norm,config,cache_bot,imax=i-1,layer_tags=('KET','BRA'),append='*',**compress_opts)
-        ls.append(bot)
-    ls.append(get_mid_env(i,norm,config,append='*'))
-    if i<norm.Lx-1:
-        top = get_all_top_envs(norm,config,cache_top,imin=i+1,layer_tags=('KET','BRA'),append='*',**compress_opts)
-        ls.append(top)
-    ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
-    return ftn 
-class Hubbard2DDMRG(Hubbard2D):
-    def update_cache(self,ix):
-        self.cache_bot,self.cache_top = cache_update(self.cache_bot,self.cache_top,ix,self.Lx,self.Ly)
-    def compute_local_energy(self,config,amplitude_factory,compute_Hv=False,compute_v=None):
+        return unsigned_cx,eh+ev,vx 
+    def compute_local_energy_dmrg(self,config,amplitude_factory):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
         plq12 = amplitude_factory.get_plq_from_benvs(config,x_bsz=1,y_bsz=2)
@@ -794,156 +858,97 @@ class Hubbard2DDMRG(Hubbard2D):
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        # onsite terms
-        config = np.array(config,dtype=int)
-        eu = self.u*len(config[config==3])
-        ex = eh+ev+eu
-        if not compute_Hv: 
-            return unsigned_cx,ex,vx,None 
-        Hvx = self.compute_Hv_hop(tuple(config),amplitude_factory,unsigned_cx)
-        Hvx += eu * vx
-        return unsigned_cx,ex,vx,Hvx
-    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
+        return unsigned_cx,eh+ev,vx 
+    def compute_Hv_hop_double_full(self,config,amplitude_factory,unsigned_cx):
+        # make bra
+        norm = make_norm(self.pepo,amplitude_factory.psi.copy(),config=config)
         if self.Lx > self.Ly:
-            Hvx = self.compute_Hv_hop_col_first(config,amplitude_factory)
+            plq = norm._compute_plaquette_environments_col_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
+        else:
+            plq = norm._compute_plaquette_environments_row_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
+        for key in plq:
+            plq[key].view_like_(norm)
+        _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        sign = amplitude_factory.compute_config_sign(config) 
+        return Hvx / (sign * unsigned_cx)
+    def compute_Hv_hop_double_dmrg(self,config,amplitude_factory,unsigned_cx):
+        ix = amplitude_factory.ix
+        i,j = self.flat2site(ix)
+        if self.Lx > self.Ly:
+            norm = make_norm(self.pepo,amplitude_factory.psi.copy(),config=config)
+            ftn = get_3col_ftn(norm,j,**self.contract_opts)
             sign = amplitude_factory.compute_config_sign(config) 
         else:
-            Hvx = self.compute_Hv_hop_row_first(config,amplitude_factory)
+            norm = make_norm(self.pepo,amplitude_factory.psi.copy())
+            ftn = get_3row_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
             sign = 1.
-        return Hvx / (sign * unsigned_cx)
-    def compute_Hv_hop_col_first(self,config,amplitude_factory):
-        # make bra
-        bra = self.pepo.copy()
-        fpeps = amplitude_factory.psi.copy()
-        for ix,ci in reversed(list(enumerate(config))):
-            i,j = self.flat2site(ix)
-            tsr = get_bra_tsr(fpeps,ci,i,j,append='*')
-            bra.add_tensor(tsr,virtual=True) 
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                bra.contract_tags(bra.site_tag(i,j),inplace=True)
-        norm = fpeps 
-        norm.add_tensor_network(bra,virtual=True)
-
-        ix = amplitude_factory.ix
-        i,j = self.flat2site(ix)
-        norm.reorder('col',layer_tags=('KET','BRA'),inplace=True)
-        for j_ in range(1,j):
-            norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
-        for j_ in range(self.Ly-2,j,-1):
-            norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
-        Hvx = site_grad(norm,i,j)
-        cons = amplitude_factory.constructors[ix][0]
-        Hvx = cons.tensor_to_vector(Hvx) 
-        return Hvx
-    def compute_Hv_hop_row_first(self,config,amplitude_factory):
-        # make bra
-        norm = amplitude_factory.psi.copy()
-        norm.add_tensor_network(self.pepo.copy(),virtual=True)
-        ix = amplitude_factory.ix
-        i,j = self.flat2site(ix)
-
-        ftn = get_3col_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
         Hvx = site_grad(ftn,i,j)
         cons = amplitude_factory.constructors[ix][0]
         Hvx = cons.tensor_to_vector(Hvx) 
-        return Hvx
-def hop(i1,i2):
-    n1,n2 = pn_map[i1],pn_map[i2]
-    nsum,ndiff = n1+n2,abs(n1-n2)
-    if ndiff==1:
-        sign = 1 if nsum==1 else -1
-        return [(i2,i1,sign)]
-    if ndiff==2:
-        return [(1,2,-1),(2,1,1)] 
-    if ndiff==0:
-        sign = i1-i2
-        return [(0,3,sign),(3,0,sign)]
-class Hubbard2DDMRG_SL(Hubbard2DDMRG):
-    def initialize_pepo(self,fpeps=None):
-        pass
-    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
+        return Hvx / (sign * unsigned_cx)
+    def Hvnn(self,config,amplitude_factory,x_bsz,y_bsz,sign_fn=None,ix=None):
         cache_top = amplitude_factory.cache_top
         cache_bot = amplitude_factory.cache_bot
-        ix = amplitude_factory.ix
+        ix = amplitude_factory.ix if ix is None else ix
         grad_site = self.flat2site(ix)
         fpeps = amplitude_factory.psi
         compress_opts = amplitude_factory.contract_opts
-        cons = amplitude_factory.constructors[ix][0]
+        cons,_,sh,_ = amplitude_factory.constructors[ix]
+        Hvx = None 
+        for i in range(self.Lx+1-x_bsz):
+            for j in range(self.Ly+1-y_bsz):
+                site1,site2 = (i,j),(i+x_bsz-1,j+y_bsz-1)
+                Hvx_ = Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,
+                                sign_fn=sign_fn,**compress_opts)
+                if Hvx_ is not None:
+                    Hvx_ = Hvx_ * self.hop_coeff(site1,site2)
+                    if Hvx is None:
+                        Hvx = Hvx_
+                    else:
+                        Hvx = Hvx + Hvx_
+        if Hvx is None:
+            return np.zeros(sh)
+        Hvx = cons.tensor_to_vector(Hvx)
+        if sign_fn is not None:
+            sign = sign_fn(config) 
+            Hvx /= sign
+        return Hvx
+    def compute_Hv_hop_single_dmrg(self,config,amplitude_factory,unsigned_cx,ix=None):
         sign_fn = amplitude_factory.compute_config_sign
-
-        Hvx_h = 0.
-        # hbonds
-        for i in range(self.Lx):
-            for j in range(self.Ly-1):
-                site1,site2 = (i,j),(i,j+1)
-                Hvx = self.Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,**compress_opts)
-                if Hvx is not None:
-                    Hvx_h += cons.tensor_to_vector(Hvx)
-        # vbonds
-        Hvx_v = 0.
-        for i in range(self.Lx-1):
-            for j in range(self.Ly):
-                site1,site2 = (i,j),(i+1,j)
-                Hvx = self.Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=sign_fn,**compress_opts)
-                if Hvx is not None:
-                    Hvx_v += cons.tensor_to_vector(Hvx)
-
-        sign = sign_fn(config) 
-        Hvx = (Hvx_h + Hvx_v * sign) / unsigned_cx
+        Hvx_h = self.Hvnn(config,amplitude_factory,1,2,ix=ix)
+        Hvx_v = self.Hvnn(config,amplitude_factory,2,1,sign_fn=sign_fn,ix=ix)
+        Hvx = (Hvx_h + Hvx_v) / unsigned_cx
         return Hvx
-    def Hvx_term(self,config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None,**compress_opts):
-        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-        i1,i2 = config[ix1],config[ix2]
-        if i1==i2:
-            return None 
-        imin = min(grad_site[0],site1[0]) 
-        imax = max(grad_site[0],site2[0]) 
-        top = FermionTensorNetwork([]) if imax==self.Lx-1 else \
-              cache_top[config[(imax+1)*self.Ly:]]
-        bot = FermionTensorNetwork([]) if imin==0 else \
-              cache_bot[config[:imin*self.Ly]]
+    def compute_Hv_hop_single_full(self,config,amplitude_factory,unsigned_cx):
+        nsite = len(amplitude_factory.constructors)
+        Hvx = [None] * nsite 
+        for ix in range(nsite):
+            Hvx[ix] = self.compute_Hv_hop_single_dmrg(config,amplitude_factory,unsigned_cx,ix=ix)
+        return np.concatenate(Hvx,axis=0)
+    def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
+        if self.single_layer:
+            if self.dmrg:
+                fn = self.compute_Hv_hop_single_dmrg
+            else:
+                fn = self.compute_Hv_hop_single_full
+        else:
+            if self.dmrg:
+                fn = self.compute_Hv_hop_double_dmrg
+            else:
+                fn = self.compute_Hv_hop_double_full
+        return fn(config,amplitude_factory,unsigned_cx)
+    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
+        eu = self.compute_local_energy_coulomb(config)
+        if self.dmrg:
+            unsigned_cx,ex,vx = self.compute_local_energy_dmrg(config,amplitude_factory)
+        else:
+            unsigned_cx,ex,vx = self.compute_local_energy_full(config,amplitude_factory,
+                                                               compute_v=compute_v)
         Hvx = None
-        parity = sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2
-        coeff = self.hop_coeff(site1,site2) * (-1)**parity
-        for i1_new,i2_new,hop_sign in hop(i1,i2):
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
-            sign = 1 if sign_fn is None else sign_fn(config_new)
-
-            bot_term = bot.copy()
-            for i in range(imin,grad_site[0]):
-                row = get_mid_env(i,fpeps,config_new,append='')
-                bot_term = get_bot_env(i,row,bot_term,config_new,cache_bot,layer_tags=None,**compress_opts)
-            if bot_term is None:
-                continue
-
-            top_term = top.copy()
-            for i in range(imax,grad_site[0],-1):
-                row = get_mid_env(i,fpeps,config_new,append='')
-                top_term = get_top_env(i,row,top_term,config_new,cache_top,layer_tags=None,**compress_opts)
-            if top_term is None:
-                continue
-            mid = get_mid_env(grad_site[0],fpeps,config_new,append='')
-            ftn = FermionTensorNetwork([bot_term,mid,top_term],virtual=False).view_like_(fpeps) 
-            try:
-                Hvx_term = site_grad(ftn,*grad_site) * (sign * hop_sign * coeff)
-                if Hvx is None:
-                    Hvx =  Hvx_term
-                else:
-                    Hvx = Hvx + Hvx_term
-            except (IndexError,ValueError):
-                continue
-        return Hvx
-def get_hubbard_cls(dmrg,single_layer):
-    if not dmrg:
-        return Hubbard2D
-    if single_layer:
-       return Hubbard2DDMRG_SL      
-    else:
-       return Hubbard2DDMRG      
+        if compute_Hv:
+            Hvx = self.compute_Hv_hop(config,amplitude_factory,unsigned_cx)
+            Hvx += eu * vx
+        return unsigned_cx,ex+eu,vx,Hvx
 ####################################################################################
 # sampler 
 ####################################################################################

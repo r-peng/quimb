@@ -843,7 +843,8 @@ class TNVMC: # stochastic sampling
         dE = self.E - self.E0
         err = (self.Eerr0**2 + self.Eerr**2)**.5
         print(f'\tpredict={dEm},actual={(dE,err)}')
-        if dE + err > 0. and dE - err > 0.:
+        #if dE + err > 0. and dE - err > 0.:
+        if dE > 0.:
             return False
         else:
             return True
@@ -880,6 +881,7 @@ class DMRG(TNVMC):
 
         # to be set before run
         self.ix = 0 
+        self.direction = 1
         self.config = None
         self.batchsize = None
         self.ratio = None
@@ -890,6 +892,12 @@ class DMRG(TNVMC):
         self.cond2 = None
         self.check = None 
         self.accept_ratio = None
+    def next_ix(self):
+        if self.direction == 1 and self.ix == len(self.block_dict)-1:
+            self.direction = -1
+        elif self.direction == -1 and self.ix == 0:
+            self.direction = 1
+        self.ix += self.direction 
     def set_nparam(self):
         start,stop = self.block_dict[self.ix]
         self.nparam = stop - start
@@ -911,6 +919,7 @@ class DMRG(TNVMC):
             if RANK==0:
                 if tmpdir is not None: # save psi to disc
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
+            #self.next_ix()
             self.ix = (self.ix + 1) % len(self.block_dict)
     def update(self,rate):
         start,stop = self.block_dict[self.ix]
