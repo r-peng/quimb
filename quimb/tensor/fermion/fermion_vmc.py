@@ -129,6 +129,7 @@ class TNVMC: # stochastic sampling
             self.block_dict = self.amplitude_factory.get_block_dict()
 
         # to be set before run
+        self.tmpdir = None
         self.config = None
         self.batchsize = None
         self.batchsize_small = None
@@ -188,21 +189,27 @@ class TNVMC: # stochastic sampling
         self.store = dict()
         self.p0 = dict()
         t0 = time.time()
+        ntotal = 0
+        ndiscard = 0
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
+            ntotal += 1
             if config in self.store:
                 info = self.store[config]
                 if info is None:
+                    ndiscard += 1
                     continue
                 ex,vx,Hvx = info 
             else:
-                cx,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
-                                                             compute_v=compute_v,compute_Hv=compute_Hv)
+                cx,ex,vx,Hvx = self.ham.compute_local_energy(
+                    config,self.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
                 if cx is None:
                     self.store[config] = None
+                    ndiscard += 1
                     continue
                 if np.fabs(ex) > DISCARD:
                     self.store[config] = None
+                    ndiscard += 1
                     continue
                 self.store[config] = ex,vx,Hvx
                 self.p0[config] = cx**2
@@ -215,6 +222,10 @@ class TNVMC: # stochastic sampling
 
             COMM.Send(self.rank,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
+
+        pct = (ndiscard + 1e-6) / (ntotal + 1e-6)
+        if pct > .01:
+            print('Warning! {pct} samples discarded for process {RANK}!')
         if RANK==SIZE-1:
             print('\tstochastic sample time=',time.time()-t0)
     def sample_exact(self,compute_v=True,compute_Hv=None): 
@@ -579,7 +590,7 @@ class TNVMC: # stochastic sampling
                 raise NotImplementedError
             xnew_rgn = self.update(self.rate2)    
         if self.check is None:
-            self.x = self.xnew_rgn
+            self.x = xnew_rgn
             return
         # SR
         if solve_sr=='iterative':

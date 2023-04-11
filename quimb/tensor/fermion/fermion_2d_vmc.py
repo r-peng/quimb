@@ -140,7 +140,7 @@ def contract_mid_env(i,row):
     except (ValueError,IndexError):
         row = None 
     return row
-def get_bot_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
+def get_bot_env(i,row,env_prev,config,cache,**compress_opts):
     # contract mid env for row i with prev bot env 
     key = config[:(i+1)*row.Ly]
     if key in cache: # reusable
@@ -157,20 +157,20 @@ def get_bot_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
         return None
     ftn = FermionTensorNetwork([env_prev,row],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),layer_tags=layer_tags,**compress_opts)
+        ftn.contract_boundary_from_bottom_(xrange=(i-1,i),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
     return ftn 
-def get_all_bot_envs(fpeps,config,cache_bot,imax=None,layer_tags=None,append='',**compress_opts):
+def get_all_bot_envs(fpeps,config,cache_bot,imax=None,append='',**compress_opts):
     # imax for bot env
     imax = fpeps.Lx-2 if imax is None else imax
     env_prev = None
     for i in range(imax+1):
          row = get_mid_env(i,fpeps,config,append=append)
-         env_prev = get_bot_env(i,row,env_prev,config,cache_bot,layer_tags=layer_tags,**compress_opts)
+         env_prev = get_bot_env(i,row,env_prev,config,cache_bot,**compress_opts)
     return env_prev
-def get_top_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
+def get_top_env(i,row,env_prev,config,cache,**compress_opts):
     # contract mid env for row i with prev top env 
     key = config[i*row.Ly:]
     if key in cache: # reusable
@@ -187,17 +187,17 @@ def get_top_env(i,row,env_prev,config,cache,layer_tags=None,**compress_opts):
         return None
     ftn = FermionTensorNetwork([row,env_prev],virtual=False).view_like_(row)
     try:
-        ftn.contract_boundary_from_top_(xrange=(i,i+1),layer_tags=layer_tags,**compress_opts)
+        ftn.contract_boundary_from_top_(xrange=(i,i+1),**compress_opts)
     except (ValueError,IndexError):
         ftn = None
     cache[key] = ftn
     return ftn 
-def get_all_top_envs(fpeps,config,cache_top,imin=None,layer_tags=None,append='',**compress_opts):
+def get_all_top_envs(fpeps,config,cache_top,imin=None,append='',**compress_opts):
     imin = 1 if imin is None else imin
     env_prev = None
     for i in range(fpeps.Lx-1,imin-1,-1):
          row = get_mid_env(i,fpeps,config,append=append)
-         env_prev = get_top_env(i,row,env_prev,config,cache_top,layer_tags=layer_tags,**compress_opts)
+         env_prev = get_top_env(i,row,env_prev,config,cache_top,**compress_opts)
     return env_prev
 def get_all_lenvs(ftn,jmax=None):
     jmax = ftn.Ly-2 if jmax is None else jmax
@@ -323,10 +323,10 @@ class AmplitudeFactory2D:
         env_top = None
         if self.compute_bot: 
             env_bot = get_all_bot_envs(self.psi,config,self.cache_bot,imax=self.Lx-1-x_bsz,
-                                       append='',layer_tags=None,**self.contract_opts)
+                                       append='',**self.contract_opts)
         if self.compute_top:
             env_top = get_all_top_envs(self.psi,config,self.cache_top,imin=x_bsz,
-                                       append='',layer_tags=None,**self.contract_opts)
+                                       append='',**self.contract_opts)
         return env_bot,env_top
     def compute_config_parity(self,config):
         parity = [None] * self.Lx
@@ -442,23 +442,15 @@ def cache_update(cache_bot,cache_top,ix,Lx,Ly):
     i,_ = flat2site(ix,Lx,Ly) 
     keys = list(cache_bot.keys())
     l = i * Ly
-    #if RANK==0:
-    #    print('bot before',cache_bot.keys())
     for key in keys:
         if len(key) > l:
             cache_bot.pop(key)
-    #if RANK==0:
-    #    print('bot after',cache_bot.keys())
 
-    #if RANK==0:
-    #    print('top before',cache_top.keys())
     keys = list(cache_top.keys())
     l = (Lx - i - 1) * Ly
     for key in keys:
         if len(key) > l:
             cache_top.pop(key)
-    #if RANK==0:
-    #    print('top after',cache_top.keys())
     return cache_bot,cache_top
 class AmplitudeFactory2DDMRG(AmplitudeFactory2D):
     def _set_psi(self,psi):
@@ -661,6 +653,13 @@ def combine(top,bot):
         for j in range(Ly): 
             pepo.contract_tags(pepo.site_tag(i,j),inplace=True) 
     return pepo 
+def trace_virtual(pepo):
+    tags = pepo.site_tag(pepo.Lx-1,pepo.Ly-1)
+    pepo.add_tensor(FermionTensor(data=data_map[3].dagger,inds=('v*',),tags=tags),virtual=True)
+    pepo.add_tensor(FermionTensor(data=data_map[3].copy(),inds=('v',),tags=tags),virtual=True)
+    pepo.contract_tags(tags,inplace=True)
+    pepo.add_tag('BRA')
+    return pepo
 def make_norm(pepo,fpeps,config=None):
     bra = pepo.copy()
     if config is not None:
@@ -671,27 +670,27 @@ def make_norm(pepo,fpeps,config=None):
         for i in range(fpeps.Lx):
             for j in range(fpeps.Ly):
                 bra.contract_tags(bra.site_tag(i,j),inplace=True)
-    norm = fpeps 
+    norm = fpeps.copy() 
     norm.add_tensor_network(bra,virtual=True)
     return norm
 def get_3row_ftn(norm,config,cache_bot,cache_top,i,**compress_opts):
     norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
     ls = []
     if i>0:
-        bot = get_all_bot_envs(norm,config,cache_bot,imax=i-1,layer_tags=('KET','BRA'),append='*',**compress_opts)
+        bot = get_all_bot_envs(norm,config,cache_bot,imax=i-1,append='*',**compress_opts)
         ls.append(bot)
     ls.append(get_mid_env(i,norm,config,append='*'))
     if i<norm.Lx-1:
-        top = get_all_top_envs(norm,config,cache_top,imin=i+1,layer_tags=('KET','BRA'),append='*',**compress_opts)
+        top = get_all_top_envs(norm,config,cache_top,imin=i+1,append='*',**compress_opts)
         ls.append(top)
     ftn = FermionTensorNetwork(ls,virtual=False).view_like_(norm)
     return ftn 
 def get_3col_ftn(norm,j,**compress_opts):
     norm.reorder('col',layer_tags=('KET','BRA'),inplace=True)
     for j_ in range(1,j):
-        norm.contract_boundary_from_left_(yrange=(j_-1,j_),layer_tags=('KET','BRA'),**self.contract_opts)
-    for j_ in range(self.Ly-2,j,-1):
-        norm.contract_boundary_from_right_(yrange=(j_,j_+1),layer_tags=('KET','BRA'),**self.contract_opts)
+        norm.contract_boundary_from_left_(yrange=(j_-1,j_),**compress_opts)
+    for j_ in range(norm.Ly-2,j,-1):
+        norm.contract_boundary_from_right_(yrange=(j_,j_+1),**compress_opts)
     return norm
 # SINGLE LAYER FXN
 def hop(i1,i2):
@@ -729,14 +728,14 @@ def Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None
         bot_term = bot.copy()
         for i in range(imin,grad_site[0]):
             row = get_mid_env(i,fpeps,config_new,append='')
-            bot_term = get_bot_env(i,row,bot_term,config_new,cache_bot,layer_tags=None,**compress_opts)
+            bot_term = get_bot_env(i,row,bot_term,config_new,cache_bot,**compress_opts)
         if bot_term is None:
             continue
 
         top_term = top.copy()
         for i in range(imax,grad_site[0],-1):
             row = get_mid_env(i,fpeps,config_new,append='')
-            top_term = get_top_env(i,row,top_term,config_new,cache_top,layer_tags=None,**compress_opts)
+            top_term = get_top_env(i,row,top_term,config_new,cache_top,**compress_opts)
         if top_term is None:
             continue
         mid = get_mid_env(grad_site[0],fpeps,config_new,append='')
@@ -751,11 +750,16 @@ def Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None
             continue
     return Hvx
 class Hubbard2D:
-    def __init__(self,Lx,Ly,t,u,dmrg=False,single_layer=False,**contract_opts):
+    def __init__(self,Lx,Ly,t,u,dmrg=False,single_layer=False,comb=True,
+                 chi_min=None,chi_max=None,discard=.5,**contract_opts):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
         self.single_layer = single_layer
+        self.comb = comb
         self.dmrg = dmrg
+        self.discard = discard
+        self.chi_min = chi_min
+        self.chi_max = chi_max
         self.contract_opts = contract_opts
         self.cache_top = dict()
         self.cache_bot = dict()
@@ -778,15 +782,15 @@ class Hubbard2D:
         mpos = [get_mpo(-self.t*np.ones(self.Lx-1)) for j in range(self.Ly)]
         pepo_col = get_comb(mpos)
         pepo_col = comb2PEPO(pepo_col,fpeps,'col')
-        
-        pepo = combine(pepo_row,pepo_col)
-
-        tags = pepo.site_tag(self.Lx-1,self.Ly-1)
-        pepo.add_tensor(FermionTensor(data=data_map[3].dagger,inds=('v*',),tags=tags),virtual=True)
-        pepo.add_tensor(FermionTensor(data=data_map[3].copy(),inds=('v',),tags=tags),virtual=True)
-        pepo.contract_tags(tags,inplace=True)
-        self.pepo = pepo
-        self.pepo.add_tag('BRA')
+        if self.comb:
+            self.pepo_row = trace_virtual(pepo_row) 
+            self.pepo_col = trace_virtual(pepo_col) 
+            #print(self.pepo_row)
+            #print(self.pepo_col)
+            #exit()
+        else:
+            pepo = combine(pepo_row,pepo_col)
+            self.pepo = trace_virtual(pepo) 
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def flat2site(self,ix):
@@ -822,6 +826,12 @@ class Hubbard2D:
     def compute_local_energy_coulomb(self,config):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
+    def contraction_error(self,cx,x_bsz,y_bsz,mean=None):
+        ls = list(cx.values()) + [0.] * ((self.Lx-x_bsz+1)*(self.Ly-y_bsz+1)-len(cx)) 
+        err = np.std(np.array(ls))
+        if mean is None:
+            mean = sum(cx.values()) / len(cx)
+        return np.fabs(err/mean)
     def compute_local_energy_full(self,config,amplitude_factory,compute_v=True):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
@@ -834,10 +844,13 @@ class Hubbard2D:
         else:
             cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()}
             unsigned_cx = sum(cx12.values()) / len(cx12)
+        err = self.contraction_error(cx12,1,2,mean=unsigned_cx) # contraction error
+        if err > self.discard: # discard sample if contraction error too large
+            return (None,) * 3 
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        return unsigned_cx,eh+ev,vx 
+        return unsigned_cx,eh+ev,vx
     def compute_local_energy_dmrg(self,config,amplitude_factory):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
@@ -849,28 +862,94 @@ class Hubbard2D:
         if unsigned_cx is None: # try gradient from plq21
             unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq21,config=config) 
         # scheme1:
-        #if unsigned_cx is None:
-        #    return (None,)*4
-        # scheme2:
         if unsigned_cx is None:
-            cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()} 
-            unsigned_cx = sum(cx12.values())/len(cx12)
+            return (None,)*3
+        # scheme2:
+        #if unsigned_cx is None:
+        #    cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()} 
+        #    unsigned_cx = sum(cx12.values())/len(cx12)
+
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
         return unsigned_cx,eh+ev,vx 
+    def compute_Hv_hop_comb_full(self,config,amplitude_factory,unsigned_cx):
+        # make bra row
+        max_bond = self.chi_min
+        while True:
+            norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
+            plq = norm._compute_plaquette_environments_row_first(1,1,
+                      max_bond=max_bond,**self.contract_opts)
+            vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+            err = self.contraction_error(vals,1,1)
+            #print(RANK,'row',max_bond,err)
+            if err < self.discard:
+                break
+            max_bond *= 2
+            if max_bond > self.chi_max:
+                raise ValueError(f'Unable to reach desired accuracy! error={err}')
+        for key in plq:
+            plq[key].view_like_(norm)
+        _,Hvx_row,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+
+        max_bond = self.chi_min
+        while True:
+            norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
+            plq = norm._compute_plaquette_environments_col_first(1,1,
+                      max_bond=max_bond,**self.contract_opts)
+            vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+            err = self.contraction_error(vals,1,1)
+            #print(RANK,'col',max_bond,err)
+            if err < self.discard:
+                break
+            max_bond *= 2
+            if max_bond > self.chi_max:
+                raise ValueError(f'Unable to reach desired accuracy! error={err}')
+        for key in plq:
+            plq[key].view_like_(norm)
+        _,Hvx_col,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        sign = amplitude_factory.compute_config_sign(config) 
+        return (Hvx_row+Hvx_col) / (sign * unsigned_cx)
     def compute_Hv_hop_double_full(self,config,amplitude_factory,unsigned_cx):
         # make bra
-        norm = make_norm(self.pepo,amplitude_factory.psi.copy(),config=config)
-        if self.Lx > self.Ly:
-            plq = norm._compute_plaquette_environments_col_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
-        else:
-            plq = norm._compute_plaquette_environments_row_first(1,1,layer_tags=('KET','BRA'),**self.contract_opts)
+        max_bond = self.chi_min
+        while True:
+            norm = make_norm(self.pepo,amplitude_factory.psi,config=config)
+            if self.Lx > self.Ly:
+                plq = norm._compute_plaquette_environments_col_first(1,1,
+                          max_bond=max_bond,**self.contract_opts)
+            else:
+                plq = norm._compute_plaquette_environments_row_first(1,1,
+                          max_bond=max_bond,**self.contract_opts)
+            vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+            err = self.contraction_error(vals,1,1)
+            if err < self.discard:
+                break
+            max_bond *= 2
+            if max_bond > self.chi_max:
+                raise ValueError(f'Unable to reach desired accuracy! error={err}')
         for key in plq:
             plq[key].view_like_(norm)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
         sign = amplitude_factory.compute_config_sign(config) 
         return Hvx / (sign * unsigned_cx)
+    def compute_Hv_hop_comb_dmrg(self,config,amplitude_factory,unsigned_cx):
+        ix = amplitude_factory.ix
+        i,j = self.flat2site(ix)
+
+        norm = make_norm(self.pepo_row,amplitude_factory.psi.copy(),config=config)
+        ftn = get_3col_ftn(norm,j,**self.contract_opts)
+        sign = amplitude_factory.compute_config_sign(config) 
+        Hvx = site_grad(ftn,i,j)
+        cons = amplitude_factory.constructors[ix][0]
+        Hvx_row = cons.tensor_to_vector(Hvx) / sign
+
+        norm = make_norm(self.pepo_col,amplitude_factory.psi.copy())
+        ftn = get_3row_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
+        Hvx = site_grad(ftn,i,j)
+        cons = amplitude_factory.constructors[ix][0]
+        Hvx_col = cons.tensor_to_vector(Hvx) 
+        return (Hvx_row + Hvx_col) / unsigned_cx
     def compute_Hv_hop_double_dmrg(self,config,amplitude_factory,unsigned_cx):
         ix = amplitude_factory.ix
         i,j = self.flat2site(ix)
@@ -926,24 +1005,33 @@ class Hubbard2D:
             Hvx[ix] = self.compute_Hv_hop_single_dmrg(config,amplitude_factory,unsigned_cx,ix=ix)
         return np.concatenate(Hvx,axis=0)
     def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
+        err = 0.
         if self.single_layer:
             if self.dmrg:
                 fn = self.compute_Hv_hop_single_dmrg
             else:
                 fn = self.compute_Hv_hop_single_full
+        elif self.comb:
+            if self.dmrg:
+                fn = self.compute_Hv_hop_comb_dmrg
+            else:
+                fn = self.compute_Hv_hop_comb_full
         else:
             if self.dmrg:
                 fn = self.compute_Hv_hop_double_dmrg
             else:
                 fn = self.compute_Hv_hop_double_full
-        return fn(config,amplitude_factory,unsigned_cx)
+        return fn(config,amplitude_factory,unsigned_cx) 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         eu = self.compute_local_energy_coulomb(config)
         if self.dmrg:
-            unsigned_cx,ex,vx = self.compute_local_energy_dmrg(config,amplitude_factory)
+            unsigned_cx,ex,vx = self.compute_local_energy_dmrg(
+                                    config,amplitude_factory)
         else:
-            unsigned_cx,ex,vx = self.compute_local_energy_full(config,amplitude_factory,
-                                                               compute_v=compute_v)
+            unsigned_cx,ex,vx = self.compute_local_energy_full(
+                                    config,amplitude_factory,compute_v=compute_v)
+        if unsigned_cx is None:
+            return (None,) * 4
         Hvx = None
         if compute_Hv:
             Hvx = self.compute_Hv_hop(config,amplitude_factory,unsigned_cx)
@@ -1135,7 +1223,7 @@ class ExchangeSampler2D:
             row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
             row2_new = saved_rows.select(fpeps.row_tag(i+1),virtual=True)
             # update new env_h
-            env_bot = get_bot_env(i,row1_new,env_bot,self.config,cache_bot,layer_tags=None,**compress_opts)
+            env_bot = get_bot_env(i,row1_new,env_bot,self.config,cache_bot,**compress_opts)
             row1 = row2_new
     def sweep_row_backward(self):
         fpeps = self.amplitude_factory.psi
@@ -1161,7 +1249,7 @@ class ExchangeSampler2D:
             row1_new = saved_rows.select(fpeps.row_tag(i),virtual=True)
             row2_new = saved_rows.select(fpeps.row_tag(i-1),virtual=True)
             # update new env_h
-            env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,layer_tags=None,**compress_opts)
+            env_top = get_top_env(i,row1_new,env_top,tuple(self.config),cache_top,**compress_opts)
             row1 = row2_new
     def sample(self):
         #self.sweep_col_dir = -1 # randomly choses the col sweep direction
