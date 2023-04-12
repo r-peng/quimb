@@ -923,8 +923,12 @@ class Hubbard2D:
         sign = amplitude_factory.compute_config_sign(config) 
         Hvx_row,err_row = self.compute_Hv_hop_pepo_full(config,amplitude_factory,unsigned_cx,
                                                         pepo=self.pepo_row,sign=sign) 
+        if Hvx_row is None:
+            return None,None
         Hvx_col,err_col = self.compute_Hv_hop_pepo_full(config,amplitude_factory,unsigned_cx,
                                                         pepo=self.pepo_col,sign=sign) 
+        if Hvx_col is None:
+            return None,None
         return Hvx_row+Hvx_col, max(err_row,err_col)
     def compute_Hv_hop_pepo_full(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None):
         max_bond = self.chi_min
@@ -943,7 +947,8 @@ class Hubbard2D:
                 break
             max_bond *= 2
             if max_bond > self.chi_max:
-                raise ValueError(f'Unable to reach desired accuracy! error={err}')
+                #raise ValueError(f'Unable to reach desired accuracy! error={err}')
+                return None,None
         #print(f'RANK={RANK},max_bond={max_bond},err={err},time={time.time()-t0}')
         for key in plq:
             plq[key].view_like_(norm)
@@ -1045,6 +1050,8 @@ class Hubbard2D:
         err2 = None
         if compute_Hv:
             Hvx,err2 = self.compute_Hv_hop(config,amplitude_factory,unsigned_cx)
+            if Hvx is None:
+                return (None,) * 6
             Hvx += eu * vx
         return unsigned_cx,ex+eu,vx,Hvx,err1,err2
 ####################################################################################

@@ -651,7 +651,8 @@ class TNVMC: # stochastic sampling
         for ix,(start,stop) in enumerate(self.block_dict):
             w[ix],self.deltas[start:stop],dE[ix] = \
                 _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
-        print('\tleast eigenvalue=',w)
+        w = np.array(w)
+        print('\tleast eigenvalue=',min(w.real))
         if self.tmpdir is not None:
             H = np.zeros((self.nparam,self.nparam))
             S = np.zeros((self.nparam,self.nparam))
