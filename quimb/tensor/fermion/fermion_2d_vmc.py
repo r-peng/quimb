@@ -750,12 +750,11 @@ def Hvx_term(config,fpeps,grad_site,site1,site2,cache_top,cache_bot,sign_fn=None
             continue
     return Hvx
 class Hubbard2D:
-    def __init__(self,Lx,Ly,t,u,dmrg=False,single_layer=False,comb=True,
-                 chi_min=None,chi_max=None,discard=.5,**contract_opts):
+    def __init__(self,Lx,Ly,t,u,dmrg=False,hess='comb',
+                 chi_min=None,chi_max=None,discard=None,**contract_opts):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
-        self.single_layer = single_layer
-        self.comb = comb
+        self.hess = hess
         self.dmrg = dmrg
         self.discard = discard
         self.chi_min = chi_min
@@ -770,7 +769,7 @@ class Hubbard2D:
         #self.cache_bot = dict()
         #self.cache_top = dict()
     def initialize_pepo(self,fpeps):
-        if self.single_layer:
+        if self.hess=='single':
             return
         set_pepo_tsrs()
 
@@ -782,15 +781,17 @@ class Hubbard2D:
         mpos = [get_mpo(-self.t*np.ones(self.Lx-1)) for j in range(self.Ly)]
         pepo_col = get_comb(mpos)
         pepo_col = comb2PEPO(pepo_col,fpeps,'col')
-        if self.comb:
+        if self.hess=='comb':
             self.pepo_row = trace_virtual(pepo_row) 
             self.pepo_col = trace_virtual(pepo_col) 
             #print(self.pepo_row)
             #print(self.pepo_col)
             #exit()
-        else:
+        elif self.hess=='pepo':
             pepo = combine(pepo_row,pepo_col)
             self.pepo = trace_virtual(pepo) 
+        else:
+            raise NotImplementedError
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)        
     def flat2site(self,ix):
@@ -828,7 +829,10 @@ class Hubbard2D:
         return self.u*len(config[config==3])
     def contraction_error(self,cx,x_bsz,y_bsz,mean=None):
         ls = list(cx.values()) + [0.] * ((self.Lx-x_bsz+1)*(self.Ly-y_bsz+1)-len(cx)) 
-        err = np.std(np.array(ls))
+        ls = np.array(ls)
+        if np.linalg.norm(ls) < 1e-10:
+            return 0.
+        err = np.std(ls)
         if mean is None:
             mean = sum(cx.values()) / len(cx)
         return np.fabs(err/mean)
@@ -845,12 +849,15 @@ class Hubbard2D:
             cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()}
             unsigned_cx = sum(cx12.values()) / len(cx12)
         err = self.contraction_error(cx12,1,2,mean=unsigned_cx) # contraction error
-        if err > self.discard: # discard sample if contraction error too large
-            return (None,) * 3 
+        #print(RANK,err)
+        if self.discard is not None:
+            # discard sample if contraction error too large
+            if err > self.discard: 
+                return (None,) * 4 
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        return unsigned_cx,eh+ev,vx
+        return unsigned_cx,eh+ev,vx,err
     def compute_local_energy_dmrg(self,config,amplitude_factory):
         amplitude_factory.get_all_benvs(config,x_bsz=1) 
         # form all (1,2),(2,1) plqs
@@ -863,100 +870,99 @@ class Hubbard2D:
             unsigned_cx,vx = amplitude_factory.get_grad_from_plq(plq21,config=config) 
         # scheme1:
         if unsigned_cx is None:
-            return (None,)*3
+            return (None,) * 4
         # scheme2:
         #if unsigned_cx is None:
         #    cx12 = {key:ftn_plq.copy().contract() for (key,_),ftn_plq in plq12.items()} 
         #    unsigned_cx = sum(cx12.values())/len(cx12)
+        #    err = self.contraction_error(cx12,1,2,mean=unsigned_cx) # contraction error
+        #if err > self.discard: # discard sample if contraction error too large
+        #    return (None,) * 4 
 
         # get h/v bonds
         eh = self.nn(config,plq12,x_bsz=1,y_bsz=2,inplace=True,cx=cx12) 
         ev = self.nn(config,plq21,x_bsz=2,y_bsz=1,inplace=True,cx=None) 
-        return unsigned_cx,eh+ev,vx 
-    def compute_Hv_hop_comb_full(self,config,amplitude_factory,unsigned_cx):
-        # make bra row
-        max_bond = self.chi_min
-        while True:
-            norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
-            plq = norm._compute_plaquette_environments_row_first(1,1,
-                      max_bond=max_bond,**self.contract_opts)
-            vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
-            err = self.contraction_error(vals,1,1)
-            #print(RANK,'row',max_bond,err)
-            if err < self.discard:
-                break
-            max_bond *= 2
-            if max_bond > self.chi_max:
-                raise ValueError(f'Unable to reach desired accuracy! error={err}')
-        for key in plq:
-            plq[key].view_like_(norm)
-        _,Hvx_row,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        return unsigned_cx,eh+ev,vx,err 
+    def _compute_Hv_hop_comb_full(self,config,amplitude_factory,unsigned_cx):
 
         max_bond = self.chi_min
-        while True:
-            norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
-            plq = norm._compute_plaquette_environments_col_first(1,1,
-                      max_bond=max_bond,**self.contract_opts)
-            vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
-            err = self.contraction_error(vals,1,1)
-            #print(RANK,'col',max_bond,err)
-            if err < self.discard:
-                break
-            max_bond *= 2
-            if max_bond > self.chi_max:
-                raise ValueError(f'Unable to reach desired accuracy! error={err}')
-        for key in plq:
-            plq[key].view_like_(norm)
-        _,Hvx_col,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
+        t0 = time.time()
+        norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
+        plq = norm._compute_plaquette_environments_row_first(1,1,
+                  max_bond=max_bond,**self.contract_opts)
+        vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+        err = self.contraction_error(vals,1,1)
+        trr = time.time()-t0
+
+        t0 = time.time()
+        norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
+        plq = norm._compute_plaquette_environments_col_first(1,1,
+                  max_bond=max_bond,**self.contract_opts)
+        vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+        erc = self.contraction_error(vals,1,1)
+        trc = time.time()-t0
+
+        t0 = time.time()
+        norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
+        plq = norm._compute_plaquette_environments_row_first(1,1,
+                  max_bond=max_bond,**self.contract_opts)
+        vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+        ecr = self.contraction_error(vals,1,1)
+        tcr = time.time()-t0
+
+        t0 = time.time()
+        norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
+        plq = norm._compute_plaquette_environments_col_first(1,1,
+                  max_bond=max_bond,**self.contract_opts)
+        vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
+        ecc = self.contraction_error(vals,1,1)
+        tcc = time.time()-t0
+        print(f'RANK={RANK},max_bond={max_bond},rr={(err,trr)},rc={(erc,trc)},cr={(ecr,tcr)},cc={(ecc,tcc)}')
+
+    def compute_Hv_hop_comb_full(self,config,amplitude_factory,unsigned_cx):
         sign = amplitude_factory.compute_config_sign(config) 
-        return (Hvx_row+Hvx_col) / (sign * unsigned_cx)
-    def compute_Hv_hop_double_full(self,config,amplitude_factory,unsigned_cx):
-        # make bra
+        Hvx_row,err_row = self.compute_Hv_hop_pepo_full(config,amplitude_factory,unsigned_cx,
+                                                        pepo=self.pepo_row,sign=sign) 
+        Hvx_col,err_col = self.compute_Hv_hop_pepo_full(config,amplitude_factory,unsigned_cx,
+                                                        pepo=self.pepo_col,sign=sign) 
+        return Hvx_row+Hvx_col, max(err_row,err_col)
+    def compute_Hv_hop_pepo_full(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None):
         max_bond = self.chi_min
+        pepo = self.pepo if pepo is None else pepo
+        sign = amplitude_factory.compute_config_sign(config) if sign is None else sign 
+        #t0 = time.time()
         while True:
-            norm = make_norm(self.pepo,amplitude_factory.psi,config=config)
-            if self.Lx > self.Ly:
-                plq = norm._compute_plaquette_environments_col_first(1,1,
-                          max_bond=max_bond,**self.contract_opts)
-            else:
-                plq = norm._compute_plaquette_environments_row_first(1,1,
-                          max_bond=max_bond,**self.contract_opts)
+            norm = make_norm(pepo,amplitude_factory.psi,config=config)
+            plq = norm.compute_plaquette_environments(x_bsz=1,y_bsz=1,max_bond=max_bond,
+                                                      **self.contract_opts) 
             vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
             err = self.contraction_error(vals,1,1)
+            if self.discard is None:
+                break
             if err < self.discard:
                 break
             max_bond *= 2
             if max_bond > self.chi_max:
                 raise ValueError(f'Unable to reach desired accuracy! error={err}')
+        #print(f'RANK={RANK},max_bond={max_bond},err={err},time={time.time()-t0}')
         for key in plq:
             plq[key].view_like_(norm)
         _,Hvx,_ = amplitude_factory.get_grad_from_plq(plq,compute_cx=False) # all hopping terms
-        sign = amplitude_factory.compute_config_sign(config) 
-        return Hvx / (sign * unsigned_cx)
+        return Hvx / (sign * unsigned_cx), err
     def compute_Hv_hop_comb_dmrg(self,config,amplitude_factory,unsigned_cx):
+        Hvx_row,_ = self.compute_Hv_hop_pepo_dmrg(config,amplitude_factory,unsigned_cx,
+                                                  pepo=self.pepo_row) 
+        Hvx_col,_ = self.compute_Hv_hop_pepo_dmrg(config,amplitude_factory,unsigned_cx,
+                                                  pepo=self.pepo_col) 
+        return Hvx_row+Hvx_col, None 
+    def compute_Hv_hop_pepo_dmrg(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None):
         ix = amplitude_factory.ix
         i,j = self.flat2site(ix)
-
-        norm = make_norm(self.pepo_row,amplitude_factory.psi.copy(),config=config)
-        ftn = get_3col_ftn(norm,j,**self.contract_opts)
-        sign = amplitude_factory.compute_config_sign(config) 
-        Hvx = site_grad(ftn,i,j)
-        cons = amplitude_factory.constructors[ix][0]
-        Hvx_row = cons.tensor_to_vector(Hvx) / sign
-
-        norm = make_norm(self.pepo_col,amplitude_factory.psi.copy())
-        ftn = get_3row_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
-        Hvx = site_grad(ftn,i,j)
-        cons = amplitude_factory.constructors[ix][0]
-        Hvx_col = cons.tensor_to_vector(Hvx) 
-        return (Hvx_row + Hvx_col) / unsigned_cx
-    def compute_Hv_hop_double_dmrg(self,config,amplitude_factory,unsigned_cx):
-        ix = amplitude_factory.ix
-        i,j = self.flat2site(ix)
-        if self.Lx > self.Ly:
+        pepo = self.pepo if pepo is None else pepo
+        if self.Lx < self.Ly:
             norm = make_norm(self.pepo,amplitude_factory.psi.copy(),config=config)
             ftn = get_3col_ftn(norm,j,**self.contract_opts)
-            sign = amplitude_factory.compute_config_sign(config) 
+            sign = amplitude_factory.compute_config_sign(config) if sign is None else sign 
         else:
             norm = make_norm(self.pepo,amplitude_factory.psi.copy())
             ftn = get_3row_ftn(norm,config,self.cache_bot,self.cache_top,i,**self.contract_opts) 
@@ -964,7 +970,7 @@ class Hubbard2D:
         Hvx = site_grad(ftn,i,j)
         cons = amplitude_factory.constructors[ix][0]
         Hvx = cons.tensor_to_vector(Hvx) 
-        return Hvx / (sign * unsigned_cx)
+        return Hvx / (sign * unsigned_cx), None
     def Hvnn(self,config,amplitude_factory,x_bsz,y_bsz,sign_fn=None,ix=None):
         cache_top = amplitude_factory.cache_top
         cache_bot = amplitude_factory.cache_bot
@@ -997,46 +1003,50 @@ class Hubbard2D:
         Hvx_h = self.Hvnn(config,amplitude_factory,1,2,ix=ix)
         Hvx_v = self.Hvnn(config,amplitude_factory,2,1,sign_fn=sign_fn,ix=ix)
         Hvx = (Hvx_h + Hvx_v) / unsigned_cx
-        return Hvx
+        return Hvx, None
     def compute_Hv_hop_single_full(self,config,amplitude_factory,unsigned_cx):
         nsite = len(amplitude_factory.constructors)
         Hvx = [None] * nsite 
         for ix in range(nsite):
-            Hvx[ix] = self.compute_Hv_hop_single_dmrg(config,amplitude_factory,unsigned_cx,ix=ix)
-        return np.concatenate(Hvx,axis=0)
+            Hvx[ix],_ = self.compute_Hv_hop_single_dmrg(config,amplitude_factory,unsigned_cx,ix=ix)
+        return np.concatenate(Hvx,axis=0), None
     def compute_Hv_hop(self,config,amplitude_factory,unsigned_cx):
-        err = 0.
-        if self.single_layer:
+        if self.hess=='single':
             if self.dmrg:
                 fn = self.compute_Hv_hop_single_dmrg
             else:
                 fn = self.compute_Hv_hop_single_full
-        elif self.comb:
+        elif self.hess=='comb':
             if self.dmrg:
                 fn = self.compute_Hv_hop_comb_dmrg
             else:
                 fn = self.compute_Hv_hop_comb_full
-        else:
+        elif self.hess=='pepo':
             if self.dmrg:
-                fn = self.compute_Hv_hop_double_dmrg
+                fn = self.compute_Hv_hop_pepo_dmrg
             else:
-                fn = self.compute_Hv_hop_double_full
+                fn = self.compute_Hv_hop_pepo_full
+        else:
+            raise NotImplementedError
         return fn(config,amplitude_factory,unsigned_cx) 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         eu = self.compute_local_energy_coulomb(config)
         if self.dmrg:
-            unsigned_cx,ex,vx = self.compute_local_energy_dmrg(
+            unsigned_cx,ex,vx,err1 = self.compute_local_energy_dmrg(
                                     config,amplitude_factory)
         else:
-            unsigned_cx,ex,vx = self.compute_local_energy_full(
+            #t0 = time.time()
+            unsigned_cx,ex,vx,err1 = self.compute_local_energy_full(
                                     config,amplitude_factory,compute_v=compute_v)
+            #print(RANK,time.time()-t0)
         if unsigned_cx is None:
-            return (None,) * 4
+            return (None,) * 6
         Hvx = None
+        err2 = None
         if compute_Hv:
-            Hvx = self.compute_Hv_hop(config,amplitude_factory,unsigned_cx)
+            Hvx,err2 = self.compute_Hv_hop(config,amplitude_factory,unsigned_cx)
             Hvx += eu * vx
-        return unsigned_cx,ex+eu,vx,Hvx
+        return unsigned_cx,ex+eu,vx,Hvx,err1,err2
 ####################################################################################
 # sampler 
 ####################################################################################

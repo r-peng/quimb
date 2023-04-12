@@ -152,10 +152,30 @@ class TNVMC: # stochastic sampling
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
         self.sampler.amplitude_factory = self.amplitude_factory
+        self.err1 = []
+        self.err2 = []
+        t0 = time.time()
         if self.exact_sampling:
             self.sample_exact(compute_v=compute_v,compute_Hv=compute_Hv)
         else:
             self.sample_stochastic(samplesize=samplesize,compute_v=compute_v,compute_Hv=compute_Hv)
+        mean1,err1 = self.parse_contraction_err(self.err1)
+        mean2,err2 = self.parse_contraction_err(self.err2)
+        if RANK==0:
+            print(f'\tcontraction err single={(mean1,err1)},double={(mean2,err2)}')
+            print('\tsample time=',time.time()-t0)
+    def parse_contraction_err(self,ls):
+        if len(ls)>0:
+            ls = np.array(ls)
+            meani,maxi = np.array([ls.sum()/len(ls)]),np.array([np.amax(ls)])
+        else:
+            meani,maxi = np.zeros(1),np.zeros(1)
+        mean_ = np.zeros_like(meani)
+        COMM.Reduce(meani,mean_,op=MPI.SUM,root=0)
+        mean_ /= SIZE
+        max_ = np.zeros_like(maxi)
+        COMM.Reduce(maxi,max_,op=MPI.MAX,root=0)
+        return mean_[0],max_[0]
     def sample_stochastic(self,samplesize=None,compute_v=True,compute_Hv=None): 
         self.terminate = np.array([0])
         self.rank = np.array([RANK])
@@ -180,15 +200,12 @@ class TNVMC: # stochastic sampling
 
         self.samples = []
         self.elocal = []
-        if compute_v:
-            self.vlocal = []
+        self.vlocal = []
+        self.Hv_local = [] 
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
-        if compute_Hv:
-            self.Hv_local = [] 
 
         self.store = dict()
         self.p0 = dict()
-        t0 = time.time()
         ntotal = 0
         ndiscard = 0
         while self.terminate[0]==0:
@@ -201,7 +218,7 @@ class TNVMC: # stochastic sampling
                     continue
                 ex,vx,Hvx = info 
             else:
-                cx,ex,vx,Hvx = self.ham.compute_local_energy(
+                cx,ex,vx,Hvx,err1,err2 = self.ham.compute_local_energy(
                     config,self.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
                 if cx is None:
                     self.store[config] = None
@@ -215,19 +232,20 @@ class TNVMC: # stochastic sampling
                 self.p0[config] = cx**2
             self.samples.append(config)
             self.elocal.append(ex)
+            self.err1.append(err1) 
             if compute_v:
                 self.vlocal.append(vx)
             if compute_Hv:
                 self.Hv_local.append(Hvx)
+                if err2 is not None:
+                    self.err2.append(err2)
 
             COMM.Send(self.rank,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
 
         pct = (ndiscard + 1e-6) / (ntotal + 1e-6)
         if pct > .01:
-            print('Warning! {pct} samples discarded for process {RANK}!')
-        if RANK==SIZE-1:
-            print('\tstochastic sample time=',time.time()-t0)
+            print(f'Warning! {ndiscard} out of {ntotal} ({pct}) samples discarded for process {RANK}!')
     def sample_exact(self,compute_v=True,compute_Hv=None): 
         # can be reused for correlated sampling
         self.sampler.compute_dense_prob() # runs only for dense sampler 
@@ -239,13 +257,10 @@ class TNVMC: # stochastic sampling
         self.samples = []
         self.flocal = []
         self.elocal = []
-        if compute_v:
-            self.vlocal = []
+        self.vlocal = []
+        self.Hv_local = [] 
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
-        if compute_Hv:
-            self.Hv_local = [] 
 
-        t0 = time.time()
         self.store = dict()
         if RANK==SIZE-1:
             print('\tnsamples per process=',len(ixs))
@@ -253,15 +268,18 @@ class TNVMC: # stochastic sampling
             self.flocal.append(p[ix])
             config = all_configs[ix]
             self.samples.append(config) 
-            _,ex,vx,Hvx = self.ham.compute_local_energy(config,self.amplitude_factory,
+            cx,ex,vx,Hvx,err1,err2 = self.ham.compute_local_energy(config,self.amplitude_factory,
                                                         compute_v=compute_v,compute_Hv=compute_Hv)
+            if cx is None:
+                continue
             self.elocal.append(ex)
+            self.err1.append(err1)
             if compute_v:
                 self.vlocal.append(vx)
             if compute_Hv:
                 self.Hv_local.append(Hvx)
-        if RANK==SIZE-1:
-            print('\texact sample time=',time.time()-t0)
+                if err2 is not None:
+                    self.err2.append(err2)
     def extract_energy_gradient(self):
         t0 = time.time()
         self.extract_energy()
@@ -272,7 +290,6 @@ class TNVMC: # stochastic sampling
             self.extract_H()
         if RANK==0:
             print('\tcollect data time=',time.time()-t0)
-            print('\tnormalization=',self.n)
             print(f'step={self.step},energy={self.E},err={self.Eerr}')
     def gather_sizes(self):
         self.count = np.array([0]*SIZE)
@@ -559,7 +576,10 @@ class TNVMC: # stochastic sampling
             f.close()
     def _transform_gradients_sr_matrix(self):
         S = self.S + self.cond1 * np.eye(self.nparam)
-        self.deltas = np.linalg.solve(S,self.g)
+        #self.deltas = np.linalg.solve(S,self.g)
+        LinOp = spla.aslinearoperator(S)
+        self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
+        print('\tSR solver exit status=',info)
         if self.tmpdir is not None:
             f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('S',data=self.S) 
