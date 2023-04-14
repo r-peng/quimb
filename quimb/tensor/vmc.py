@@ -3,7 +3,6 @@ import numpy as np
 import scipy.sparse.linalg as spla
 
 from quimb.utils import progbar as Progbar
-from .utils import load_ftn_from_disc,write_ftn_to_disc
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
@@ -140,16 +139,15 @@ class TNVMC: # stochastic sampling
         self.check = None 
         self.accept_ratio = None
     def run(self,start,stop,tmpdir=None):
+        self.Eold = 0.
         for step in range(start,stop):
             self.step = step
             self.sample()
             self.extract_energy_gradient()
             self.transform_gradients()
             COMM.Bcast(self.x,root=0) 
-            psi = self.amplitude_factory.update(self.x)
-            if RANK==0:
-                if tmpdir is not None: # save psi to disc
-                    write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
+            fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
+            psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
         self.sampler.amplitude_factory = self.amplitude_factory
         self.err1 = []
@@ -290,7 +288,8 @@ class TNVMC: # stochastic sampling
             self.extract_H()
         if RANK==0:
             print('\tcollect data time=',time.time()-t0)
-            print(f'step={self.step},energy={self.E},err={self.Eerr}')
+            print(f'step={self.step},E={self.E},dE={self.E-self.Eold},err={self.Eerr}')
+            self.Eold = self.E
     def gather_sizes(self):
         self.count = np.array([0]*SIZE)
         COMM.Allgather(np.array([self.nlocal]),self.count)
