@@ -30,9 +30,9 @@ def load_tn_from_disc(fname, delete_file=False):
         with open(fname,'rb') as f:
             data = pickle.load(f)
     return data
-def write_tn_to_disc(tn, tmpdir, provided_filename=False):
+def write_tn_to_disc(tn, fname, provided_filename=False):
     with open(fname, 'wb') as f:
-        pickle.dump(data, f)
+        pickle.dump(tn, f)
     return fname
 ####################################################################################
 # amplitude fxns 
@@ -181,7 +181,7 @@ class ContractionEngine:
         jmax = peps.Ly - y_bsz
         try:
             tn.reorder('col',inplace=True)
-        except NotImplementedError:
+        except (NotImplementedError,AttributeError):
             pass
         lenvs = self.get_all_lenvs(tn.copy(),jmax=jmax-1)
         renvs = self.get_all_renvs(tn.copy(),jmin=y_bsz)
@@ -233,9 +233,9 @@ class AmplitudeFactory(ContractionEngine):
         return flat2site(ix,self.Lx,self.Ly)
     def get_constructors(self,peps):
         constructors = [None] * (peps.Lx * peps.Ly)
-        for i,j in itertools.product(range(fpeps.Lx),range(fpeps.Ly)):
+        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
             data = peps[peps.site_tag(i,j)].data
-            ix = flatten(i,j,fpeps.Ly)
+            ix = flatten(i,j,peps.Ly)
             constructors[ix] = data.shape,len(data.flatten()),(i,j)
         return constructors
     def get_block_dict(self):
@@ -439,7 +439,7 @@ class Hamiltonian(ContractionEngine):
         ADD = np.zeros((2,)*3)
         ADD[0,0,0] = ADD[1,0,1] = ADD[1,1,0] = 1.
         I1 = np.eye(2)
-        I2 = np.tensordot(I1,I1,axis=0)
+        I2 = np.tensordot(I1,I1,axes=0)
         P0 = np.array([1.,0.])
         P1 = np.array([0.,1.])
 
@@ -487,6 +487,7 @@ class Hamiltonian(ContractionEngine):
             mpo.add_tensor(tr,virtual=True)
             mpo.add_tensor(tl,virtual=True)
         mpo[f'L{L-1}'].reindex_({bixs[-1]:'v'})
+        return mpo
     def get_comb(self,mpos):
         # add mpo
         pepo = TensorNetwork([])
@@ -504,7 +505,7 @@ class Hamiltonian(ContractionEngine):
         for ix in range(1,nmpo):
             tags = f'mpo{ix}',tag 
             inds = bix[ix],f'v{ix}',bix[ix-1]
-            pepo.add_tensor(FermionTensor(data=self.data_map['ADD'].copy(),inds=inds,tags=tags))
+            pepo.add_tensor(Tensor(data=self.data_map['ADD'].copy(),inds=inds,tags=tags))
     
         # compress
         for ix in range(nmpo-1):
@@ -560,7 +561,7 @@ class Hamiltonian(ContractionEngine):
         return pepo 
     def trace_virtual(self,pepo):
         tags = pepo.site_tag(pepo.Lx-1,pepo.Ly-1)
-        pepo.add_tensor(FermionTensor(data=self.data_map['P1'].copy(),inds=('v',),tags=tags),virtual=True)
+        pepo.add_tensor(Tensor(data=self.data_map['P1'].copy(),inds=('v',),tags=tags),virtual=True)
         pepo.contract_tags(tags,inplace=True)
         pepo.add_tag('BRA')
         return pepo
@@ -597,14 +598,19 @@ class Hamiltonian(ContractionEngine):
             pepo = self.get_comb(mpos)
             pepo = self.comb2PEPO(pepo,peps,typ)
             pepos.append(pepo)
+            #print(typ,pepo)
         if self.hess=='comb':
             self.pepo_row = self.trace_virtual(pepos[0]) 
             self.pepo_col = self.trace_virtual(pepos[1]) 
+            #print('row',self.pepo_row)
+            #print('col',self.pepo_col)
         elif self.hess=='pepo':
             pepo = self.combine(*pepos)
             self.pepo = self.trace_virtual(pepo) 
+            #print(self.pepo)
         else:
             raise NotImplementedError
+        #exit()
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self.data_map[self.key].copy()
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
@@ -660,6 +666,7 @@ class Hamiltonian(ContractionEngine):
         norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
         plq = norm._compute_plaquette_environments_row_first(1,1,
                   max_bond=max_bond,**self.contract_opts)
+        plq = self.complete_plq(plq,norm)
         vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
         err = self.contraction_error(vals,1,1)
         trr = time.time()-t0
@@ -668,6 +675,7 @@ class Hamiltonian(ContractionEngine):
         norm = make_norm(self.pepo_row,amplitude_factory.psi,config=config)
         plq = norm._compute_plaquette_environments_col_first(1,1,
                   max_bond=max_bond,**self.contract_opts)
+        plq = self.complete_plq(plq,norm)
         vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
         erc = self.contraction_error(vals,1,1)
         trc = time.time()-t0
@@ -676,6 +684,7 @@ class Hamiltonian(ContractionEngine):
         norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
         plq = norm._compute_plaquette_environments_row_first(1,1,
                   max_bond=max_bond,**self.contract_opts)
+        plq = self.complete_plq(plq,norm)
         vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
         ecr = self.contraction_error(vals,1,1)
         tcr = time.time()-t0
@@ -684,6 +693,7 @@ class Hamiltonian(ContractionEngine):
         norm = make_norm(self.pepo_col,amplitude_factory.psi,config=config)
         plq = norm._compute_plaquette_environments_col_first(1,1,
                   max_bond=max_bond,**self.contract_opts)
+        plq = self.complete_plq(plq,norm)
         vals = {key:ftn_plq.copy().contract() for key,ftn_plq in plq.items()}
         ecc = self.contraction_error(vals,1,1)
         tcc = time.time()-t0
@@ -713,6 +723,14 @@ class Hamiltonian(ContractionEngine):
         norm = peps.copy() 
         norm.add_tensor_network(bra,virtual=True)
         return norm
+    def complete_plq(self,plq,norm):
+        for key in plq.keys():
+            (i0,j0),(x_bsz,y_bsz) = key 
+            tn = plq[key]
+            for i in range(i0,i0+x_bsz):
+                for j in range(j0,j0+y_bsz):
+                    tn.add_tensor_network(norm.select(norm.site_tag(i,j)).copy())
+        return plq
     def compute_Hv_pepo_full(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None):
         max_bond = self.chi_min
         pepo = self.pepo if pepo is None else pepo
@@ -722,6 +740,7 @@ class Hamiltonian(ContractionEngine):
             norm = self.make_norm(pepo,amplitude_factory.psi,config=config)
             plq = norm.compute_plaquette_environments(x_bsz=1,y_bsz=1,max_bond=max_bond,
                                                       **self.contract_opts) 
+            plq = self.complete_plq(plq,norm)
             vals = {site:ftn_plq.copy().contract() for (site,_),ftn_plq in plq.items()}
             err = self.contraction_error(vals)
             if self.discard is None:
@@ -745,7 +764,7 @@ class Hamiltonian(ContractionEngine):
     def get_3row_ftn(self,norm,config,cache_bot,cache_top,i,**compress_opts):
         try:
             norm.reorder('row',layer_tags=('KET','BRA'),inplace=True)
-        except NotImplementedError:
+        except (NotImplementedError,AttributeError):
             pass
         tn = self.get_mid_env(i,norm,config,append='*')
         if i>0:
@@ -759,7 +778,7 @@ class Hamiltonian(ContractionEngine):
     def get_3col_ftn(self,norm,j,**compress_opts):
         try:
             norm.reorder('col',layer_tags=('KET','BRA'),inplace=True)
-        except NotImplementedError:
+        except (NotImplementedError,AttributeError):
             pass
         for j_ in range(1,j):
             norm.contract_boundary_from_left_(yrange=(j_-1,j_),**compress_opts)
@@ -937,73 +956,66 @@ class Hamiltonian(ContractionEngine):
             return (None,) * 6
         Hvx += eu * vx
         return unsigned_cx,ex,vx,Hvx,err,err2
-class J1J2(Hamiltonian):
-    def __init__(self,J1,J2,Lx,Ly,**kwargs):
+def get_gate1():
+    return np.array([[1,0],
+                   [0,-1]]) * .5
+def get_gate2(j,to_bk=False):
+    sx = np.array([[0,1],
+                   [1,0]]) * .5
+    sy = np.array([[0,-1],
+                   [1,0]]) * 1j * .5
+    sz = np.array([[1,0],
+                   [0,-1]]) * .5
+    try:
+        jx,jy,jz = j
+    except TypeError:
+        j = j,j,j
+    data = 0.
+    for coeff,op in zip(j,[sx,sy,sz]):
+        data += coeff * np.tensordot(op,op,axes=0).real
+    if to_bk:
+        data = data.transpose(0,2,1,3)
+    return data
+class Heisenberg(Hamiltonian):
+    def __init__(self,J,h,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
-        self.J1,self.J2 = J1,J2
-        self.bsz = 3
+        try:
+            self.Jx,self.Jy,self.Jz = J
+        except TypeError:
+            self.Jx,self.Jy,self.Jz = J,J,J
+        self.h = h
+        self.bsz = 2
         self.data_map = dict()
         self.set_gate()
     def set_gate(self):
-        sx = np.array([[0,1],
-                       [1,0]])
-        sy = np.array([[0,-1],
-                       [1,0]]) * 1j
-        sz = np.array([1,0],
-                      [0,-1])
-        data = 0.
-        for s in [sx,sy,sz]:
-            data += np.tensordot(s,s,axis=0)
-        self.key = 'ss'
+        data = get_gate2((self.Jx,self.Jy,0.),to_bk=False)
+        self.key = 'Jxy'
         self.data_map[self.key] = data
     def get_coeffs(self,L):
         coeffs = []
         for i in range(L):
             if i+1 < L:
-                coeffs.append((i,i+1,self.J1))
-            if i+2 < L:
-                coeffs.append((i,i+2,self.J2))
+                coeffs.append((i,i+1,1.))
         return coeffs
     def pair_coeff(self,site1,site2):
-        dx = site2[0]-site1[0]
-        dy = site2[1]-site1[1]
-        if dx==0:
-            if dy==1:
-                return self.J1
-            elif dy==2:
-                return self.J2
-            else:
-                raise ValueError
-        elif dy==0:
-            if dx==1:
-                return self.J1
-            elif dx==2:
-                return self.J2
-            else:
-                raise ValueError
-        else:
-            raise ValueError
+        return 1.
     def pair_valid(self,i1,i2):
         return True
     def compute_local_energy_eigen(self,config):
         e = 0.
         for i in range(self.Lx):
             for j in range(self.Ly):
+                ix1 = self.flatten(i,j)
+                e += .5 * self.h * (-1) ** config[ix1]
                 if j+1<self.Ly:
-                    ix1,ix2 = self.flatten(i,j),self.flatten(i,j+1) 
-                    e += self.J1 * (-1)**(config[ix1]+config[ix2])
-                if j+2<self.Ly:
-                    ix1,ix2 = self.flatten(i,j),self.flatten(i,j+2) 
-                    e += self.J2 * (-1)**(config[ix1]+config[ix2])
+                    ix2 = self.flatten(i,j+1) 
+                    e += .25 * self.Jz * (-1)**(config[ix1]+config[ix2])
                 if i+1<self.Lx:
-                    ix1,ix2 = self.flatten(i,j),self.flatten(i+1,j) 
-                    e += self.J1 * (-1)**(config[ix1]+config[ix2])
-                if i+2<self.Lx:
-                    ix1,ix2 = self.flatten(i,j),self.flatten(i+1,j) 
-                    e += self.J2 * (-1)**(config[ix1]+config[ix2])
+                    ix2 = self.flatten(i+1,j) 
+                    e += .25 * self.Jz * (-1)**(config[ix1]+config[ix2])
         return e
     def pair_terms(self,i1,i2):
-        return [(1-i1,1-i2,(1-(-1)**(i1+i2)))]
+        return [(1-i1,1-i2,.25*(1-(-1)**(i1+i2)))]
 ####################################################################################
 # sampler 
 ####################################################################################
@@ -1052,7 +1064,10 @@ class ExchangeSampler(ContractionEngine):
     def flat2site(self,ix):
         return flat2site(ix,self.Lx,self.Ly)
     def new_pair(self,i1,i2):
-        return i2,i1
+        #return i2,i1
+        choices = [(1-i1,i2),(i1,1-i2),(1-i1,1-i2)] 
+        i1_new,i2_new = self.rng.choice(choices)
+        return i1_new,i2_new 
     def get_pairs(self,i,j):
         bonds_map = {'l':((i,j),(i+1,j)),
                      'd':((i,j),(i,j+1)),
@@ -1080,6 +1095,8 @@ class ExchangeSampler(ContractionEngine):
         print(i,j,site1,site2,ix1,ix2,i1_new,i2_new,self.config,py,py_)
         if np.fabs(py-py_)>PRECISION:
             raise ValueError
+    def pair_valid(self,i1,i2):
+        return True
     def update_plq(self,i,j,cols,tn,saved_rows):
         if cols[0] is None:
             return tn,saved_rows
@@ -1093,7 +1110,7 @@ class ExchangeSampler(ContractionEngine):
         for site1,site2 in pairs:
             ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
             i1,i2 = self.config[ix1],self.config[ix2]
-            if i1==i2: # continue
+            if not self.pair_valid(i1,i2): # continue
                 #print(i,j,site1,site2,ix1,ix2,'pass')
                 continue
             i1_new,i2_new = self.new_pair(i1,i2)
@@ -1124,7 +1141,7 @@ class ExchangeSampler(ContractionEngine):
         saved_rows = tn.copy()
         try:
             tn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
-        except NotImplementedError:
+        except (NotImplementedError,AttributeError):
             pass
         renvs = self.get_all_renvs(tn.copy(),jmin=2)
         first_col = tn.col_tag(0)
@@ -1147,7 +1164,7 @@ class ExchangeSampler(ContractionEngine):
         saved_rows = tn.copy()
         try:
             tn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
-        except NotImplementedError:
+        except (NotImplementedError,AttributeError):
             pass
         lenvs = self.get_all_lenvs(tn.copy(),jmax=self.Ly-3)
         last_col = tn.col_tag(self.Ly-1)
@@ -1231,10 +1248,9 @@ class ExchangeSampler(ContractionEngine):
             self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler:
-    def __init__(self,Lx,Ly,nspin,exact=False,seed=None,thresh=1e-14):
+    def __init__(self,Lx,Ly,exact=False,seed=None,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
-        self.nspin = nspin
         self.nsite = self.Lx * self.Ly
 
         self.all_configs = self.get_all_configs()
@@ -1295,24 +1311,7 @@ class DenseSampler:
         self.nonzeros = nonzeros[start:stop]
         self.amplitude_factory.update_scheme(0)
     def get_all_configs(self):
-        if SYMMETRY=='u1':
-            return self.get_all_configs_u1()
-        elif SYMMETRY=='u11':
-            return self.get_all_configs_u11()
-        else:
-            raise NotImplementedError
-    def get_all_configs(self):
-        assert isinstance(self.nspin,tuple)
-        assert self.nspin[0] + self.nspin[1]==self.nsites
-        sites = list(range(self.nsite))
-        ls = list(itertools.combinations(sites,self.nspin[0]))
-        configs = [None] * len(ups) 
-        for i,ups in enumerate(ls):
-            config = [1] * self.nsite 
-            for ix in ups:
-                config[ix] = 0
-            configs[i] = tuple(config)
-        return configs
+        return list(itertools.product((0,1),repeat=self.nsite))
     def sample(self):
         flat_idx = self.rng.choice(self.flat_indexes,p=self.p)
         config = self.all_configs[flat_idx]
