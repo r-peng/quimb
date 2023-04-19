@@ -473,11 +473,6 @@ class Hubbard(Hamiltonian):
 ####################################################################################
 from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ContractionEngine,ExchangeSampler_):
-    def pair_valid(self,i1,i2):
-        if i1==i2:
-            return False
-        else:
-            return True
     def new_pair(self,i1,i2):
         if SYMMETRY=='u11':
             return self.new_pair_u11(i1,i2)
@@ -497,7 +492,7 @@ from ..tensor_2d_vmc import DenseSampler as DenseSampler_
 class DenseSampler(DenseSampler_):
     def __init__(self,Lx,Ly,nelec,**kwargs):
         self.nelec = nelec
-        super().__init__(Lx,Ly,**kwargs)
+        super().__init__(Lx,Ly,None,**kwargs)
     def get_all_configs(self):
         if SYMMETRY=='u1':
             return self.get_all_configs_u1()

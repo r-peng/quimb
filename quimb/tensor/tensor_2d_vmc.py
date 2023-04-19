@@ -34,6 +34,26 @@ def write_tn_to_disc(tn, fname, provided_filename=False):
     with open(fname, 'wb') as f:
         pickle.dump(tn, f)
     return fname
+from .tensor_2d import PEPS
+def get_product_state(Lx,Ly,config):
+    arrays = []
+    for i in range(Lx):
+        row = []
+        for j in range(Ly):
+            shape = [1] * 4 
+            if i==0 or i==Lx-1:
+                shape.pop()
+            if j==0 or j==Ly-1:
+                shape.pop()
+            shape = tuple(shape) + (2,)
+
+            data = np.zeros(shape) 
+            ix = flatten(i,j,Ly)
+            ix = config[ix]
+            data[...,ix] = 1.
+            row.append(data)
+        arrays.append(row)
+    return PEPS(arrays)
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
@@ -293,9 +313,12 @@ class AmplitudeFactory(ContractionEngine):
         for ix,(_,_,site) in enumerate(self.constructors):
             psi[psi.site_tag(*site)].modify(data=self.vec2tensor(ls[ix],ix))
         return psi
-    def update(self,x,tmpdir=None,root=0):
+    def update(self,x,fname=None,root=0):
         psi = self.vec2psi(x,inplace=True)
         self.set_psi(psi) 
+        if RANK==root:
+            if fname is not None: # save psi to disc
+                write_tn_to_disc(psi,fname,provided_filename=True)
         return psi
     def set_psi(self,psi):
         self.psi = psi
@@ -702,11 +725,11 @@ class Hamiltonian(ContractionEngine):
     def compute_Hv_comb_full(self,config,amplitude_factory,unsigned_cx):
         sign = amplitude_factory.compute_config_sign(config) 
         Hvx_row,err_row = self.compute_Hv_pepo_full(config,amplitude_factory,unsigned_cx,
-                                                        pepo=self.pepo_row,sign=sign) 
+                                                    pepo=self.pepo_row,sign=sign,first='col') 
         if Hvx_row is None:
             return None,None
         Hvx_col,err_col = self.compute_Hv_pepo_full(config,amplitude_factory,unsigned_cx,
-                                                        pepo=self.pepo_col,sign=sign) 
+                                                    pepo=self.pepo_col,sign=sign,first='row') 
         if Hvx_col is None:
             return None,None
         return Hvx_row+Hvx_col, max(err_row,err_col)
@@ -731,15 +754,24 @@ class Hamiltonian(ContractionEngine):
                 for j in range(j0,j0+y_bsz):
                     tn.add_tensor_network(norm.select(norm.site_tag(i,j)).copy())
         return plq
-    def compute_Hv_pepo_full(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None):
+    def compute_Hv_pepo_full(self,config,amplitude_factory,unsigned_cx,pepo=None,sign=None,first=None):
         max_bond = self.chi_min
         pepo = self.pepo if pepo is None else pepo
         sign = amplitude_factory.compute_config_sign(config) if sign is None else sign 
         #t0 = time.time()
         while True:
             norm = self.make_norm(pepo,amplitude_factory.psi,config=config)
-            plq = norm.compute_plaquette_environments(x_bsz=1,y_bsz=1,max_bond=max_bond,
-                                                      **self.contract_opts) 
+            if first is None:
+                plq = norm.compute_plaquette_environments(x_bsz=1,y_bsz=1,max_bond=max_bond,
+                                                          **self.contract_opts) 
+            elif first=='row':
+                plq = norm._compute_plaquette_environments_row_first(x_bsz=1,y_bsz=1,max_bond=max_bond,
+                                                          **self.contract_opts) 
+            elif first=='col':
+                plq = norm._compute_plaquette_environments_col_first(x_bsz=1,y_bsz=1,max_bond=max_bond,
+                                                          **self.contract_opts) 
+            else:
+                raise NotImplementedError
             plq = self.complete_plq(plq,norm)
             vals = {site:ftn_plq.copy().contract() for (site,_),ftn_plq in plq.items()}
             err = self.contraction_error(vals)
@@ -1064,10 +1096,7 @@ class ExchangeSampler(ContractionEngine):
     def flat2site(self,ix):
         return flat2site(ix,self.Lx,self.Ly)
     def new_pair(self,i1,i2):
-        #return i2,i1
-        choices = [(1-i1,i2),(i1,1-i2),(1-i1,1-i2)] 
-        i1_new,i2_new = self.rng.choice(choices)
-        return i1_new,i2_new 
+        return i2,i1
     def get_pairs(self,i,j):
         bonds_map = {'l':((i,j),(i+1,j)),
                      'd':((i,j),(i,j+1)),
@@ -1096,7 +1125,10 @@ class ExchangeSampler(ContractionEngine):
         if np.fabs(py-py_)>PRECISION:
             raise ValueError
     def pair_valid(self,i1,i2):
-        return True
+        if i1==i2:
+            return False
+        else:
+            return True
     def update_plq(self,i,j,cols,tn,saved_rows):
         if cols[0] is None:
             return tn,saved_rows
@@ -1248,10 +1280,11 @@ class ExchangeSampler(ContractionEngine):
             self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler:
-    def __init__(self,Lx,Ly,exact=False,seed=None,thresh=1e-14):
+    def __init__(self,Lx,Ly,nspin,exact=False,seed=None,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
         self.nsite = self.Lx * self.Ly
+        self.nspin = nspin
 
         self.all_configs = self.get_all_configs()
         self.ntotal = len(self.all_configs)
@@ -1311,7 +1344,16 @@ class DenseSampler:
         self.nonzeros = nonzeros[start:stop]
         self.amplitude_factory.update_scheme(0)
     def get_all_configs(self):
-        return list(itertools.product((0,1),repeat=self.nsite))
+        assert isinstance(self.nspin,tuple)
+        sites = list(range(self.nsite))
+        occs = list(itertools.combinations(sites,self.nspin[0]))
+        configs = [None] * len(occs) 
+        for i,occ in enumerate(occs):
+            config = [0] * (self.nsite) 
+            for ix in occ:
+                config[ix] = 1
+            configs[i] = tuple(config)
+        return configs
     def sample(self):
         flat_idx = self.rng.choice(self.flat_indexes,p=self.p)
         config = self.all_configs[flat_idx]
