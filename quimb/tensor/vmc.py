@@ -96,6 +96,7 @@ class TNVMC: # stochastic sampling
     ):
         # parse ham
         self.ham = ham
+        self.nsite = ham.Lx * ham.Ly
 
         # parse sampler
         self.sampler = sampler
@@ -288,7 +289,7 @@ class TNVMC: # stochastic sampling
             self.extract_H()
         if RANK==0:
             print('\tcollect data time=',time.time()-t0)
-            print(f'step={self.step},E={self.E},dE={self.E-self.Eold},err={self.Eerr}')
+            print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite}')
             self.Eold = self.E
     def gather_sizes(self):
         self.count = np.array([0]*SIZE)
@@ -406,7 +407,7 @@ class TNVMC: # stochastic sampling
             return self._get_Smatrix_stochastic(start=start,stop=stop)
     def _extract_S_mask(self):
         # stochastic only, collect matrix blocks
-        ls = [None] * len(self.block_dict)
+        ls = [None] * self.nsite
         for ix,(start,stop) in enumerate(self.block_dict):
             ls[ix] = self._get_Smatrix(start=start,stop=stop)
         self.S = ls
@@ -494,7 +495,7 @@ class TNVMC: # stochastic sampling
         else:
             return self._get_Hmatrix_stochastic(start=start,stop=stop)
     def _extract_H_mask(self):
-        ls = [None] * len(self.block_dict)
+        ls = [None] * self.nsite
         for ix,(start,stop) in enumerate(self.block_dict):
             ls[ix] = self._get_Hmatrix(start=start,stop=stop)
         self.H = ls
@@ -645,8 +646,8 @@ class TNVMC: # stochastic sampling
         return dE
     def _transform_gradients_rgn_mask(self):
         self.deltas = np.zeros_like(self.x)
-        w = [None] * len(self.block_dict) 
-        dE = np.zeros(len(self.block_dict))  
+        w = [None] * self.nsite
+        dE = np.zeros(self.nsite)  
         for ix,(start,stop) in enumerate(self.block_dict):
             w[ix],self.deltas[start:stop],dE[ix] = \
                 _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
@@ -725,9 +726,9 @@ class TNVMC: # stochastic sampling
         Hi0 = self.g
         H0j = self.Hvmean - self.E * self.vmean
 
-        w = np.zeros(len(self.block_dict))
-        v0 = np.zeros(len(self.block_dict))
-        inorm = np.zeros(len(self.block_dict))
+        w = np.zeros(self.nsite)
+        v0 = np.zeros(self.nsite)
+        inorm = np.zeros(self.nsite)
         self.deltas = np.zeros_like(self.x)
         for ix,(start,stop) in enumerate(self.block_dict):
             w[ix],self.deltas[start:stop],v0[ix],inorm[ix] = \
@@ -890,6 +891,7 @@ class DMRG(TNVMC):
     ):
         # parse ham
         self.ham = ham
+        self.nsite = ham.Lx * ham.Ly
 
         # parse sampler
         self.sampler = sampler
@@ -924,7 +926,7 @@ class DMRG(TNVMC):
         self.check = None 
         self.accept_ratio = None
     def next_ix(self):
-        if self.direction == 1 and self.ix == len(self.block_dict)-1:
+        if self.direction == 1 and self.ix == self.nsite-1:
             self.direction = -1
         elif self.direction == -1 and self.ix == 0:
             self.direction = 1
@@ -951,7 +953,7 @@ class DMRG(TNVMC):
                 if tmpdir is not None: # save psi to disc
                     write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
             #self.next_ix()
-            self.ix = (self.ix + 1) % len(self.block_dict)
+            self.ix = (self.ix + 1) % self.nsite
     def update(self,rate):
         start,stop = self.block_dict[self.ix]
         x = self.x.copy()

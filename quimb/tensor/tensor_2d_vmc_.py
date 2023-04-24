@@ -6,18 +6,19 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-THRESH = 1e-14 # thresh for vanishing amplitude
-
 # set tensor symmetry
 import sys
 import torch
 this = sys.modules[__name__]
-def set_options(phys_dim=2):
+def set_options(phys_dim=2,backend='numpy'):
     this.data_map = dict()
     for i in range(phys_dim):
         data = np.zeros(phys_dim)
         data[i] = 1.
+        if backend=='torch':
+            data = torch.tensor(data,requires_grad=False)
         this.data_map[i] = data
+    this.backend = backend
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
 def flat2site(ix,Lx,Ly): # ix in row order
@@ -62,14 +63,10 @@ def get_product_state(Lx,Ly,config):
 ####################################################################################
 from .tensor_core import Tensor,TensorNetwork,rand_uuid,tensor_split
 class ContractionEngine:
-    def _2backend(self,data,requires_grad):
-        if self.backend=='torch':
-            data = torch.tensor(data,requires_grad=requires_grad)
-        return data
     def get_bra_tsr(self,peps,ci,i,j,append=''):
         inds = peps.site_ind(i,j)+append,
         tags = peps.site_tag(i,j),peps.row_tag(i),peps.col_tag(j),'BRA'
-        data = self._2backend(data_map[ci],False)
+        data = data_map[ci].copy()
         return Tensor(data=data,inds=inds,tags=tags)
     def get_mid_env(self,i,peps,config,append=''):
         row = peps.select(peps.row_tag(i)).copy()
@@ -240,19 +237,16 @@ class ContractionEngine:
         imax = peps.Lx-x_bsz
         plq = dict()
         for i in range(imax+1):
-            try:
-                tn = self.get_mid_env(i,peps,config)
-                for ix in range(1,x_bsz):
-                    tn.add_tensor_network(self.get_mid_env(i+ix,peps,config),virtual=True)
-                if i>0:
-                    other = tn 
-                    tn = cache_bot[config[:i*peps.Ly]].copy()
-                    tn.add_tensor_network(other,virtual=True)
-                if i<imax:
-                    tn.add_tensor_network(cache_top[config[(i+x_bsz)*peps.Ly:]].copy(),virtual=True)
-                plq = self.update_plq_from_3row(plq,tn,i,x_bsz,y_bsz,peps)
-            except AttributeError:
-                continue
+            tn = self.get_mid_env(i,peps,config)
+            for ix in range(1,x_bsz):
+                tn.add_tensor_network(self.get_mid_env(i+ix,peps,config),virtual=True)
+            if i>0:
+                other = tn 
+                tn = cache_bot[config[:i*peps.Ly]].copy()
+                tn.add_tensor_network(other,virtual=True)
+            if i<imax:
+                tn.add_tensor_network(cache_top[config[(i+x_bsz)*peps.Ly:]].copy(),virtual=True)
+            plq = self.update_plq_from_3row(plq,tn,i,x_bsz,y_bsz,peps)
         return plq
 class AmplitudeFactory(ContractionEngine):
     def __init__(self,psi,dmrg=False,**contract_opts):
@@ -262,10 +256,12 @@ class AmplitudeFactory(ContractionEngine):
         self.constructors = self.get_constructors(psi)
         self.get_block_dict()
         self.dmrg = dmrg
+        if backend=='torch':
+            for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+                psi[i,j].modify(data=torch.tensor(psi[i,j].data,requires_grad=True))
 
         self.ix = None
         self.set_psi(psi) # current state stored in self.psi
-        self.backend = 'numpy'
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
@@ -298,7 +294,7 @@ class AmplitudeFactory(ContractionEngine):
             ls[ix] = vec
         return ls
     def dict2vec(self,dict_):
-        return np.concatenate(self.dict2vecs(dict_))
+        return np.concatenate(self.dict2vecs(dict_)) 
     def psi2vecs(self,psi=None):
         psi = self.psi if psi is None else psi
         ls = [None] * len(self.constructors)
@@ -420,13 +416,13 @@ class AmplitudeFactory(ContractionEngine):
             plq = self.get_plq_from_benvs(config,1,1,self.psi,self.cache_bot,self.cache_top)
         unsigned_cx,vx,_ = self.get_grad_from_plqs(plq,config=config)
         return unsigned_cx * sign, vx
-    def get_grad_from_plq(self,plq,inplace=False,config=None,cx=dict(),backend='numpy'):
+    def get_grad_from_plq(self,plq,inplace=False,config=None,cx=dict()):
         if self.dmrg:
             fn = self.get_grad_from_plq_dmrg
         else:
             fn = self.get_grad_from_plq_full
-        return fn(plq,inplace=inplace,config=config,cx=cx,backend=backend)
-    def get_grad_from_plq_full(self,plq,inplace=False,config=None,cx=dict(),backend='numpy'):
+        return fn(plq,inplace=inplace,config=config,cx=cx)
+    def get_grad_from_plq_full(self,plq,inplace=False,config=None,cx=dict()):
         # gradient
         vx = dict()
         for ((i0,j0),(x_bsz,y_bsz)),tn in plq.items():
@@ -436,19 +432,14 @@ class AmplitudeFactory(ContractionEngine):
                     if (i,j) in vx:
                         continue
                     tn_ = tn if inplace else tn.copy()
-                    vij = self.site_grad(tn_,i,j) / cij 
-                    if backend=='torch':
-                        vij = vij.detach().numpy()
-                    vx[i,j] = vij
+                    vx[i,j] = self.site_grad(tn_,i,j) / cij 
         vx = self.dict2vec(vx)
         if config is not None:
             unsigned_cx = sum(cx.values()) / len(cx)
-            if backend=='torch':
-                unsigned_cx = unsigned_cx.detach().numpy() 
             self.store[config] = unsigned_cx
             self.store_grad[config] = vx
         return vx
-    def get_grad_from_plq_dmrg(self,plq,inplace=False,config=None,cx=dict(),backend='numpy'):
+    def get_grad_from_plq_dmrg(self,plq,inplace=False,config=None,cx=dict()):
         i,j = self.flat2site(self.ix)
         _,(x_bsz,y_bsz) = list(plq.keys())[0]
         # all plqs the site could be in 
@@ -622,9 +613,6 @@ class Hamiltonian(ContractionEngine):
             self.chi_min = kwargs.get('chi_min',None)
             self.chi_max = kwargs.get('chi_max',None)
             self.contract_opts = kwargs.get('contract_opts',dict())
-        self.backend = 'numpy'
-        if self.hess=='ad':
-            self.grad_by_ad = kwargs.get('grad_by_ad',True)
         self.cache_top = dict()
         self.cache_bot = dict()
     def flatten(self,i,j):
@@ -665,175 +653,86 @@ class Hamiltonian(ContractionEngine):
             raise NotImplementedError
         #exit()
     def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
+        data = self.data_map[self.key].copy()
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return Tensor(data=data,inds=inds,tags=tags) 
-    def pair_energy(self,tn,config,site1,site2):
+    def pair_energy(self,tn,config,site1,site2,cx=None):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
+        cx = tn.copy().contract() if cx is None else cx
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.
+            return 0.,cx
         kixs = [tn.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
             tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
         tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
         try:
-            return self.pair_coeff(site1,site2) * tn.contract() 
+            return self.pair_coeff(site1,site2) * tn.contract() / cx,cx
         except (ValueError,IndexError):
-            return 0.
-    def pair_energies(self,config,plq,inplace=False):
-        ex = dict()
-        cx = dict()
-        for (site1,site2) in self.pairs:
-            key = self.pair_key(site1,site2)
-
-            tn = plq.get(key,None) 
-            if tn is not None:
-                tn_ = tn if inplace else tn.copy()
-                ex[site1,site2] = self.pair_energy(tn_,config,site1,site2)
-
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = tn.copy().contract() 
-                cx[site1] = cij
-                cx[site2] = cij
-        return ex,cx
+            return 0.,cx
+    def pair_energies(self,config,plq,x_bsz,y_bsz,inplace=False,cx=dict()):
+        e = 0.
+        for ((i0,j0),(x_bsz_,y_bsz_)),tn in plq.items():
+            for i in range(i0,i0+x_bsz_-x_bsz+1):
+                for j in range(j0,j0+y_bsz_-y_bsz+1):
+                    site1,site2 = (i,j),(i+x_bsz-1,j+y_bsz-1)
+                    if site1 in cx:
+                        cij = cx[site1]
+                    elif site2 in cx:
+                        cij = cx[site2]
+                    else:
+                        cij = None
+                    tn_ = tn if inplace else tn.copy()
+                    eij,cij = self.pair_energy(tn_,config,site1,site2,cij)
+                    e += eij
+                    cx[site1] = cij
+                    cx[site2] = cij
+        return e,cx
     def contraction_error(self,cx):
-        nsite = self.Lx * self.Ly
-        if self.backend=='torch':
-            sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite 
-            if sqmean < THRESH:
-                return None,0.
-            mean = sum(cij for cij in cx.values()) / nsite
-            err = sqmean - mean.pow(2)
-            return self._2numpy(mean),self._2numpy((err/mean).abs())
-        else:
-            sqmean = sum(cij**2 for cij in cx.values()) / nsite
-            if sqmean < THRESH:
-                return None,0.
-            mean = sum(cij for cij in cx.values()) / nsite
-            err = sqmean - mean**2
-            return mean,np.fabs(err/mean)
+        ls = [] 
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                ls.append(cx.get((i,j),0.))
+        ls = np.array(ls)
+        if np.linalg.norm(ls) < 1e-10:
+            return 0.
+        err = np.std(ls)
+        mean = ls.sum() / len(cx)
+        return np.fabs(err/mean)
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        call_ad = compute_Hv and self.hess=='ad'
-        if call_ad:
-            fn = self._compute_local_energy_ad
-        else:
-            fn = self._compute_local_energy_manual
-        return fn(config,amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
-    def _torch2numpy(self,data):
-        if self.backend=='torch':
-            data = data.detach().numpy()
-            if data.size==1:
-                data = data.reshape(-1)[0]
-        return data
-    def _2numpy(self,data):
-        return self._torch2numpy(data)
-    def tsr_grad(self,tsr,set_zero=True):
-        grad = tsr.grad
-        if set_zero:
-            tsr.grad = None
-        return grad 
-    def _compute_local_energy_ad(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        # torch only used here
-        self.backend = 'torch'
-        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        contract_opts = amplitude_factory.contract_opts
-        cache_top = dict()
-        cache_bot = dict()
-        peps = amplitude_factory.psi.copy()
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-
-        self.get_all_bot_envs(peps,config,cache_bot,imax=self.Lx-1-x_bsz_min,append='',**contract_opts)
-        self.get_all_top_envs(peps,config,cache_top,imin=x_bsz_min,append='',**contract_opts)
-
-        plq = dict()
-        for x_bsz,y_bsz in self.plq_sz:
-            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
-        ex,cx = self.pair_energies(config,plq,inplace=False) 
-        unsigned_cx,err = self.contraction_error(cx) # contraction error
-        if self.discard is not None: # discard sample if contraction error too large
-            if err > self.discard: 
-                return (None,) * 6 
-        if unsigned_cx is None:
-            return (None,) * 6
-      
-        # back propagates energy gradient
-        ex_num = sum(ex.values())
-        ex_num.backward(retain_graph=self.grad_by_ad)
-        Hvx = dict()
-        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-            Hvx[i,j] = self.tsr_grad(peps[i,j].data) / unsigned_cx
-        Hvx = {site:self._2numpy(Hvij) for site,Hvij in Hvx.items()}
-        Hvx = amplitude_factory.dict2vec(Hvx) 
-
-        if self.grad_by_ad:
-            # back propagates gradient
-            cx[self.Lx//2,0].backward()
-            vx = dict()
-            for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-                vx[i,j] = self.tsr_grad(peps[i,j].data) / unsigned_cx 
-            vx = {site:self._2numpy(vij) for site,vij in vx.items()}
-            vx = amplitude_factory.dict2vec(vx)  
-        else:
-            vx = amplitude_factory.get_grad_from_plq(plq,inplace=False,config=None,cx=cx,
-                                                     backend=self.backend) 
-        eu = self.compute_local_energy_eigen(config)
-        Hvx += eu * vx 
-
-        # energy
-        ex = sum([eij/cx[site1] for (site1,_),eij in ex.items()])
-        ex = self._2numpy(ex)
-        ex += eu
-
-        # save results
-        amplitude_factory.store[config] = unsigned_cx
-        amplitude_factory.store_grad[config] = vx
-        for key in cache_top:
-            tn = cache_top[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            amplitude_factory.cache_top[key] = tn
-        for key in cache_bot:
-            tn = cache_bot[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            amplitude_factory.cache_bot[key] = tn
-        return unsigned_cx,ex,vx,Hvx,err,None
-    def _compute_local_energy_manual(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        self.backend = 'numpy'
-        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        amplitude_factory.get_all_benvs(config,x_bsz=x_bsz_min) 
+        amplitude_factory.get_all_benvs(config,x_bsz=1) 
         peps = amplitude_factory.psi
         cache_bot = amplitude_factory.cache_bot
         cache_top = amplitude_factory.cache_top
 
-        plq = dict()
-        for x_bsz,y_bsz in self.plq_sz:
-            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
-        ex,cx = self.pair_energies(config,plq,inplace=False) 
-        unsigned_cx,err = self.contraction_error(cx) # contraction error
+        #plq_h = amplitude_factory.get_plq_from_benvs(config,1,self.bsz,peps,cache_bot,cache_top)
+        plq_h = self.get_plq_from_benvs(config,1,self.bsz,peps,cache_bot,cache_top)
+        eh = dict()
+        ch = dict() 
+        for bsz in range(2,self.bsz+1):
+            eh[bsz],ch = self.pair_energies(config,plq_h,x_bsz=1,y_bsz=bsz,inplace=False,cx=ch) 
+        eh = sum(eh.values())
+        err = self.contraction_error(ch) # contraction error
         if self.discard is not None: # discard sample if contraction error too large
             if err > self.discard: 
                 return (None,) * 6 
-        if unsigned_cx is None:
-            return (None,) * 6
+
+        #plq_v = amplitude_factory.get_plq_from_benvs(config,self.bsz,1,peps,cache_bot,cache_top)
+        plq_v = self.get_plq_from_benvs(config,self.bsz,1,peps,cache_bot,cache_top)
+        ev = dict()
+        cv = dict() 
+        for bsz in range(2,self.bsz+1):
+            ev[bsz],cv = self.pair_energies(config,plq_v,x_bsz=bsz,y_bsz=1,inplace=False,cx=cv) 
+        ev = sum(ev.values())
+        unsigned_cx = sum(cv.values()) / len(cv)
 
         eu = self.compute_local_energy_eigen(config)
-        # energy
-        ex = sum([eij/cx[site1] for (site1,_),eij in ex.items()])
-        ex += eu
+        ex = ev + eh + eu
         if not compute_v:
             return unsigned_cx,ex,None,None,err,None
 
-        vx = amplitude_factory.get_grad_from_plq(plq,inplace=False,config=config,cx=cx) 
+        vx = amplitude_factory.get_grad_from_plq(plq_v,inplace=False,config=config,cx=cv) 
         if not compute_Hv:
             return unsigned_cx,ex,vx,None,err,None
 
@@ -934,7 +833,7 @@ class Hamiltonian(ContractionEngine):
                 raise NotImplementedError
             plq = self.complete_plq(plq,norm)
             vals = {site:ftn_plq.copy().contract() for (site,_),ftn_plq in plq.items()}
-            _,err = self.contraction_error(vals)
+            err = self.contraction_error(vals)
             if self.discard is None:
                 break
             if err < self.discard:
@@ -1137,35 +1036,22 @@ class Heisenberg(Hamiltonian):
         except TypeError:
             self.Jx,self.Jy,self.Jz = J,J,J
         self.h = h
-
+        self.bsz = 2
+        self.data_map = dict()
+        self.set_gate()
+    def set_gate(self):
         data = get_gate2((self.Jx,self.Jy,0.),to_bk=False)
+        if backend=='torch':
+            data = torch.tensor(data,requires_grad=False)
         self.key = 'Jxy'
-        self.data_map = {self.key:data}
-
-        self.pairs = []
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                if j+1<self.Ly:
-                    where = (i,j),(i,j+1)
-                    self.pairs.append(where)
-                if i+1<self.Lx:
-                    where = (i,j),(i+1,j)
-                    self.pairs.append(where)
-        self.plq_sz = (1,2),(2,1)
-    def pair_key(self,site1,site2):
-        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
-        dx = site2[0]-site1[0]
-        dy = site2[1]-site1[1]
-        return site1,(dx+1,dy+1)
+        self.data_map[self.key] = data
     def get_coeffs(self,L):
-        # coeff for pair tsr in pepo
         coeffs = []
         for i in range(L):
             if i+1 < L:
                 coeffs.append((i,i+1,1.))
         return coeffs
     def pair_coeff(self,site1,site2):
-        # coeff for pair tsr
         return 1.
     def pair_valid(self,i1,i2):
         return True
@@ -1184,53 +1070,6 @@ class Heisenberg(Hamiltonian):
         return e
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.25*(1-(-1)**(i1+i2)))]
-class J1J2(Hamiltonian):
-    def __init__(self,J1,J2,Lx,Ly,**kwargs):
-        super().__init__(Lx,Ly,**kwargs)
-        self.J1 = J1
-        self.J2 = J2
-
-        data = get_gate2(1.,to_bk=False)
-        self.key = 'SiSj'
-        self.data_map = {self.key:data}
-
-        # NN
-        self.pairs = []
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                if j+1<self.Ly:
-                    where = (i,j),(i,j+1)
-                    self.pairs.append(where)
-                if i+1<self.Lx:
-                    where = (i,j),(i+1,j)
-                    self.pairs.append(where)
-        # next NN
-        for i in range(self.Lx-1):
-            for j in range(self.Ly-1):
-                where = (i,j),(i+1,j+1)
-                self.pairs.append(where)
-                where = (i,j+1),(i+1,j)
-                self.pairs.append(where)
-        self.plq_sz = (2,2),
-    def pair_key(self,site1,site2):
-        i0 = min(site1[0],site2[0],self.Lx-2)
-        j0 = min(site1[1],site2[1],self.Ly-2)
-        return (i0,j0),(2,2) 
-    def get_coeffs(self,L):
-        raise NotImplementedError
-    def pair_coeff(self,site1,site2):
-        # coeff for pair tsr
-        dx = abs(site2[0]-site1[0])
-        dy = abs(site2[1]-site1[1])
-        if dx==1 and dy==1:
-            return self.J2
-        return self.J1
-    def pair_valid(self,i1,i2):
-        return True
-    def compute_local_energy_eigen(self,config):
-        return 0.
-    def pair_terms(self,i1,i2):
-        return [(1-i1,1-i2,.25*(1-(-1)**(i1+i2)))]
 ####################################################################################
 # sampler 
 ####################################################################################
@@ -1246,8 +1085,7 @@ class ExchangeSampler(ContractionEngine):
         self.burn_in = burn_in 
         self.amplitude_factory = None
         self.alternate = False # True if autodiff else False
-        self.backend = 'numpy'
-    def initialize(self,config):
+    def initialize(self,config,thresh=1e-14):
         # randomly choses the initial sweep direction
         self.sweep_row_dir = self.rng.choice([-1,1]) 
         # setup to compute all opposite envs for initial sweep
@@ -1257,7 +1095,7 @@ class ExchangeSampler(ContractionEngine):
         # force to initialize with a better config
         #print(self.px)
         #exit()
-        if self.px < THRESH:
+        if self.px < thresh:
             raise ValueError 
     def preprocess(self,config):
         self._burn_in(config)
@@ -1464,7 +1302,7 @@ class ExchangeSampler(ContractionEngine):
             self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler:
-    def __init__(self,Lx,Ly,nspin,exact=False,seed=None):
+    def __init__(self,Lx,Ly,nspin,exact=False,seed=None,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
         self.nsite = self.Lx * self.Ly
@@ -1488,6 +1326,7 @@ class DenseSampler:
         self.dense = True
         self.exact = exact 
         self.amplitude_factory = None
+        self.thresh = thresh
     def initialize(self,config=None):
         pass
     def preprocess(self):
@@ -1507,7 +1346,7 @@ class DenseSampler:
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
         nonzeros = []
         for ix,px in enumerate(ptotal):
-            if px > THRESH:
+            if px > self.thresh:
                 nonzeros.append(ix) 
         n = np.sum(ptotal)
         ptotal /= n 

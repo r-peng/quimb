@@ -11,7 +11,7 @@ SYMMETRY = 'u11' # sampler symmetry
 # set tensor symmetry
 import sys
 this = sys.modules[__name__]
-def set_options(symmetry='u1',flat=True,ad=True):
+def set_options(symmetry='u1',flat=True):
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
@@ -27,25 +27,6 @@ def set_options(symmetry='u1',flat=True,ad=True):
                      'h1':H1(symmetry=symmetry,flat=flat)}
     this.symmetry = symmetry
     this.flat = flat
-
-    if ad:
-        # set backend
-        import autoray as ar
-        import torch
-        like = torch.zeros(1)
-        ar.set_backend(like)
-        #torch.autograd.set_detect_anomaly(True)
-        torch.autograd.set_detect_anomaly(False)
-
-        from .torch_utils import SVD
-        ar.register_function('torch','linalg.svd',SVD.apply)
-
-        import pyblock3.algebra.ad
-        pyblock3.algebra.ad.ENABLE_AUTORAY = True
-        from pyblock3.algebra.ad import core
-        core.ENABLE_FUSED_IMPLS = False
-        from pyblock3.algebra.ad.fermion import SparseFermionTensor
-        this.SparseFermionTensor = SparseFermionTensor
     return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
@@ -221,17 +202,12 @@ def get_product_state(Lx,Ly,spin_map):
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
+from ..tensor_2d_vmc_ import ContractionEngine as ContractionEngine_
 class ContractionEngine(ContractionEngine_): 
-    def _2backend(self,data,requires_grad):
-        if self.backend=='numpy':
-            return data.copy()
-        else:
-            return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
     def get_bra_tsr(self,fpeps,ci,i,j,append=''):
         inds = fpeps.site_ind(i,j)+append,
         tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
-        data = self._2backend(data_map[ci].dagger,False)
+        data = data_map[ci].dagger
         return FermionTensor(data=data,inds=inds,tags=tags)
     def site_grad(self,ftn_plq,i,j):
         ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
@@ -245,7 +221,7 @@ def compute_fpeps_parity(fs,start,stop):
     tids = [fs.get_tid_from_site(site) for site in range(start,stop)]
     tsrs = [fs.tensor_order[tid][0] for tid in tids] 
     return sum([tsr.parity for tsr in tsrs]) % 2
-from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory_
+from ..tensor_2d_vmc_ import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def __init__(self,psi,dmrg=False,**contract_opts):
         self.contract_opts=contract_opts
@@ -260,7 +236,6 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
         self.set_psi(psi) # current state stored in self.psi
         self.parity_cum = self.get_parity_cum()
         self.sign = dict()
-        self.backend = 'numpy'
     def update(self,x,fname=None,root=0):
         psi = self.vec2psi(x,inplace=True)
         self.set_psi(psi) 
@@ -311,7 +286,7 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
+from ..tensor_2d_vmc_ import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
     def set_pepo_tsrs(self): 
         vac = data_map[0]
@@ -447,47 +422,25 @@ class Hamiltonian(ContractionEngine,Hamiltonian_):
         pepo.add_tag('BRA')
         return pepo
     def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
+        data = self.data_map[self.key].copy()
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
     def config_parity(self,config,ix1,ix2):
         return sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2
     def complete_plq(self,plq,norm):
         return plq
-    def _2numpy(self,data):
-        if self.backend=='torch':
-            try:
-                data = data.to_flat()
-            except AttributeError:
-                data = self._torch2numpy(data) 
-        return data
-    def tsr_grad(self,tsr,set_zero=True):
-        return tsr.get_grad(set_zero=set_zero) 
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
-
+        self.bsz = 2
+        self.data_map = dict()
+        self.set_gate()
+    def set_gate(self):
         data = data_map['h1']
         data = np.transpose(data,axes=(0,2,1,3))
         self.key = 'h1'
-        self.data_map = {self.key:data}
-
-        self.pairs = []
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                if j+1<self.Ly:
-                    where = (i,j),(i,j+1)
-                    self.pairs.append(where)
-                if i+1<self.Lx:
-                    where = (i,j),(i+1,j)
-                    self.pairs.append(where)
-        self.plq_sz = (1,2),(2,1)
-    def pair_key(self,site1,site2):
-        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
-        dx = site2[0]-site1[0]
-        dy = site2[1]-site1[1]
-        return site1,(dx+1,dy+1)
+        self.data_map[self.key] = data
     def get_coeffs(self,L):
         coeffs = []
         for i in range(L):
@@ -518,7 +471,7 @@ class Hubbard(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
+from ..tensor_2d_vmc_ import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ContractionEngine,ExchangeSampler_):
     def new_pair(self,i1,i2):
         if SYMMETRY=='u11':
@@ -535,7 +488,7 @@ class ExchangeSampler(ContractionEngine,ExchangeSampler_):
         return i1_new,i2_new 
     def new_pair_u1(self,i1,i2):
         return
-from ..tensor_2d_vmc import DenseSampler as DenseSampler_
+from ..tensor_2d_vmc_ import DenseSampler as DenseSampler_
 class DenseSampler(DenseSampler_):
     def __init__(self,Lx,Ly,nelec,**kwargs):
         self.nelec = nelec
