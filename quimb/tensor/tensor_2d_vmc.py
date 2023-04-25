@@ -6,8 +6,6 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-THRESH = 1e-14 # thresh for vanishing amplitude
-
 # set tensor symmetry
 import sys
 import torch
@@ -618,6 +616,7 @@ class Hamiltonian(ContractionEngine):
         self.discard = kwargs.get('discard',None)
         self.dmrg = kwargs.get('dmrg',False)
         self.hess = kwargs.get('hess','comb')
+        self.thresh = kwargs.get('thresh',1e-28)
         if self.hess in ['comb','pepo']:
             self.chi_min = kwargs.get('chi_min',None)
             self.chi_max = kwargs.get('chi_max',None)
@@ -705,15 +704,15 @@ class Hamiltonian(ContractionEngine):
     def contraction_error(self,cx):
         nsite = self.Lx * self.Ly
         if self.backend=='torch':
-            sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite 
-            if sqmean < THRESH:
+            sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite # mean(px) 
+            if sqmean < self.thresh:
                 return None,0.
             mean = sum(cij for cij in cx.values()) / nsite
             err = sqmean - mean.pow(2)
             return self._2numpy(mean),self._2numpy((err/mean).abs())
         else:
             sqmean = sum(cij**2 for cij in cx.values()) / nsite
-            if sqmean < THRESH:
+            if sqmean < self.thresh:
                 return None,0.
             mean = sum(cij for cij in cx.values()) / nsite
             err = sqmean - mean**2
@@ -1235,7 +1234,7 @@ class J1J2(Hamiltonian):
 # sampler 
 ####################################################################################
 class ExchangeSampler(ContractionEngine):
-    def __init__(self,Lx,Ly,seed=None,burn_in=0):
+    def __init__(self,Lx,Ly,seed=None,burn_in=0,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
         self.nsite = self.Lx * self.Ly
@@ -1247,6 +1246,7 @@ class ExchangeSampler(ContractionEngine):
         self.amplitude_factory = None
         self.alternate = False # True if autodiff else False
         self.backend = 'numpy'
+        self.thresh = thresh
     def initialize(self,config):
         # randomly choses the initial sweep direction
         self.sweep_row_dir = self.rng.choice([-1,1]) 
@@ -1257,11 +1257,13 @@ class ExchangeSampler(ContractionEngine):
         # force to initialize with a better config
         #print(self.px)
         #exit()
-        if self.px < THRESH:
+        if self.px < self.thresh:
             raise ValueError 
     def preprocess(self,config):
         self._burn_in(config)
     def _burn_in(self,config,batchsize=None):
+        if RANK==0:
+            return
         batchsize = self.burn_in if batchsize is None else batchsize
         self.initialize(config)
         if batchsize==0:
@@ -1273,8 +1275,8 @@ class ExchangeSampler(ContractionEngine):
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
+        #print(f'RANK={RANK},burn in time={time.time()-t0}')
         self.alternate = _alternate
-        #print(f'\tRANK={RANK},burn in time={time.time()-t0},namps={len(self.amplitude_factory.store)}')
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
@@ -1464,7 +1466,7 @@ class ExchangeSampler(ContractionEngine):
             self.sweep_row_dir = self.rng.choice([-1,1]) 
         return self.config,self.px
 class DenseSampler:
-    def __init__(self,Lx,Ly,nspin,exact=False,seed=None):
+    def __init__(self,Lx,Ly,nspin,exact=False,seed=None,thresh=1e-14):
         self.Lx = Lx
         self.Ly = Ly
         self.nsite = self.Lx * self.Ly
@@ -1488,9 +1490,10 @@ class DenseSampler:
         self.dense = True
         self.exact = exact 
         self.amplitude_factory = None
+        self.thresh = thresh
     def initialize(self,config=None):
         pass
-    def preprocess(self):
+    def preprocess(self,config=None):
         self.compute_dense_prob()
     def compute_dense_prob(self):
         t0 = time.time()
@@ -1507,7 +1510,7 @@ class DenseSampler:
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
         nonzeros = []
         for ix,px in enumerate(ptotal):
-            if px > THRESH:
+            if px > self.thresh:
                 nonzeros.append(ix) 
         n = np.sum(ptotal)
         ptotal /= n 
@@ -1516,15 +1519,17 @@ class DenseSampler:
             print('\tdense amplitude time=',time.time()-t0)
 
         ntotal = len(nonzeros)
-        batchsize,remain = ntotal//SIZE,ntotal%SIZE
-        L = SIZE-remain
-        if RANK<L:
-            start = RANK*batchsize
+        batchsize,remain = ntotal//(SIZE-1),ntotal%(SIZE-1)
+        L = SIZE-1-remain
+        if RANK-1<L:
+            start = (RANK-1)*batchsize
             stop = start+batchsize
         else:
-            start = (batchsize+1)*RANK-L
+            start = (batchsize+1)*(RANK-1)-L
             stop = start+batchsize+1
-        self.nonzeros = nonzeros[start:stop]
+        self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
+        #print(RANK,start,stop,len(self.nonzeros),ntotal)
+        #exit()
         self.amplitude_factory.update_scheme(0)
     def get_all_configs(self):
         assert isinstance(self.nspin,tuple)
