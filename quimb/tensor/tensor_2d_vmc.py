@@ -616,7 +616,6 @@ class Hamiltonian(ContractionEngine):
         self.discard = kwargs.get('discard',None)
         self.dmrg = kwargs.get('dmrg',False)
         self.hess = kwargs.get('hess','comb')
-        self.thresh = kwargs.get('thresh',1e-28)
         if self.hess in ['comb','pepo']:
             self.chi_min = kwargs.get('chi_min',None)
             self.chi_max = kwargs.get('chi_max',None)
@@ -705,18 +704,14 @@ class Hamiltonian(ContractionEngine):
         nsite = self.Lx * self.Ly
         if self.backend=='torch':
             sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite # mean(px) 
-            if sqmean < self.thresh:
-                return None,0.
             mean = sum(cij for cij in cx.values()) / nsite
             err = sqmean - mean.pow(2)
-            return self._2numpy(mean),self._2numpy((err/mean).abs())
+            return self._2numpy(mean),self._2numpy(err.abs())
         else:
             sqmean = sum(cij**2 for cij in cx.values()) / nsite
-            if sqmean < self.thresh:
-                return None,0.
             mean = sum(cij for cij in cx.values()) / nsite
             err = sqmean - mean**2
-            return mean,np.fabs(err/mean)
+            return mean,np.fabs(err)
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         call_ad = compute_Hv and self.hess=='ad'
         if call_ad:
@@ -737,6 +732,19 @@ class Hamiltonian(ContractionEngine):
         if set_zero:
             tsr.grad = None
         return grad 
+    def update_cache(self,amplitude_factory,cache_top,cache_bot):
+        for key in cache_top:
+            tn = cache_top[key]
+            for tid in tn.tensor_map:
+                tsr = tn.tensor_map[tid]
+                tsr.modify(data=self._2numpy(tsr.data))
+            amplitude_factory.cache_top[key] = tn
+        for key in cache_bot:
+            tn = cache_bot[key]
+            for tid in tn.tensor_map:
+                tsr = tn.tensor_map[tid]
+                tsr.modify(data=self._2numpy(tsr.data))
+            amplitude_factory.cache_bot[key] = tn
     def _compute_local_energy_ad(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         # torch only used here
         self.backend = 'torch'
@@ -758,9 +766,8 @@ class Hamiltonian(ContractionEngine):
         unsigned_cx,err = self.contraction_error(cx) # contraction error
         if self.discard is not None: # discard sample if contraction error too large
             if err > self.discard: 
+                self.update_cache(amplitude_factory,cache_top,cache_bot)
                 return (None,) * 6 
-        if unsigned_cx is None:
-            return (None,) * 6
       
         # back propagates energy gradient
         ex_num = sum(ex.values())
@@ -793,18 +800,7 @@ class Hamiltonian(ContractionEngine):
         # save results
         amplitude_factory.store[config] = unsigned_cx
         amplitude_factory.store_grad[config] = vx
-        for key in cache_top:
-            tn = cache_top[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            amplitude_factory.cache_top[key] = tn
-        for key in cache_bot:
-            tn = cache_bot[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            amplitude_factory.cache_bot[key] = tn
+        self.update_cache(amplitude_factory,cache_top,cache_bot)
         return unsigned_cx,ex,vx,Hvx,err,None
     def _compute_local_energy_manual(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         self.backend = 'numpy'
@@ -822,8 +818,6 @@ class Hamiltonian(ContractionEngine):
         if self.discard is not None: # discard sample if contraction error too large
             if err > self.discard: 
                 return (None,) * 6 
-        if unsigned_cx is None:
-            return (None,) * 6
 
         eu = self.compute_local_energy_eigen(config)
         # energy
@@ -1260,14 +1254,14 @@ class ExchangeSampler(ContractionEngine):
         if self.px < self.thresh:
             raise ValueError 
     def preprocess(self,config):
-        self._burn_in(config)
+        return self._burn_in(config)
     def _burn_in(self,config,batchsize=None):
         if RANK==0:
-            return
+            return None,None
         batchsize = self.burn_in if batchsize is None else batchsize
         self.initialize(config)
         if batchsize==0:
-            return
+            return None,None
         t0 = time.time()
         _alternate = self.alternate 
         self.alternate = True # always do alternate sweep in burn in 
@@ -1277,6 +1271,7 @@ class ExchangeSampler(ContractionEngine):
             print('\tburn in time=',time.time()-t0)
         #print(f'RANK={RANK},burn in time={time.time()-t0}')
         self.alternate = _alternate
+        return self.config,self.omega
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
@@ -1494,7 +1489,7 @@ class DenseSampler:
     def initialize(self,config=None):
         pass
     def preprocess(self,config=None):
-        self.compute_dense_prob()
+        return self.compute_dense_prob()
     def compute_dense_prob(self):
         t0 = time.time()
         ptotal = np.zeros(self.ntotal)
@@ -1531,6 +1526,7 @@ class DenseSampler:
         #print(RANK,start,stop,len(self.nonzeros),ntotal)
         #exit()
         self.amplitude_factory.update_scheme(0)
+        return None,None
     def get_all_configs(self):
         assert isinstance(self.nspin,tuple)
         sites = list(range(self.nsite))

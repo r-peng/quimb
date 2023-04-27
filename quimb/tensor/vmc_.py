@@ -78,8 +78,11 @@ def blocking_analysis(weights, energies, neql, printQ=False):
             plateauError = max(error, prevError)
         prevError = error
 
-    if printQ:
-        if plateauError is not None:
+    print(RANK,plateauError,error)
+    if plateauError is None:
+        plateauError = error
+    else:
+        if printQ:
             print(f'Stocahstic error estimate: {plateauError:.6e}\n')
 
     return meanEnergy, plateauError
@@ -132,6 +135,7 @@ class TNVMC: # stochastic sampling
         # to be set before run
         self.tmpdir = None
         self.config = None
+        self.omega = None
         self.batchsize = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
@@ -152,6 +156,7 @@ class TNVMC: # stochastic sampling
             psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
         self.sampler.amplitude_factory = self.amplitude_factory
+        #self.config,self.omega = self.sampler.preprocess(self.config) 
         self.sampler.preprocess(self.config) 
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
 
@@ -213,28 +218,21 @@ class TNVMC: # stochastic sampling
 
         self.store = dict()
         self.p0 = dict()
-        ntotal = 0
-        ndiscard = 0
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
-            ntotal += 1
+            #if omega > self.omega:
+            #    self.config,self.omega = config,omega
             if config in self.store:
-                info = self.store[config]
-                if info is None:
-                    ndiscard += 1
-                    continue
-                ex,vx,Hvx = info 
+                ex,vx,Hvx = self.store[config]
             else:
                 cx,ex,vx,Hvx,err1,err2 = self.ham.compute_local_energy(
                     config,self.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
                 if cx is None:
-                    self.store[config] = None
-                    ndiscard += 1
-                    continue
+                    raise ValueError
                 if np.fabs(ex) > DISCARD:
-                    self.store[config] = None
-                    ndiscard += 1
-                    continue
+                    for config,(ex,_,_) in self.store.items():
+                        print(ex)
+                    raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
                 self.store[config] = ex,vx,Hvx
                 self.p0[config] = cx**2
             self.samples.append(config)
@@ -252,10 +250,6 @@ class TNVMC: # stochastic sampling
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
-
-        pct = (ndiscard + 1e-6) / (ntotal + 1e-6)
-        if pct > .01:
-            print(f'Warning! {ndiscard} out of {ntotal} ({pct}) samples discarded for process {RANK}!')
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p
@@ -273,7 +267,7 @@ class TNVMC: # stochastic sampling
             if cx is None:
                 raise ValueError
             if np.fabs(ex)*p[ix] > DISCARD:
-                raise ValueError
+                raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
             self.samples.append(config) 
             self.buf[1] = p[ix]
             self.f.append(p[ix])
@@ -299,7 +293,11 @@ class TNVMC: # stochastic sampling
         if self.optimizer in ['rgn','lin']:
             self.extract_H()
         if RANK==0:
-            print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite}')
+            try:
+                print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite}')
+            except TypeError:
+                print('E=',self.E)
+                print('Eerr=',self.Eerr)
             print('\tcollect data time=',time.time()-t0)
             self.Eold = self.E
     def gather_sizes(self):

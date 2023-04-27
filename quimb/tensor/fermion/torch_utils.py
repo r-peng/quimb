@@ -84,9 +84,6 @@ class SVD(torch.autograd.Function):
         Sv = (F-G)*(VdV-VdV.t())/2
 
         dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
-        if not torch.all(torch.isfinite(dA)):
-            print('p1',dA)
-            exit()
         Su = Sv = UdU = VdV = G = F = None   # help with memory
         if (M>NS):
             ##dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU/S) @ Vt
@@ -108,10 +105,6 @@ class SVD(torch.autograd.Function):
             U = S = Vh = None
             dA += (tmp1 - tmp2)
             tmp1 = tmp2 = None
-
-        if not torch.all(torch.isfinite(dA)):
-            print('p1',dA)
-            exit()
         return dA
 
 def test_svd():
@@ -124,10 +117,100 @@ def test_svd():
     input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
     assert(torch.autograd.gradcheck(SVD.apply, (input), eps=1e-6, atol=1e-4))
 
-    print("Test Pass!")
+    print("SVD Test Pass!")
 
+def copyltu(A):
+    tril0 = A.tril(diagonal=0)
+    tril1 = A.tril(diagonal=-1)
+    return tril0 + tril1.t()
+def QRforward_deep(A):
+    if not torch.all(torch.isfinite(A)):
+        raise ValueError("input matrix to custom QR is not finite")
+    try:
+        Q, R = torch.linalg.qr(A,mode='reduced')
+    except:
+        if be_verbose:
+            print('trouble in torch gesdd routine, falling back to scipy')
+        Q, R = scipy.linalg.svd(A.detach().numpy(), mode='economic')
+        Q = torch.from_numpy(Q)
+        R = torch.from_numpy(R)
+    return Q,R
+def safe_inverse_tri(T,R):
+    diag = R.diag()
+    full_rank = True
+    for i in range(len(diag)):
+        if torch.abs(diag[i]) < epsilon:
+            full_rank = False
+            break
+    if full_rank:
+        TRinv = T @ torch.linalg.inv(R.t())
+        if not torch.all(torch.isfinite(TRinv)):
+            raise ValueError('Rinv is not finite')
+        return TRinv 
+    else:
+        TRinv,res,rank,s = torch.linalg.lstsq(R,T.t(),driver='gelsd')
+        if not torch.all(torch.isfinite(TRinv)):
+            raise ValueError('Rinv is not finite')
+        return TRinv.t()
+def QRbackward_deep(Q,R,dQ,dR):
+    M = R@dR.t() - dQ.t()@Q
+    M = copyltu(M)        
+    return safe_inverse_tri(dQ + Q@M, R)
+def QRforward_wide(A):
+    M,N = A.size()
+    X,Y = A.split((M,N-M),dim=1)
+    Q,U = QRforward_deep(X)
+    V = Q.t()@Y
+    R = torch.cat((U,V),dim=1)
+    return Q,R
+def QRbackward_wide(A,Q,R,dQ,dR):
+    M,N = A.size()
+    X,Y = A.split((M,N-M),dim=1)
+    U,V = R.split((M,N-M),dim=1)
+    dU,dV = dR.split((M,N-M),dim=1)
+
+    tmp = dQ+Y@dV.t()
+    M = U@dU.t() - tmp.t()@Q
+    M = copyltu(M)
+    dX = safe_inverse_tri(tmp + Q@M,U)
+    return torch.cat((dX,Q@dV),dim=1)
+class QR(torch.autograd.Function):
+    @staticmethod
+    def forward(self,A):
+        M,N = A.size()
+        if M>=N:
+            Q,R = QRforward_deep(A)
+        else:
+            Q,R = QRforward_wide(A)
+        self.save_for_backward(A,Q,R)
+        return Q,R
+    @staticmethod
+    def backward(self, dQ, dR):
+        if not torch.all(torch.isfinite(dQ)):
+            raise ValueError("dQ is not finite")
+        if not torch.all(torch.isfinite(dR)):
+            raise ValueError("dR is not finite")
+        A,Q,R = self.saved_tensors
+        M,N = A.size()
+        if M>=N:
+            return QRbackward_deep(Q,R,dQ,dR)
+        else:
+            return QRbackward_wide(A,Q,R,dQ,dR)
+        
+def test_qr():
+    M, N = 50, 20
+    torch.manual_seed(2)
+    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    M, N = 20, 50
+    torch.manual_seed(2)
+    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+
+    print("QR Test Pass!")
 if __name__=='__main__':
     test_svd()
+    test_qr()
 
 
 

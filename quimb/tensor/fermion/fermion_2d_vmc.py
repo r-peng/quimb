@@ -37,8 +37,9 @@ def set_options(symmetry='u1',flat=True,ad=True):
         #torch.autograd.set_detect_anomaly(True)
         torch.autograd.set_detect_anomaly(False)
 
-        from .torch_utils import SVD
+        from .torch_utils import SVD,QR
         ar.register_function('torch','linalg.svd',SVD.apply)
+        ar.register_function('torch','linalg.qr',QR.apply)
 
         import pyblock3.algebra.ad
         pyblock3.algebra.ad.ENABLE_AUTORAY = True
