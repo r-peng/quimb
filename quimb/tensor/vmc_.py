@@ -95,6 +95,7 @@ class TNVMC: # stochastic sampling
         ham,
         sampler,
         amplitude_factory,
+        normalize=False,
         optimizer='sr',
         **kwargs,
     ):
@@ -110,6 +111,9 @@ class TNVMC: # stochastic sampling
         self.amplitude_factory = amplitude_factory         
         self.x = self.amplitude_factory.get_x()
         self.nparam = len(self.x)
+        self.init_norm = None
+        if normalize:
+            self.init_norm = np.linalg.norm(self.x)    
 
         # parse gradient optimizer
         self.optimizer = optimizer
@@ -144,6 +148,11 @@ class TNVMC: # stochastic sampling
         self.cond2 = None
         self.check = None 
         self.accept_ratio = None
+    def normalize(self,x):
+        if self.init_norm is not None:
+            norm = np.linalg.norm(x)
+            x *= self.init_norm / norm    
+        return x
     def run(self,start,stop,tmpdir=None):
         self.Eold = 0.
         for step in range(start,stop):
@@ -152,6 +161,7 @@ class TNVMC: # stochastic sampling
             self.extract_energy_gradient()
             self.transform_gradients()
             COMM.Bcast(self.x,root=0) 
+            self.x = self.normalize(self.x)
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):

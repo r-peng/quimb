@@ -8,16 +8,30 @@ import numpy as np
 import torch
 import os, sys
 import scipy.linalg
+from mpi4py import MPI
+COMM = MPI.COMM_WORLD
+SIZE = COMM.Get_size()
+RANK = COMM.Get_rank()
 
 be_verbose = True
-epsilon = 1e-28
+epsilon = 1e-12
 
 def safe_inverse(x):
-    return x/(x**2 + epsilon)
-
+    return x/(x.pow(2) + epsilon)
+def make_zeros(A):
+    M,N = A.size()
+    U = torch.zeros(M,1)
+    S = torch.zeros(1)
+    Vh = torch.zeros(1,N)
+    return U,S,Vh
 class SVD(torch.autograd.Function):
     @staticmethod
     def forward(self, A):
+        if torch.linalg.norm(A) < epsilon:# A is zero
+            U,S,Vh = make_zeros(A)
+            self.save_for_backward(U,S,Vh)
+            return U,S,Vh
+
         if not torch.all(torch.isfinite(A)):
             raise ValueError("input matrix to custom SVD is not finite")
         try:
@@ -32,6 +46,10 @@ class SVD(torch.autograd.Function):
 
         # trim
         ind = S > epsilon
+        if len(ind)==0:
+            U,S,Vh = make_zeros(A)
+            self.save_for_backward(U,S,Vh)
+            return U,S,Vh
         S = S[ind]            
         U = U[:,ind]
         Vh = Vh[ind,:]
@@ -60,9 +78,9 @@ class SVD(torch.autograd.Function):
         #Ut = U.t()
         M = U.size(0)
         N = Vh.size(1)
+        if S[0]<epsilon:
+            return torch.zeros(M,N)
         NS = len(S)
-        if NS==0:
-            return torch.zeros(M,N,dtype=U.dtype)
         for i in range(NS-1):
             if torch.abs(S[i]-S[i+1])<epsilon:
                 print('warning! degenerate singular values', S)
@@ -85,26 +103,25 @@ class SVD(torch.autograd.Function):
 
         dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
         Su = Sv = UdU = VdV = G = F = None   # help with memory
+        Sinv = safe_inverse(S)
         if (M>NS):
             ##dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU/S) @ Vt
             #dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU*safe_inverse(S)) @ Vt
             # the following is a rewrite of the above one-liner to decrease memory
-            tmp1 = (dU*safe_inverse(S)) @ Vh
+            tmp1 = (dU*Sinv) @ Vh
             tmp2 = U.t() @ tmp1
             tmp2 = U @ tmp2
-            U = S = Vh = None
             dA += (tmp1 - tmp2)
-            tmp1 = tmp2 = None
         if (N>NS):
             ##dA = dA + (U/S) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
             #dA = dA + (U*safe_inverse(S)) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
             # the following is a rewrite of the above one-liner to decrease memory
-            tmp1 = (U*safe_inverse(S)) @ dVh
+            tmp1 = (U*Sinv) @ dVh
             tmp2 = tmp1 @ Vh.t()
             tmp2 = tmp2 @ Vh
-            U = S = Vh = None
             dA += (tmp1 - tmp2)
-            tmp1 = tmp2 = None
+        U = S = Vh = None
+        tmp1 = tmp2 = None
         return dA
 
 def test_svd():
