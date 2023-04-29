@@ -10,6 +10,7 @@ RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 DISCARD = 1e3
 CG_TOL = 1e-4
+MAXITER = 100
 ##################################################################################################
 # VMC utils
 ##################################################################################################
@@ -77,8 +78,11 @@ def blocking_analysis(weights, energies, neql, printQ=False):
             plateauError = max(error, prevError)
         prevError = error
 
-    if printQ:
-        if plateauError is not None:
+    print(RANK,plateauError,error)
+    if plateauError is None:
+        plateauError = error
+    else:
+        if printQ:
             print(f'Stocahstic error estimate: {plateauError:.6e}\n')
 
     return meanEnergy, plateauError
@@ -91,6 +95,7 @@ class TNVMC: # stochastic sampling
         ham,
         sampler,
         amplitude_factory,
+        normalize=False,
         optimizer='sr',
         **kwargs,
     ):
@@ -106,13 +111,16 @@ class TNVMC: # stochastic sampling
         self.amplitude_factory = amplitude_factory         
         self.x = self.amplitude_factory.get_x()
         self.nparam = len(self.x)
+        self.init_norm = None
+        if normalize:
+            self.init_norm = np.linalg.norm(self.x)    
 
         # parse gradient optimizer
         self.optimizer = optimizer
         self.solve = kwargs.get('solve','iterative')
         self.compute_Hv = False
         if self.optimizer in ['rgn','lin']:
-            self.ham.initialize_pepo(self.amplitude_factory.psi)
+            #self.ham.initialize_pepo(self.amplitude_factory.psi)
             self.compute_Hv = True
         if self.optimizer=='lin':
             self.xi = kwargs.get('xi',0.5)
@@ -131,6 +139,7 @@ class TNVMC: # stochastic sampling
         # to be set before run
         self.tmpdir = None
         self.config = None
+        self.omega = None
         self.batchsize = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
@@ -139,6 +148,11 @@ class TNVMC: # stochastic sampling
         self.cond2 = None
         self.check = None 
         self.accept_ratio = None
+    def normalize(self,x):
+        if self.init_norm is not None:
+            norm = np.linalg.norm(x)
+            x *= self.init_norm / norm    
+        return x
     def run(self,start,stop,tmpdir=None):
         self.Eold = 0.
         for step in range(start,stop):
@@ -147,138 +161,130 @@ class TNVMC: # stochastic sampling
             self.extract_energy_gradient()
             self.transform_gradients()
             COMM.Bcast(self.x,root=0) 
+            self.x = self.normalize(self.x)
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
         self.sampler.amplitude_factory = self.amplitude_factory
-        self.err1 = []
-        self.err2 = []
-        t0 = time.time()
-        if self.exact_sampling:
-            self.sample_exact(compute_v=compute_v,compute_Hv=compute_Hv)
-        else:
-            self.sample_stochastic(samplesize=samplesize,compute_v=compute_v,compute_Hv=compute_Hv)
-        mean1,err1 = self.parse_contraction_err(self.err1)
-        mean2,err2 = self.parse_contraction_err(self.err2)
-        if RANK==0:
-            print(f'\tcontraction err single={(mean1,err1)},double={(mean2,err2)}')
-            print('\tsample time=',time.time()-t0)
-    def parse_contraction_err(self,ls):
-        if len(ls)>0:
-            ls = np.array(ls)
-            meani,maxi = np.array([ls.sum()/len(ls)]),np.array([np.amax(ls)])
-        else:
-            meani,maxi = np.zeros(1),np.zeros(1)
-        mean_ = np.zeros_like(meani)
-        COMM.Reduce(meani,mean_,op=MPI.SUM,root=0)
-        mean_ /= SIZE
-        max_ = np.zeros_like(maxi)
-        COMM.Reduce(maxi,max_,op=MPI.MAX,root=0)
-        return mean_[0],max_[0]
-    def sample_stochastic(self,samplesize=None,compute_v=True,compute_Hv=None): 
+        #self.config,self.omega = self.sampler.preprocess(self.config) 
+        self.sampler.preprocess(self.config) 
+        compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
+
+        self.buf = np.zeros(5)
         self.terminate = np.array([0])
-        self.rank = np.array([RANK])
+
+        self.buf[0] = RANK + .1
+        self.samples = []
+        if compute_v:
+            self.evsum = np.zeros_like(self.x)
+            self.vsum = np.zeros_like(self.x)
+            self.v = []
+        if compute_Hv:
+            self.Hvsum = np.zeros_like(self.x)
+            self.Hv = [] 
+
         if RANK==0:
             self._ctr(samplesize=samplesize)
         else:
-            self._sample(compute_v=compute_v,compute_Hv=compute_Hv)
+            if self.exact_sampling:
+                self._sample_exact(compute_v=compute_v,compute_Hv=compute_Hv)
+            else:
+                self._sample_stochastic(compute_v=compute_v,compute_Hv=compute_Hv)
     def _ctr(self,samplesize=None):
+        if self.exact_sampling:
+            samplesize = len(self.sampler.nonzeros)
+        else:
+            samplesize = self.batchsize if samplesize is None else samplesize
+        self.f = []
+        self.e = []
+        err_mean = 0.
+        err_max = 0.
         ncurr = 0
-        samplesize = self.batchsize if samplesize is None else samplesize
+        t0 = time.time()
         while self.terminate[0]==0:
-            COMM.Recv(self.rank,tag=0)
+            COMM.Recv(self.buf,tag=0)
+            rank = int(self.buf[0])
+            self.f.append(self.buf[1]) 
+            self.e.append(self.buf[2])
+            err_mean += self.buf[3]
+            err_max = max(err_max,self.buf[3])
             ncurr += 1
-            if ncurr > samplesize: # send termination message to all workers
+            #print(ncurr)
+            if ncurr >= samplesize: # send termination message to all workers
                 self.terminate[0] = 1
                 for worker in range(1,SIZE):
                     COMM.Send(self.terminate,dest=worker,tag=1)
             else:
-                COMM.Send(self.terminate,dest=self.rank[0],tag=1)
-    def _sample(self,compute_v=True,compute_Hv=None):
-        self.sampler.preprocess(self.config) 
-
-        self.samples = []
-        self.elocal = []
-        self.vlocal = []
-        self.Hv_local = [] 
-        compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
+                COMM.Send(self.terminate,dest=rank,tag=1)
+        print('\tsample time=',time.time()-t0)
+        print('\tcontraction err=',err_mean / len(self.e),err_max)
+    def _sample_stochastic(self,compute_v=True,compute_Hv=False):
+        self.buf[1] = 1.
 
         self.store = dict()
         self.p0 = dict()
-        ntotal = 0
-        ndiscard = 0
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
-            ntotal += 1
+            #if omega > self.omega:
+            #    self.config,self.omega = config,omega
             if config in self.store:
-                info = self.store[config]
-                if info is None:
-                    ndiscard += 1
-                    continue
-                ex,vx,Hvx = info 
+                ex,vx,Hvx = self.store[config]
             else:
-                cx,ex,vx,Hvx,err1,err2 = self.ham.compute_local_energy(
-                    config,self.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
+                cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
+                    config,self.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)[:5]
                 if cx is None:
-                    self.store[config] = None
-                    ndiscard += 1
-                    continue
+                    raise ValueError
                 if np.fabs(ex) > DISCARD:
-                    self.store[config] = None
-                    ndiscard += 1
-                    continue
+                    for config,(ex,_,_) in self.store.items():
+                        print(ex)
+                    raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
                 self.store[config] = ex,vx,Hvx
                 self.p0[config] = cx**2
             self.samples.append(config)
-            self.elocal.append(ex)
-            self.err1.append(err1) 
+            self.buf[2] = ex
+            self.buf[3] = err
             if compute_v:
-                self.vlocal.append(vx)
+                self.vsum += vx
+                self.evsum += vx * ex
+                self.v.append(vx)
             if compute_Hv:
-                self.Hv_local.append(Hvx)
-                if err2 is not None:
-                    self.err2.append(err2)
+                self.Hvsum += Hvx
+                self.Hv.append(Hvx)
 
-            COMM.Send(self.rank,dest=0,tag=0) 
+            COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
-
-        pct = (ndiscard + 1e-6) / (ntotal + 1e-6)
-        if pct > .01:
-            print(f'Warning! {ndiscard} out of {ntotal} ({pct}) samples discarded for process {RANK}!')
-    def sample_exact(self,compute_v=True,compute_Hv=None): 
-        # can be reused for correlated sampling
-        self.sampler.compute_dense_prob() # runs only for dense sampler 
-
+    def _sample_exact(self,compute_v=True,compute_Hv=None): 
+        # assumes exact contraction
         p = self.sampler.p
         all_configs = self.sampler.all_configs
         ixs = self.sampler.nonzeros
-
-        self.samples = []
-        self.flocal = []
-        self.elocal = []
-        self.vlocal = []
-        self.Hv_local = [] 
-        compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
-
-        self.store = dict()
+        ntotal = len(ixs)
         if RANK==SIZE-1:
-            print('\tnsamples per process=',len(ixs))
+            print('\tnsamples per process=',ntotal)
+
+        self.f = []
         for ix in ixs:
-            self.flocal.append(p[ix])
             config = all_configs[ix]
-            self.samples.append(config) 
-            cx,ex,vx,Hvx,err1,err2 = self.ham.compute_local_energy(config,self.amplitude_factory,
-                                                        compute_v=compute_v,compute_Hv=compute_Hv)
+            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(config,self.amplitude_factory,
+                                                        compute_v=compute_v,compute_Hv=compute_Hv)[:5]
             if cx is None:
-                continue
-            self.elocal.append(ex)
-            self.err1.append(err1)
+                raise ValueError
+            if np.fabs(ex)*p[ix] > DISCARD:
+                raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
+            self.samples.append(config) 
+            self.buf[1] = p[ix]
+            self.f.append(p[ix])
+            self.buf[2] = ex
+            self.buf[3] = err
             if compute_v:
-                self.vlocal.append(vx)
+                self.vsum += vx * p[ix]
+                self.evsum += vx * ex * p[ix]
+                self.v.append(vx)
             if compute_Hv:
-                self.Hv_local.append(Hvx)
-                if err2 is not None:
-                    self.err2.append(err2)
+                self.Hvsum += Hvx * p[ix]
+                self.Hv.append(Hvx)
+            COMM.Send(self.buf,dest=0,tag=0) 
+            COMM.Recv(self.terminate,source=0,tag=1)
     def extract_energy_gradient(self):
         t0 = time.time()
         self.extract_energy()
@@ -288,82 +294,45 @@ class TNVMC: # stochastic sampling
         if self.optimizer in ['rgn','lin']:
             self.extract_H()
         if RANK==0:
+            try:
+                print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite}')
+            except TypeError:
+                print('E=',self.E)
+                print('Eerr=',self.Eerr)
             print('\tcollect data time=',time.time()-t0)
-            print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite}')
             self.Eold = self.E
     def gather_sizes(self):
         self.count = np.array([0]*SIZE)
         COMM.Allgather(np.array([self.nlocal]),self.count)
         self.disp = np.concatenate([np.array([0]),np.cumsum(self.count[:-1])])
     def extract_energy(self):
+        self.E = 0
+        if RANK>0:
+            return
+        self.e = np.array(self.e)
+        self.f = np.array(self.f)
         if self.exact_sampling:
-            self._extract_energy_exact()
+            self.n = 1.
+            self.E = np.dot(self.f,self.e)
+            self.Eerr = 0.
         else:
-            self._extract_energy_stochastic()
-    def _extract_energy_stochastic(self,weighted=False):
-        # collect all energies for blocking analysis 
-        if RANK==0:
-            self.nlocal = 1
-            self.elocal = np.zeros(1)
-            if weighted:
-                self.flocal = np.zeros(1)
-        else:
-            self.nlocal = len(self.elocal)
-            self.elocal = np.array(self.elocal)
-            if weighted:
-                self.flocal = np.array(self.flocal)
-        self.gather_sizes()
-        self.n = self.count.sum()
-        e = np.zeros(self.n)
-        COMM.Gatherv(self.elocal,[e,self.count,self.disp,MPI.DOUBLE],root=0)
-        e = e[1:]
-        if weighted:
-            f = np.zeros(self.n)
-            COMM.Gatherv(self.flocal,[f,self.count,self.disp,MPI.DOUBLE],root=0)
-            f = f[1:] 
-        else:
-            f = np.ones_like(e) 
-        if RANK>0:
-            return
-        self.n -= 1
-        self.E,self.Eerr = blocking_analysis(f,e,0,True)
-    def _extract_energy_exact(self):
-        # reduce scalar energy
-        self.nlocal = len(self.elocal)
-        self.gather_sizes()
-
-        self.elocal = np.array(self.elocal)
-        self.flocal = np.array(self.flocal)
-        e = np.array([np.dot(self.elocal,self.flocal)])
-        self.E = np.zeros_like(e) 
-        COMM.Reduce(e,self.E,op=MPI.SUM,root=0)
-        if RANK>0:
-            return
-        self.E = self.E[0]
-        self.Eerr = 0.
-        self.n = 1.
+            self.n = len(self.e)
+            self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
     def extract_gradient(self):
-        # reduce vectors
-        if self.exact_sampling:
-            self.vlocal = np.array(self.vlocal)
-            vsum_ = np.dot(self.flocal,self.vlocal) 
-            vesum_ = np.dot(self.elocal * self.flocal,self.vlocal)
-        else:
-            if RANK==0:
-                vsum_ = np.zeros(self.nparam,dtype=self.x.dtype)
-                vesum_ = np.zeros(self.nparam,dtype=self.x.dtype)
-            else:
-                self.vlocal = np.array(self.vlocal)
-                vsum_ = self.vlocal.sum(axis=0)
-                vesum_ = np.dot(self.elocal,self.vlocal)
-        self.vmean = np.zeros_like(vsum_)
-        COMM.Reduce(vsum_,self.vmean,op=MPI.SUM,root=0)
-        vesum = np.zeros_like(vesum_)
-        COMM.Reduce(vesum_,vesum,op=MPI.SUM,root=0)
-        if RANK>0:
-            return
-        self.vmean /= self.n
-        self.g = vesum / self.n - self.E * self.vmean 
+        self.vmean = np.zeros_like(self.x)
+        COMM.Reduce(self.vsum,self.vmean,op=MPI.SUM,root=0)
+        self.evmean = np.zeros_like(self.x)
+        COMM.Reduce(self.evsum,self.evmean,op=MPI.SUM,root=0)
+        self.g = None
+        if RANK==0:
+            self.vmean /= self.n
+            self.evmean /= self.n
+            self.g = self.evmean - self.E * self.vmean
+    def _extract_Hvmean(self):
+        self.Hvmean = np.zeros_like(self.x)
+        COMM.Reduce(self.Hvsum,self.Hvmean,op=MPI.SUM,root=0)
+        if RANK==0:
+            self.Hvmean /= self.n
     def extract_S(self,solve=None):
         solve = self.solve if solve is None else solve
         if solve=='mask':
@@ -374,65 +343,6 @@ class TNVMC: # stochastic sampling
             self._extract_S_iterative()
         else:
             raise NotImplementedError
-    def _get_Smatrix_stochastic(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop
-        if RANK==0:
-            sh = stop-start
-            vvsum_ = np.zeros((sh,)*2,dtype=self.x.dtype)
-        else:
-            v = self.vlocal[:,start:stop] 
-            vvsum_ = np.dot(v.T,v)
-        vvsum = np.zeros_like(vvsum_)
-        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
-        S = None
-        if RANK==0:
-            vmean = self.vmean[start:stop]
-            S = vvsum / self.n - np.outer(vmean,vmean)
-        return S
-    def _get_Smatrix_exact(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop
-        v = self.vlocal[:,start:stop] 
-        vvsum_ = np.einsum('s,si,sj->ij',self.flocal,v,v)
-        vvsum = np.zeros_like(vvsum_)
-        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
-        S = None
-        if RANK==0:
-            vmean = self.vmean[start:stop]
-            S = vvsum - np.outer(vmean,vmean)
-        return S
-    def _get_Smatrix(self,start=0,stop=None):
-        if self.exact_sampling:
-            return self._get_Smatrix_exact(start=start,stop=stop)
-        else:
-            return self._get_Smatrix_stochastic(start=start,stop=stop)
-    def _extract_S_mask(self):
-        # stochastic only, collect matrix blocks
-        ls = [None] * self.nsite
-        for ix,(start,stop) in enumerate(self.block_dict):
-            ls[ix] = self._get_Smatrix(start=start,stop=stop)
-        self.S = ls
-    def _extract_S_iterative(self):
-        if self.exact_sampling:
-            self.f = np.zeros(self.count.sum())
-            COMM.Gatherv(self.flocal,[self.f,self.count,self.disp,MPI.DOUBLE],root=0)
-        # construct matvec
-        if RANK>0:
-            COMM.Ssend(self.vlocal,dest=0,tag=4)
-            return
-        v = [self.vlocal] if self.exact_sampling else []
-        for worker in range(1,SIZE):
-            nlocal = self.count[worker]
-            buf = np.zeros((nlocal,self.nparam))
-            COMM.Recv(buf,source=worker,tag=4)
-            v.append(buf)    
-        self.v = np.concatenate(v,axis=0) 
-        if self.exact_sampling:
-            def matvec(x):
-                return np.dot(self.f * np.dot(self.v,x),self.v) - self.vmean * np.dot(self.vmean,x)
-        else:
-            def matvec(x):
-                return np.dot(np.dot(self.v,x),self.v) / self.n - self.vmean * np.dot(self.vmean,x)
-        self.S = matvec
     def extract_H(self):
         self._extract_Hvmean()
         if self.solve=='mask':
@@ -443,29 +353,39 @@ class TNVMC: # stochastic sampling
             self._extract_H_iterative()
         else:
             raise NotImplementedError
-    def _extract_Hvmean(self):
-        if self.exact_sampling:
-            self.Hv_local = np.array(self.Hv_local)
-            Hvsum_ = np.dot(self.flocal,self.Hv_local)
-        else:
-            if RANK==0:
-                Hvsum_ = np.zeros(self.nparam,dtype=self.x.dtype)
-            else:
-                self.Hv_local = np.array(self.Hv_local)
-                Hvsum_ = self.Hv_local.sum(axis=0)
-        self.Hvmean = np.zeros_like(Hvsum_)
-        COMM.Reduce(Hvsum_,self.Hvmean,op=MPI.SUM,root=0)
+    def _get_Smatrix(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop
         if RANK==0:
-            self.Hvmean /= self.n
-    def _get_Hmatrix_stochastic(self,start=0,stop=None):
+            sh = stop-start
+            vvsum_ = np.zeros((sh,)*2,dtype=self.x.dtype)
+        else:
+            self.v = np.array(self.v)
+            v = self.v[:,start:stop] 
+            if self.exact_sampling:
+                self.f = np.array(self.f)
+                vvsum_ = np.einsum('s,si,sj->ij',self.f,v,v)
+            else:
+                vvsum_ = np.dot(v.T,v)
+        vvsum = np.zeros_like(vvsum_)
+        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
+        S = None
+        if RANK==0:
+            vmean = self.vmean[start:stop]
+            S = vvsum / self.n - np.outer(vmean,vmean)
+        return S
+    def _get_Hmatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
         if RANK==0:
             sh = stop-start
             vHvsum_ = np.zeros((sh,)*2,dtype=self.x.dtype)
         else:
-            v = self.vlocal[:,start:stop] 
-            Hv = self.Hv_local[:,start:stop] 
-            vHvsum_ = np.dot(v.T,Hv)
+            v = self.v[:,start:stop] 
+            self.Hv = np.array(self.Hv)
+            Hv = self.Hv[:,start:stop] 
+            if self.exact_sampling:
+                vHvsum_ = np.einsum('s,si,sj->ij',self.f,v,Hv)
+            else:
+                vHvsum_ = np.dot(v.T,Hv)
         vHvsum = np.zeros_like(vHvsum_)
         COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
         H = None
@@ -475,50 +395,61 @@ class TNVMC: # stochastic sampling
             g = self.g[start:stop]
             H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
         return H
-    def _get_Hmatrix_exact(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop
-        v = self.vlocal[:,start:stop] 
-        Hv = self.Hv_local[:,start:stop] 
-        vHvsum_ = np.einsum('s,si,sj->ij',self.flocal,v,Hv)
-        vHvsum = np.zeros_like(vHvsum_)
-        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
-        H = None
-        if RANK==0:
-            Hvmean = self.Hvmean[start:stop]
-            vmean = self.vmean[start:stop]
-            g = self.g[start:stop]
-            H = vHvsum - np.outer(vmean,Hvmean) - np.outer(g,vmean)
-        return H
-    def _get_Hmatrix(self,start=0,stop=None):
-        if self.exact_sampling:
-            return self._get_Hmatrix_exact(start=start,stop=stop)
-        else:
-            return self._get_Hmatrix_stochastic(start=start,stop=stop)
+    def _extract_S_mask(self):
+        ls = [None] * self.nsite
+        for ix,(start,stop) in enumerate(self.block_dict):
+            ls[ix] = self._get_Smatrix(start=start,stop=stop)
+        self.S = ls
     def _extract_H_mask(self):
         ls = [None] * self.nsite
         for ix,(start,stop) in enumerate(self.block_dict):
             ls[ix] = self._get_Hmatrix(start=start,stop=stop)
         self.H = ls
+    def _extract_S_iterative(self):
+        self.Sx1 = np.zeros_like(self.x)
+        if RANK==0:
+            Sx1 = np.zeros_like(self.x)
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                COMM.Reduce(Sx1,self.Sx1,op=MPI.SUM,root=0)     
+                return self.Sx1/self.n-self.vmean * np.dot(self.vmean,x)
+        else: 
+            self.v = np.array(self.v)
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
+                    return 0 
+                COMM.Bcast(x,root=0)
+                if self.exact_sampling:
+                    Sx1 = np.dot(self.f * np.dot(self.v,x),self.v)
+                else:
+                    Sx1 = np.dot(np.dot(self.v,x),self.v)
+                COMM.Reduce(Sx1,self.Sx1,op=MPI.SUM,root=0)     
+                return 0 
+        self.S = matvec
     def _extract_H_iterative(self):
-        if RANK>0:
-            COMM.Ssend(self.Hv_local,dest=0,tag=5)
-            return
-        Hv = [self.Hv_local] if self.exact_sampling else []
-        for worker in range(1,SIZE):
-            nlocal = self.count[worker]
-            buf = np.zeros((nlocal,self.nparam))
-            COMM.Recv(buf,source=worker,tag=5)
-            Hv.append(buf)    
-        Hv = np.concatenate(Hv,axis=0) 
-        if self.exact_sampling:
+        self.Hx1 = np.zeros_like(self.x)
+        if RANK==0:
+            Hx1 = np.zeros_like(self.x)
             def matvec(x):
-                return np.dot(self.f * np.dot(Hv,x),self.v) - self.vmean * np.dot(self.Hvmean,x) \
-                                                            - self.g * np.dot(self.vmean,x)
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                COMM.Reduce(Hx1,self.Hx1,op=MPI.SUM,root=0)     
+                return self.Hx1/self.n-self.vmean*np.dot(self.Hvmean,x)-self.g*np.dot(self.vmean,x)
         else:
+            self.Hv = np.array(self.Hv)
             def matvec(x):
-                return np.dot(np.dot(Hv,x),self.v) / self.n - self.vmean * np.dot(self.Hvmean,x) \
-                                                            - self.g * np.dot(self.vmean,x)
-        self.Hv = Hv
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
+                    return 0 
+                COMM.Bcast(x,root=0)
+                if self.exact_sampling:
+                    Hx1 = np.dot(self.f * np.dot(self.Hv,x),self.v)
+                else:
+                    Hx1 = np.dot(np.dot(self.Hv,x),self.v)
+                COMM.Reduce(Hx1,self.Hx1,op=MPI.SUM,root=0)     
+                return 0 
         self.H = matvec
     def transform_gradients(self):
         if self.optimizer=='sr':
@@ -545,10 +476,7 @@ class TNVMC: # stochastic sampling
             raise NotImplementedError
         self.x = self.update(self.rate1)
     def _transform_gradients_sr(self,solve=None):
-        if RANK>0:
-            return 
         solve = self.solve if solve is None else solve
-        t0 = time.time()
         if solve=='mask':
             self._transform_gradients_sr_mask()
         elif solve=='matrix':
@@ -557,13 +485,26 @@ class TNVMC: # stochastic sampling
             self._transform_gradients_sr_iterative()
         else:
             raise NotImplementedError
-        print('\tSR solver time=',time.time()-t0)
-        self.x = self.update(self.rate1)
+    def _transform_gradients_rgn(self):
+        if self.solve=='mask':
+            dE = self._transform_gradients_rgn_mask()
+        elif self.solve=='matrix':
+            dE = self._transform_gradients_rgn_matrix()
+        elif self.solve=='iterative':
+            dE = self._transform_gradients_rgn_iterative()
+        else:
+            raise NotImplementedError
+        return dE
     def _transform_gradients_sr_mask(self):
+        if RANK>0:
+            return 
+        t0 = time.time()
         self.deltas = np.zeros_like(self.x)
         for ix,(start,stop) in enumerate(self.block_dict):
             S = self.S[ix] + self.cond1 * np.eye(stop-start)
             self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
+        print('\tSR solver time=',time.time()-t0)
+        self.x = self.update(self.rate1)
         if self.tmpdir is not None:
             S = np.zeros((self.nparam,self.nparam))
             for ix,(start,stop) in enumerate(self.block_dict):
@@ -574,12 +515,42 @@ class TNVMC: # stochastic sampling
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
+    def _transform_gradients_rgn_mask(self):
+        if RANK>0:
+            return 
+        t0 = time.time()
+        self.deltas = np.zeros_like(self.x)
+        w = [None] * self.nsite
+        dE = np.zeros(self.nsite)  
+        for ix,(start,stop) in enumerate(self.block_dict):
+            w[ix],self.deltas[start:stop],dE[ix] = \
+                _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
+        w = np.array(w)
+        print(f'\tRGN solver time={time.time()-t0},least eigenvalue={min(w.real)}')
+        if self.tmpdir is not None:
+            H = np.zeros((self.nparam,self.nparam))
+            S = np.zeros((self.nparam,self.nparam))
+            for ix,(start,stop) in enumerate(self.block_dict):
+                H[start:stop,start:stop] = self.H[ix] 
+                S[start:stop,start:stop] = self.S[ix]
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('H',data=H) 
+            f.create_dataset('S',data=S) 
+            f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return np.sum(dE)
     def _transform_gradients_sr_matrix(self):
+        if RANK>0:
+            return 
+        t0 = time.time()
         S = self.S + self.cond1 * np.eye(self.nparam)
         #self.deltas = np.linalg.solve(S,self.g)
         LinOp = spla.aslinearoperator(S)
-        self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
-        print('\tSR solver exit status=',info)
+        self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
+        print(f'\tSR solver time={time.time()-t0},exit status={info}')
+        self.x = self.update(self.rate1)
         if self.tmpdir is not None:
             f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('S',data=self.S) 
@@ -587,27 +558,83 @@ class TNVMC: # stochastic sampling
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
+    def _transform_gradients_rgn_matrix(self):
+        if RANK>0:
+            return 
+        t0 = time.time()
+        w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
+        print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
+        if self.tmpdir is not None:
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('H',data=self.H) 
+            f.create_dataset('S',data=self.S) 
+            f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return dE
+    def solve_iterative(self,A,b,cond,symm):
+        self.terminate = np.array([0])
+        self.deltas = np.zeros_like(self.x)
+        if RANK==0:
+            t0 = time.time()
+            def _A(x):
+                return A(x) + cond * x
+            LinOp = spla.LinearOperator((self.nparam,self.nparam),matvec=_A,dtype=self.g.dtype)
+            if symm:
+                self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
+            else: 
+                self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
+            self.terminate[0] = 1
+            COMM.Bcast(self.terminate,root=0)
+            print(f'\tsolver time={time.time()-t0},exit status={info}')
+        else:
+            while self.terminate[0]==0:
+                #self.terminate = A(buf)
+                A(self.deltas)
+        return self.deltas
     def _transform_gradients_sr_iterative(self):
-        def A(x):
-            return self.S(x) + self.cond1 * x
-        LinOp = spla.LinearOperator((self.nparam,self.nparam),matvec=A,dtype=self.g.dtype)
-        self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL)
-        print('\tSR solver exit status=',info)
+        self.deltas = self.solve_iterative(self.S,self.g,self.cond1,True)
+        if RANK==0:
+            self.x = self.update(self.rate1)
+            if self.tmpdir is not None:
+                f = h5py.File(self.tmpdir+f'step{self.step}','w')
+                f.create_dataset('g',data=self.g) 
+                f.create_dataset('deltas',data=self.deltas) 
+                f.close()
+    def _transform_gradients_rgn_iterative(self):
+        def hess(x):
+            if self.terminate[0]==1:
+                return 0
+            Hx = self.H(x)
+            if self.terminate[0]==1:
+                return 0
+            Sx = self.S(x)
+            if self.terminate[0]==1:
+                return 0
+            return Hx - self.E * Sx
+        self.deltas = self.solve_iterative(hess,self.g,self.cond2,False)
         if self.tmpdir is not None:
             f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
+        self.terminate[0] = 0
+        hessp = hess(self.deltas)
+        if RANK==0:
+            return - np.dot(self.g,self.deltas) + .5 * np.dot(self.deltas,hessp)
+        else:
+            return 0 
     def _transform_gradients_o2(self,solve_sr='iterative'):
         xnew_rgn = np.zeros_like(self.x)
         dEm = 0.
+        if self.optimizer=='rgn':
+            dEm = self._transform_gradients_rgn()
+        elif self.optimizer=='lin':
+            dEm = self._transform_gradients_lin()
+        else:
+            raise NotImplementedError
         if RANK==0:
-            if self.optimizer=='rgn':
-                dEm = self._transform_gradients_rgn()
-            elif self.optimizer=='lin':
-                dEm = self._transform_gradients_lin()
-            else:
-                raise NotImplementedError
             xnew_rgn = self.update(self.rate2)    
         if self.check is None:
             self.x = xnew_rgn
@@ -632,67 +659,6 @@ class TNVMC: # stochastic sampling
             self.x = xnew_rgn
         else:
             self.x = xnew_sr
-    def _transform_gradients_rgn(self):
-        t0 = time.time()
-        if self.solve=='mask':
-            dE = self._transform_gradients_rgn_mask()
-        elif self.solve=='matrix':
-            dE = self._transform_gradients_rgn_matrix()
-        elif self.solve=='iterative':
-            dE = self._transform_gradients_rgn_iterative()
-        else:
-            raise NotImplementedError
-        print('\tRGN solver time=',time.time()-t0)
-        return dE
-    def _transform_gradients_rgn_mask(self):
-        self.deltas = np.zeros_like(self.x)
-        w = [None] * self.nsite
-        dE = np.zeros(self.nsite)  
-        for ix,(start,stop) in enumerate(self.block_dict):
-            w[ix],self.deltas[start:stop],dE[ix] = \
-                _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
-        w = np.array(w)
-        print('\tleast eigenvalue=',min(w.real))
-        if self.tmpdir is not None:
-            H = np.zeros((self.nparam,self.nparam))
-            S = np.zeros((self.nparam,self.nparam))
-            for ix,(start,stop) in enumerate(self.block_dict):
-                H[start:stop,start:stop] = self.H[ix] 
-                S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('H',data=H) 
-            f.create_dataset('S',data=S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return np.sum(dE)
-    def _transform_gradients_rgn_matrix(self):
-        w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
-        print('\tleast eigenvalue=',w)
-        if self.tmpdir is not None:
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('H',data=self.H) 
-            f.create_dataset('S',data=self.S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return dE
-    def _transform_gradients_rgn_iterative(self):
-        def hess(x):
-            return self.H(x) - self.E * self.S(x)
-        def A(x):
-            return hess(x) + self.cond2 * x 
-        LinOp = spla.LinearOperator((self.nparam,self.nparam),matvec=A,dtype=self.g.dtype)
-        self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL)
-        print('\tRGN solver exit status=',info)
-        if self.tmpdir is not None:
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return - np.dot(self.g,self.deltas) + .5 * np.dot(self.deltas,hess(self.deltas))
     def _transform_gradients_lin(self,cond):
         t0 = time.time()
         if self.solve=='mask':
