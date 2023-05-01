@@ -81,9 +81,9 @@ class SVD(torch.autograd.Function):
         if S[0]<epsilon:
             return torch.zeros(M,N)
         NS = len(S)
-        for i in range(NS-1):
-            if torch.abs(S[i]-S[i+1])<epsilon:
-                print('warning! degenerate singular values', S)
+        #for i in range(NS-1):
+        #    if torch.abs(S[i]-S[i+1])<epsilon:
+        #        print('warning! degenerate singular values', S,S[i],S[i+1])
 
         F = (S - S[:, None])
         F = safe_inverse(F)

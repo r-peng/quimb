@@ -8,14 +8,22 @@ np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 # set tensor symmetry
 import sys
+import autoray as ar
 import torch
 this = sys.modules[__name__]
-def set_options(phys_dim=2):
+def set_options(phys_dim=2,ad=True):
     this.data_map = dict()
     for i in range(phys_dim):
         data = np.zeros(phys_dim)
         data[i] = 1.
         this.data_map[i] = data
+    if ad:
+        #torch.autograd.set_detect_anomaly(True)
+        torch.autograd.set_detect_anomaly(False)
+        from .torch_utils import SVD,QR
+        ar.register_function('torch','linalg.svd',SVD.apply)
+        ar.register_function('torch','linalg.qr',QR.apply)
+
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
 def flat2site(ix,Lx,Ly): # ix in row order
@@ -755,6 +763,9 @@ class Hamiltonian(ContractionEngine):
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
+        torch_like = torch.zeros(1) 
+        numpy_like = np.zeros(1) 
+        ar.set_backend(torch_like)
 
         self.get_all_bot_envs(peps,config,cache_bot,imax=self.Lx-1-x_bsz_min,append='',**contract_opts)
         self.get_all_top_envs(peps,config,cache_top,imin=x_bsz_min,append='',**contract_opts)
@@ -767,6 +778,7 @@ class Hamiltonian(ContractionEngine):
         if self.discard is not None: # discard sample if contraction error too large
             if err > self.discard: 
                 self.update_cache(amplitude_factory,cache_top,cache_bot)
+                ar.set_backend(numpy_like)
                 return (None,) * 6 
       
         # back propagates energy gradient
@@ -801,6 +813,7 @@ class Hamiltonian(ContractionEngine):
         amplitude_factory.store[config] = unsigned_cx
         amplitude_factory.store_grad[config] = vx
         self.update_cache(amplitude_factory,cache_top,cache_bot)
+        ar.set_backend(numpy_like)
         return unsigned_cx,ex,vx,Hvx,err,None
     def _compute_local_energy_manual(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         self.backend = 'numpy'
