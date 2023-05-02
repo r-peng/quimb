@@ -6,7 +6,7 @@ We reimplement it with a safe inverse function in light of degenerated singular 
 
 import numpy as np
 import torch
-import os, sys
+import os, sys, itertools
 import scipy.linalg
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -16,8 +16,24 @@ RANK = COMM.Get_rank()
 be_verbose = True
 epsilon = 1e-12
 
+#def safe_inverse(x):
+#    return x/(x.pow(2) + epsilon)
 def safe_inverse(x):
-    return x/(x.pow(2) + epsilon)
+    new = torch.zeros_like(x)
+    shape = x.size()
+    if len(shape)==1:
+        inds = range(shape[0])
+    elif len(shape)==2:
+        inds = list(itertools.product(range(shape[0]),range(shape[1])))
+    else:
+        raise ValueError
+    for ind in inds:
+        xi = x[ind]
+        if torch.abs(xi)>epsilon:
+            new[ind] = 1./xi 
+        else:
+            new[ind] = 1./epsilon * torch.sign(xi)
+    return new 
 def make_zeros(A):
     M,N = A.size()
     U = torch.zeros(M,1)
@@ -55,10 +71,10 @@ class SVD(torch.autograd.Function):
         Vh = Vh[ind,:]
 
         # make SVD result sign-consistent across multiple runs
-        #for idx in range(U.size()[1]):
-        #    if max(torch.max(U[:,idx]), torch.min(U[:,idx]), key=abs) < 0.0:
-        #        U[:,idx] *= -1.0
-        #        Vh[idx,:] *= -1.0
+        for idx in range(U.size()[1]):
+            if max(torch.max(U[:,idx]), torch.min(U[:,idx]), key=abs) < 0.0:
+                U[:,idx] *= -1.0
+                Vh[idx,:] *= -1.0
 
         self.save_for_backward(U, S, Vh)
 

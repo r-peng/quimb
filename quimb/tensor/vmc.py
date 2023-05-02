@@ -161,7 +161,6 @@ class TNVMC: # stochastic sampling
             self.extract_energy_gradient()
             self.transform_gradients()
             COMM.Bcast(self.x,root=0) 
-            self.x = self.normalize(self.x)
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
@@ -461,7 +460,7 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             print(f'\tg={np.linalg.norm(self.g)},del={np.linalg.norm(self.deltas)},dot={np.dot(self.deltas,self.g)},x={np.linalg.norm(self.x)}')
     def update(self,rate):
-        return self.x - rate * self.deltas
+        return self.normalize(self.x - rate * self.deltas)
     def _transform_gradients_sgd(self):
         if RANK>0:
             return 
