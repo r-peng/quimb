@@ -623,7 +623,7 @@ class Hamiltonian(ContractionEngine):
         self.Lx,self.Ly = Lx,Ly
         self.discard = kwargs.get('discard',None)
         self.dmrg = kwargs.get('dmrg',False)
-        self.hess = kwargs.get('hess','comb')
+        self.hess = kwargs.get('hess','ad')
         if self.hess in ['comb','pepo']:
             self.chi_min = kwargs.get('chi_min',None)
             self.chi_max = kwargs.get('chi_max',None)
@@ -712,7 +712,7 @@ class Hamiltonian(ContractionEngine):
         nsite = self.Lx * self.Ly
         if self.backend=='torch':
             sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite # mean(px) 
-            mean = sum(cij for cij in cx.values()) / nsite
+            mean = sum(cx.values()) / nsite
             err = sqmean - mean.pow(2)
             return self._2numpy(mean),self._2numpy(err.abs())
         else:

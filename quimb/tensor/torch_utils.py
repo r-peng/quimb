@@ -6,7 +6,7 @@ We reimplement it with a safe inverse function in light of degenerated singular 
 
 import numpy as np
 import torch
-import os, sys, itertools
+import os, sys, itertools, time
 import scipy.linalg
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -15,142 +15,174 @@ RANK = COMM.Get_rank()
 
 be_verbose = True
 epsilon = 1e-12
+fix_sign = True 
+#fix_sign = False 
 
 #def safe_inverse(x):
 #    return x/(x.pow(2) + epsilon)
+#def safe_inverse(x):
+#    new = torch.zeros_like(x)
+#    shape = x.size()
+#    if len(shape)==1:
+#        inds = range(shape[0])
+#    elif len(shape)==2:
+#        inds = list(itertools.product(range(shape[0]),range(shape[1])))
+#    else:
+#        raise ValueError
+#    for ind in inds:
+#        xi = x[ind]
+#        if torch.abs(xi)>epsilon:
+#            new[ind] = 1./xi 
+#        else:
+#            new[ind] = 1./epsilon * torch.sign(xi)
+#    return new 
 def safe_inverse(x):
-    new = torch.zeros_like(x)
-    shape = x.size()
-    if len(shape)==1:
-        inds = range(shape[0])
-    elif len(shape)==2:
-        inds = list(itertools.product(range(shape[0]),range(shape[1])))
-    else:
-        raise ValueError
-    for ind in inds:
-        xi = x[ind]
-        if torch.abs(xi)>epsilon:
-            new[ind] = 1./xi 
-        else:
-            new[ind] = 1./epsilon * torch.sign(xi)
-    return new 
+    #return 1./(x + torch.sign(x) * epsilon)
+    return 1./(x + epsilon)
 def make_zeros(A):
     M,N = A.size()
     U = torch.zeros(M,1)
     S = torch.zeros(1)
     Vh = torch.zeros(1,N)
     return U,S,Vh
-class SVD(torch.autograd.Function):
-    @staticmethod
-    def forward(self, A):
-        if torch.linalg.norm(A) < epsilon:# A is zero
-            U,S,Vh = make_zeros(A)
-            self.save_for_backward(U,S,Vh)
-            return U,S,Vh
+def SVDforward(A):
+    #if torch.linalg.norm(A) < epsilon: # A is zero
+    #    return make_zeros(A)
 
-        if not torch.all(torch.isfinite(A)):
-            raise ValueError("input matrix to custom SVD is not finite")
-        try:
-            U, S, Vh = torch.linalg.svd(A,full_matrices=False)
-        except:
-            if be_verbose:
-                print('trouble in torch gesdd routine, falling back to gesvd')
-            U, S, Vh = scipy.linalg.svd(A.detach().numpy(), full_matrices=False, lapack_driver='gesvd')
-            U = torch.from_numpy(U)
-            S = torch.from_numpy(S)
-            Vh = torch.from_numpy(Vh)
+    #if M >= N:
+    #    eyeN = torch.eye(N,dtype=A.dtype)
+    #    if torch.linalg.norm(eyeN-A.t()@A) < epsilon: # A is col-iso
+    #        return A,torch.ones(N,dtype=A.dtype),eyeN
+    #if M <= N:
+    #    eyeM = torch.eye(M,dtype=A.dtype)
+    #    if torch.linalg.norm(eyeM-A@A.t()) < epsilon: # A is row-iso
+    #        return eyeM,torch.ones(M,dtype=A.dtype),A
 
-        # trim
-        ind = S > epsilon
-        if len(ind)==0:
-            U,S,Vh = make_zeros(A)
-            self.save_for_backward(U,S,Vh)
-            return U,S,Vh
-        S = S[ind]            
-        U = U[:,ind]
-        Vh = Vh[ind,:]
+    if not torch.all(torch.isfinite(A)):
+        raise ValueError("input matrix to custom SVD is not finite")
+    try:
+        U, S, Vh = torch.linalg.svd(A,full_matrices=False)
+    except:
+        if be_verbose:
+            print('trouble in torch gesdd routine, falling back to gesvd')
+        U, S, Vh = scipy.linalg.svd(A.detach().numpy(), full_matrices=False, lapack_driver='gesvd')
+        U = torch.from_numpy(U)
+        S = torch.from_numpy(S)
+        Vh = torch.from_numpy(Vh)
 
+    # trim
+    ind = S > epsilon
+    if len(ind)==0:
+        return make_zeros(A)
+    if np.linalg.norm(S-np.ones_like(S)) < epsilon: # A is isometry
+        M,N = A.size()
+        if M>=N:
+            return A,S,torch.eye(N,dtype=A.dtype)
+        else:
+            return torch.eye(M,dtype=A.dtype),S,A
+    S = S[ind]            
+    U = U[:,ind]
+    Vh = Vh[ind,:]
+    if fix_sign:
         # make SVD result sign-consistent across multiple runs
         for idx in range(U.size()[1]):
             if max(torch.max(U[:,idx]), torch.min(U[:,idx]), key=abs) < 0.0:
                 U[:,idx] *= -1.0
                 Vh[idx,:] *= -1.0
+    return U,S,Vh
+def SVDbackward(dU,dS,dVh,U,S,Vh):
+    if not torch.all(torch.isfinite(dU)):
+        raise ValueError("dU is not finite")
+    if not torch.all(torch.isfinite(dS)):
+        raise ValueError("dS is not finite")
+    if not torch.all(torch.isfinite(dVh)):
+        raise ValueError("dVh is not finite")
+    M = U.size(0)
+    N = Vh.size(1)
+    if S[0]<epsilon:
+        return torch.zeros(M,N)
+    if np.linalg.norm(S-torch.ones_like(S)) < epsilon: # A is isometry
+        if M>=N:
+            return dU
+        else:
+            return dVh    
+    #for i in range(K-1):
+    #    if torch.abs(S[i]-S[i+1])<epsilon:
+    #        print('warning! degenerate singular values', S,S[i],S[i+1])
 
+    F = (S - S[:, None])
+    F = safe_inverse(F)
+    F.diagonal().fill_(0)
+
+    G = (S + S[:, None])
+    G = safe_inverse(G)
+    G.diagonal().fill_(0)
+
+    UdU = U.t() @ dU
+    VdV = Vh @ dVh.t()
+
+    Su = (F+G)*(UdU-UdU.t())/2
+    Sv = (F-G)*(VdV-VdV.t())/2
+
+    dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
+    if not torch.all(torch.isfinite(dA)):
+        raise ValueError("dA is not finite")
+    Su = Sv = UdU = VdV = G = F = None   # help with memory
+    Sinv = safe_inverse(S)
+    NS = S.size(0)
+    Sinv = Sinv.reshape((1,NS))
+    if (M>NS):
+        ##dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU/S) @ Vt
+        #dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU*safe_inverse(S)) @ Vt
+        # the following is a rewrite of the above one-liner to decrease memory
+        tmp1 = (dU*Sinv) @ Vh
+        tmp2 = U.t() @ tmp1
+        tmp2 = U @ tmp2
+        dA += (tmp1 - tmp2)
+    if (N>NS):
+        ##dA = dA + (U/S) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
+        #dA = dA + (U*safe_inverse(S)) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
+        # the following is a rewrite of the above one-liner to decrease memory
+        tmp1 = (U*Sinv) @ dVh
+        tmp2 = tmp1 @ Vh.t()
+        tmp2 = tmp2 @ Vh
+        dA += (tmp1 - tmp2)
+    if not torch.all(torch.isfinite(dA)):
+        raise ValueError("dA is not finite")
+    U = S = Vh = None
+    tmp1 = tmp2 = None
+    return dA
+class SVD(torch.autograd.Function):
+    @staticmethod
+    def forward(self, A):
+        U,S,Vh = SVDforward(A)
         self.save_for_backward(U, S, Vh)
-
         return U, S, Vh
-
     @staticmethod
     def backward(self, dU, dS, dVh):
-        if not torch.all(torch.isfinite(dU)):
-            raise ValueError("dU is not finite")
-        if not torch.all(torch.isfinite(dS)):
-            raise ValueError("dS is not finite")
-        if not torch.all(torch.isfinite(dVh)):
-            raise ValueError("dVh is not finite")
         U, S, Vh = self.saved_tensors
-
-        #Vt = V.t()
-        #Ut = U.t()
-        M = U.size(0)
-        N = Vh.size(1)
-        if S[0]<epsilon:
-            return torch.zeros(M,N)
-        NS = len(S)
-        #for i in range(NS-1):
-        #    if torch.abs(S[i]-S[i+1])<epsilon:
-        #        print('warning! degenerate singular values', S,S[i],S[i+1])
-
-        F = (S - S[:, None])
-        F = safe_inverse(F)
-        F.diagonal().fill_(0)
-
-        G = (S + S[:, None])
-        #G.diagonal().fill_(np.inf)
-        #G = 1/G
-        G = safe_inverse(G)
-        G.diagonal().fill_(0)
-
-        UdU = U.t() @ dU
-        VdV = Vh @ dVh.t()
-
-        Su = (F+G)*(UdU-UdU.t())/2
-        Sv = (F-G)*(VdV-VdV.t())/2
-
-        dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
-        Su = Sv = UdU = VdV = G = F = None   # help with memory
-        Sinv = safe_inverse(S)
-        if (M>NS):
-            ##dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU/S) @ Vt
-            #dA = dA + (torch.eye(M, dtype=dU.dtype, device=dU.device) - U@Ut) @ (dU*safe_inverse(S)) @ Vt
-            # the following is a rewrite of the above one-liner to decrease memory
-            tmp1 = (dU*Sinv) @ Vh
-            tmp2 = U.t() @ tmp1
-            tmp2 = U @ tmp2
-            dA += (tmp1 - tmp2)
-        if (N>NS):
-            ##dA = dA + (U/S) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
-            #dA = dA + (U*safe_inverse(S)) @ dV.t() @ (torch.eye(N, dtype=dU.dtype, device=dU.device) - V@Vt)
-            # the following is a rewrite of the above one-liner to decrease memory
-            tmp1 = (U*Sinv) @ dVh
-            tmp2 = tmp1 @ Vh.t()
-            tmp2 = tmp2 @ Vh
-            dA += (tmp1 - tmp2)
-        U = S = Vh = None
-        tmp1 = tmp2 = None
-        return dA
-
+        return SVDbackward(dU,dS,dVh,U,S,Vh)
 def test_svd():
     M, N = 50, 20
     torch.manual_seed(2)
     input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
     assert(torch.autograd.gradcheck(SVD.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"SVD Test Pass for {M},{N}! time={time.time()-t0}")
+
     M, N = 20, 50
     torch.manual_seed(2)
     input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
     assert(torch.autograd.gradcheck(SVD.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"SVD Test Pass for {M},{N}! time={time.time()-t0} ")
 
-    print("SVD Test Pass!")
+    M, N = 20, 20
+    torch.manual_seed(2)
+    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
+    assert(torch.autograd.gradcheck(SVD.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"SVD Test Pass for {M},{N}! time={time.time()-t0}")
 
 def copyltu(A):
     tril0 = A.tril(diagonal=0)
@@ -168,27 +200,15 @@ def QRforward_deep(A):
         Q = torch.from_numpy(Q)
         R = torch.from_numpy(R)
     return Q,R
-def safe_inverse_tri(T,R):
-    diag = R.diag()
-    full_rank = True
-    for i in range(len(diag)):
-        if torch.abs(diag[i]) < epsilon:
-            full_rank = False
-            break
-    if full_rank:
-        TRinv = T @ torch.linalg.inv(R.t())
-        if not torch.all(torch.isfinite(TRinv)):
-            raise ValueError('Rinv is not finite')
-        return TRinv 
-    else:
-        TRinv,res,rank,s = torch.linalg.lstsq(R,T.t(),driver='gelsd')
-        if not torch.all(torch.isfinite(TRinv)):
-            raise ValueError('Rinv is not finite')
-        return TRinv.t()
 def QRbackward_deep(Q,R,dQ,dR):
     M = R@dR.t() - dQ.t()@Q
     M = copyltu(M)        
-    return safe_inverse_tri(dQ + Q@M, R)
+    tmp = dQ + Q@M
+    dA = torch.linalg.solve_triangular(R,tmp.t(),True)
+    if not torch.all(torch.isfinite(dA)):
+        raise ValueError("dA is not finite")
+    return dA.t() 
+#    return tmp @ torch.linalg.inv(R.t())
 def QRforward_wide(A):
     M,N = A.size()
     X,Y = A.split((M,N-M),dim=1)
@@ -205,25 +225,55 @@ def QRbackward_wide(A,Q,R,dQ,dR):
     tmp = dQ+Y@dV.t()
     M = U@dU.t() - tmp.t()@Q
     M = copyltu(M)
-    dX = safe_inverse_tri(tmp + Q@M,U)
-    return torch.cat((dX,Q@dV),dim=1)
+    tmp = tmp + Q @ M 
+    dX = torch.linalg.solve_triangular(U,tmp.t(),True)
+    if not torch.all(torch.isfinite(dX)):
+        raise ValueError("dX is not finite")
+    return torch.cat((dX.t(),Q@dV),dim=1)
+#    return torch.cat((tmp @ torch.linalg.inv(U.t())),dim=1)
 class QR(torch.autograd.Function):
     @staticmethod
-    def forward(self,A):
+    def forward(self, A):
         M,N = A.size()
-        if M>=N:
+        if M>=N: # try QR
             Q,R = QRforward_deep(A)
         else:
             Q,R = QRforward_wide(A)
+
+        diag = R.diag()
+        inds = torch.abs(diag) < epsilon
+        if len(inds) > 0: # rank deficient, revert to svd
+            U,S,Vh = SVDforward(A)
+            SVh = S.reshape((S.size(0),1)) * Vh
+            self.save_for_backward(U, S, Vh)
+            return U, SVh
+
+        if fix_sign:
+            #K = min(M,N)
+            #for idx in range(K):
+            #    if R[idx,idx] < 0.:
+            #        Q[:,idx] *= -1.
+            #        R[idx,:] *= -1.
+            sign = torch.sign(diag).reshape((1,-1))
+            Q = Q * sign
+            R = R * sign.t()
         self.save_for_backward(A,Q,R)
         return Q,R
+        
     @staticmethod
     def backward(self, dQ, dR):
+        M1,M2,M3 = self.saved_tensors
+        if len(M2.size())==1: # rank-deficient, do svd
+            U,S,Vh = M1,M2,M3
+            dU,dSVh = dQ,dR
+            dS = torch.diag(dSVh @ Vh.t())
+            dVh = S.reshape((S.size(0),1)) * dSVh
+            return SVDbackward(dU,dS,dVh,U,S,Vh)
         if not torch.all(torch.isfinite(dQ)):
             raise ValueError("dQ is not finite")
         if not torch.all(torch.isfinite(dR)):
             raise ValueError("dR is not finite")
-        A,Q,R = self.saved_tensors
+        A,Q,R = M1,M2,M3
         M,N = A.size()
         if M>=N:
             return QRbackward_deep(Q,R,dQ,dR)
@@ -234,13 +284,23 @@ def test_qr():
     M, N = 50, 20
     torch.manual_seed(2)
     input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
     assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
+
     M, N = 20, 50
     torch.manual_seed(2)
     input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
     assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
 
-    print("QR Test Pass!")
+    M, N = 20, 20
+    torch.manual_seed(2)
+    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    t0 = time.time()
+    assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
 if __name__=='__main__':
     test_svd()
     test_qr()
