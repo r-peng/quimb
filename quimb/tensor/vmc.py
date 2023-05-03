@@ -11,6 +11,7 @@ np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 DISCARD = 1e3
 CG_TOL = 1e-4
 MAXITER = 100
+#MAXITER = 2
 ##################################################################################################
 # VMC utils
 ##################################################################################################
@@ -588,12 +589,17 @@ class TNVMC: # stochastic sampling
             COMM.Bcast(self.terminate,root=0)
             print(f'\tsolver time={time.time()-t0},exit status={info}')
         else:
+            nit = 0
             while self.terminate[0]==0:
+                nit += 1
                 #self.terminate = A(buf)
                 A(self.deltas)
+            if RANK==1:
+                print('niter=',nit)
         return self.deltas
     def _transform_gradients_sr_iterative(self):
         self.deltas = self.solve_iterative(self.S,self.g,self.cond1,True)
+        #self.deltas = self.solve_iterative(self.S,self.g,self.cond1,False)
         if RANK==0:
             self.x = self.update(self.rate1)
             if self.tmpdir is not None:
@@ -613,6 +619,7 @@ class TNVMC: # stochastic sampling
                 return 0
             return Hx - self.E * Sx
         self.deltas = self.solve_iterative(hess,self.g,self.cond2,False)
+        #self.deltas = self.solve_iterative(hess,self.g,self.cond2,True)
         if self.tmpdir is not None:
             f = h5py.File(self.tmpdir+f'step{self.step}','w')
             f.create_dataset('g',data=self.g) 

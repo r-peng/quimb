@@ -11,8 +11,25 @@ SYMMETRY = 'u11' # sampler symmetry
 # set tensor symmetry
 import sys
 this = sys.modules[__name__]
-def set_options(symmetry='u1',flat=True,ad=True):
-    from pyblock3.algebra.fermion_ops import vaccum,creation,H1
+# set backend
+import autoray as ar
+import torch
+#torch.autograd.set_detect_anomaly(True)
+torch.autograd.set_detect_anomaly(False)
+
+from ..torch_utils import SVD,QR
+ar.register_function('torch','linalg.svd',SVD.apply)
+ar.register_function('torch','linalg.qr',QR.apply)
+
+import pyblock3.algebra.ad
+pyblock3.algebra.ad.ENABLE_AUTORAY = True
+from pyblock3.algebra.ad import core
+core.ENABLE_FUSED_IMPLS = False
+from pyblock3.algebra.ad.fermion import SparseFermionTensor
+def set_options(symmetry='u1',flat=True,deterministic=False,**compress_opts):
+    this.deterministic = deterministic
+    this.compress_opts = compress_opts
+    from pyblock3.algebra.fermion_ops import vaccum,creation#,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     vac = vaccum(n=1,symmetry=symmetry,flat=flat)
@@ -23,30 +40,10 @@ def set_options(symmetry='u1',flat=True,ad=True):
                      'cre_a':cre_a,
                      'cre_b':cre_b,
                      'ann_a':cre_a.dagger,
-                     'ann_b':cre_b.dagger,
-                     'h1':H1(symmetry=symmetry,flat=flat)}
+                     'ann_b':cre_b.dagger},
+                     'h1':H1(symmetry=symmetry,flat=flat).transpose(0,2,1,3)}
     this.symmetry = symmetry
     this.flat = flat
-
-    if ad:
-        # set backend
-        import autoray as ar
-        import torch
-        like = torch.zeros(1)
-        ar.set_backend(like)
-        #torch.autograd.set_detect_anomaly(True)
-        torch.autograd.set_detect_anomaly(False)
-
-        from .torch_utils import SVD,QR
-        ar.register_function('torch','linalg.svd',SVD.apply)
-        ar.register_function('torch','linalg.qr',QR.apply)
-
-        import pyblock3.algebra.ad
-        pyblock3.algebra.ad.ENABLE_AUTORAY = True
-        from pyblock3.algebra.ad import core
-        core.ENABLE_FUSED_IMPLS = False
-        from pyblock3.algebra.ad.fermion import SparseFermionTensor
-        this.SparseFermionTensor = SparseFermionTensor
     return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
@@ -224,11 +221,29 @@ def get_product_state(Lx,Ly,spin_map):
 ####################################################################################
 from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
 class ContractionEngine(ContractionEngine_): 
+    def init_contraction(self,phys_dim=2):
+        self.deterministic = deterministic
+        if self.deterministic:
+            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+        self.compress_opts = compress_opts
+
+        self.data_map = data_map
     def _2backend(self,data,requires_grad):
         if self.backend=='numpy':
             return data.copy()
         else:
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
+    def intermediate_sign(self,config,ix1,ix2):
+        return (-1)**(sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2)
+    def _2numpy(self,data):
+        if self.backend=='torch':
+            try:
+                data = data.to_flat()
+            except AttributeError:
+                data = self._torch2numpy(data) 
+        return data
+    def tsr_grad(self,tsr,set_zero=True):
+        return tsr.get_grad(set_zero=set_zero) 
     def get_bra_tsr(self,fpeps,ci,i,j,append=''):
         inds = fpeps.site_ind(i,j)+append,
         tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
@@ -246,29 +261,34 @@ def compute_fpeps_parity(fs,start,stop):
     tids = [fs.get_tid_from_site(site) for site in range(start,stop)]
     tsrs = [fs.tensor_order[tid][0] for tid in tids] 
     return sum([tsr.parity for tsr in tsrs]) % 2
+def get_parity_cum(fpeps):
+    parity = []
+    fs = fpeps.fermion_space
+    for i in range(1,fpeps.Lx): # only need parity of row 1,...,Lx-1
+        start,stop = i*fpeps.Ly,(i+1)*fpeps.Ly
+        parity.append(compute_fpeps_parity(fs,start,stop))
+    return np.cumsum(np.array(parity[::-1]))
 from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
-    def __init__(self,psi,dmrg=False,**contract_opts):
-        self.contract_opts=contract_opts
+    def __init__(self,psi):
+        super().init_contraction()
         self.Lx,self.Ly = psi.Lx,psi.Ly
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
+        self.parity_cum = get_parity_cum(psi)
         self.constructors = self.get_constructors(psi)
         self.get_block_dict()
-        self.dmrg = dmrg
 
-        self.ix = None
         self.set_psi(psi) # current state stored in self.psi
-        self.parity_cum = self.get_parity_cum()
-        self.sign = dict()
         self.backend = 'numpy'
-    def update(self,x,fname=None,root=0):
-        psi = self.vec2psi(x,inplace=True)
-        self.set_psi(psi) 
-        if RANK==root:
-            if fname is not None: # save psi to disc
-                write_ftn_to_disc(psi,fname,provided_filename=True)
-        return psi
+    def config_sign(self,config):
+        parity = [None] * self.Lx
+        for i in range(self.Lx):
+            parity[i] = sum([pn_map[ci] for ci in config[i*self.Ly:(i+1)*self.Ly]]) % 2
+        parity = np.array(parity[::-1])
+        parity_cum = np.cumsum(parity[:-1])
+        parity_cum += self.parity_cum 
+        return (-1)**(np.dot(parity[1:],parity_cum) % 2)
     def get_constructors(self,fpeps):
         from .block_interface import Constructor
         constructors = [None] * (fpeps.Lx * fpeps.Ly)
@@ -288,191 +308,31 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def vec2tensor(self,x,ix):
         cons,dq = self.constructors[ix][0]
         return cons.vector_to_tensor(x,dq)
-    def get_parity_cum(self):
-        parity = []
-        fs = self.psi.fermion_space
-        for i in range(1,self.Lx): # only need parity of row 1,...,Lx-1
-            start,stop = i*self.Ly,(i+1)*self.Ly
-            parity.append(compute_fpeps_parity(fs,start,stop))
-        return np.cumsum(np.array(parity[::-1]))
-    def compute_config_parity(self,config):
-        parity = [None] * self.Lx
-        for i in range(self.Lx):
-            parity[i] = sum([pn_map[ci] for ci in config[i*self.Ly:(i+1)*self.Ly]]) % 2
-        parity = np.array(parity[::-1])
-        parity_cum = np.cumsum(parity[:-1])
-        parity_cum += self.parity_cum 
-        return np.dot(parity[1:],parity_cum) % 2
-    def compute_config_sign(self,config):
-        if config in self.sign:
-            return self.sign[config]
-        sign = (-1) ** self.compute_config_parity(config)
-        self.sign[config] = sign
-        return sign
+    def update(self,x,fname=None,root=0):
+        psi = self.vec2psi(x,inplace=True)
+        self.set_psi(psi) 
+        if RANK==root:
+            if fname is not None: # save psi to disc
+                write_ftn_to_disc(psi,fname,provided_filename=True)
+        return psi
 ####################################################################################
 # ham class 
 ####################################################################################
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def set_pepo_tsrs(self): 
-        vac = data_map[0]
-        occ = data_map[3]
-    
-        from pyblock3.algebra.fermion_encoding import get_state_map
-        from pyblock3.algebra.fermion import eye 
-        state_map = get_state_map(symmetry)
-        bond_info = dict()
-        for qlab,_,sh in state_map.values():
-            if qlab not in bond_info:
-                bond_info[qlab] = sh
-        I1 = eye(bond_info,flat=flat)
-        I2 = np.tensordot(I1,I1,axes=([],[]))
-        P0 = np.tensordot(vac,vac.dagger,axes=([],[]))
-        P1 = np.tensordot(occ,occ.dagger,axes=([],[]))
-    
-        ADD = np.tensordot(vac,np.tensordot(vac.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
-            + np.tensordot(occ,np.tensordot(occ.dagger,vac.dagger,axes=([],[])),axes=([],[])) \
-            + np.tensordot(occ,np.tensordot(vac.dagger,occ.dagger,axes=([],[])),axes=([],[]))
-        ADD.shape = (4,)*3
-        self.data_map.update({'I1':I1,'I2':I2,'P0':P0,'P1':P1,'ADD':ADD,'occ':occ,'vac':vac})
-    def get_data(self,coeff,key='h1'):
-        data = np.tensordot(self.data_map['P0'],self.data_map['I2'],axes=([],[])) \
-             + np.tensordot(self.data_map['P1'],self.data_map[key],axes=([],[])) * coeff
-        data.shape = (4,)*6
-        return data
-    def get_mpo(self,coeffs,L,key='h1'):
-        # add h1
-        tsrs = [] 
-        pixs = [None] * L
-        for ix,(ix1,ix2,coeff) in enumerate(coeffs):
-            data = self.get_data(coeff,key=key)
-            b1 = f'k{ix1}*' if pixs[ix1] is None else pixs[ix1]
-            k1 = rand_uuid()
-            pixs[ix1] = k1
-            b2 = f'k{ix2}*' if pixs[ix2] is None else pixs[ix2]
-            k2 = rand_uuid()
-            pixs[ix2] = k2
-            inds = f'v{ix}*',f'v{ix}',b1,k1,b2,k2
-            tags = f'L{ix}',f'L{ix+1}'
-            tsrs.append(FermionTensor(data=data,inds=inds,tags=tags))
-        mpo = FermionTensorNetwork(tsrs[::-1],virtual=True)
-        mpo.reindex_({pix:f'k{ix}' for ix,pix in enumerate(pixs)})
-        # add ADD
-        bixs = ['v0']+[rand_uuid() for ix in range(1,len(coeffs))]
-        for ix in range(1,len(coeffs)):
-            ix1,ix2,_ = coeffs[ix]
-            tags = f'L{ix1}',f'L{ix2}'
-            inds = bixs[ix]+'*',f'v{ix}*',bixs[ix-1]+'*'
-            mpo.add_tensor(FermionTensor(data=self.data_map['ADD'].copy(),inds=inds,tags=tags))
-            inds = bixs[ix-1],f'v{ix}',bixs[ix]
-            mpo.add_tensor(FermionTensor(data=self.data_map['ADD'].dagger,inds=inds,tags=tags))
-    
-        # compress
-        for ix in range(L-1):
-            mpo.contract_tags(f'L{ix}',which='any',inplace=True)
-            tid = mpo[f'L{ix}'].get_fermion_info()[0]
-            tsr = mpo._pop_tensor(tid,remove_from_fermion_space='end')
-
-            rix = f'k{ix}*',f'k{ix}'
-            if ix>0:
-                rix = rix+(bix,)
-            bix = rand_uuid()
-            tl,tr = tensor_split(tsr,left_inds=None,right_inds=rix,bond_ind=bix,method='svd',get='tensors')
-            tr.modify(tags=f'L{ix}')
-            tl.drop_tags(tags=f'L{ix}')
-            mpo.add_tensor(tr,virtual=True)
-            mpo.add_tensor(tl,virtual=True)
-        mpo[f'L{L-1}'].reindex_({bixs[-1]:'v',bixs[-1]+'*':'v*'})
-        return mpo
-    def get_comb(self,mpos):
-        # add mpo
-        pepo = FermionTensorNetwork([])
-        L = mpos[0].num_tensors
-        tag = f'L{L-1}'
-        for ix1,mpo in enumerate(mpos):
-            for ix2 in range(L):
-                mpo[f'L{ix2}'].reindex_({f'k{ix2}':f'mpo{ix1}_k{ix2}',f'k{ix2}*':f'mpo{ix1}_k{ix2}*'})
-            mpo[tag].reindex_({'v':f'v{ix1}','v*':f'v{ix1}*'})
-            mpo.add_tag(f'mpo{ix1}')
-            pepo.add_tensor_network(mpo,virtual=True,check_collisions=True)
-        # add ADD
-        nmpo = len(mpos)
-        bix = ['v0']+[rand_uuid() for ix in range(1,nmpo)]
-        for ix in range(1,nmpo):
-            tags = f'mpo{ix}',tag 
-            inds = bix[ix]+'*',f'v{ix}*',bix[ix-1]+'*'
-            pepo.add_tensor(FermionTensor(data=self.data_map['ADD'].copy(),inds=inds,tags=tags))
-            inds = bix[ix-1],f'v{ix}',bix[ix]
-            pepo.add_tensor(FermionTensor(data=self.data_map['ADD'].dagger,inds=inds,tags=tags))
-    
-        # compress
-        for ix in range(nmpo-1):
-            pepo.contract_tags((f'mpo{ix}',tag),which='all',inplace=True)
-            tid = pepo[f'mpo{ix}',tag].get_fermion_info()[0]
-            tsr = pepo._pop_tensor(tid,remove_from_fermion_space='end')
-
-            lix = bix[ix],bix[ix]+'*'
-            tl,tr = tensor_split(tsr,left_inds=lix,method='svd',get='tensors')
-            tl.modify(tags=(f'mpo{ix+1}',tag))
-            pepo.add_tensor(tr,virtual=True)
-            pepo.add_tensor(tl,virtual=True)
-        pepo.contract_tags((f'mpo{nmpo-1}',tag),which='all',inplace=True)
-        pepo[f'mpo{nmpo-1}',tag].reindex_({bix[-1]:'v',bix[-1]+'*':'v*'})
-        return pepo
-    def combine(self,top,bot):
-        Lx,Ly = bot.Lx,bot.Ly
-        for i in range(Lx):
-            for j in range(Ly): 
-                pix = top.site_ind(i,j)
-                top[i,j].reindex_({pix:pix+'_'})
-                bot[i,j].reindex_({pix+'*':pix+'_'})
-        top[Lx-1,Ly-1].reindex_({'v':'vt','v*':'vt*'})
-        bot[Lx-1,Ly-1].reindex_({'v':'vb','v*':'vb*'})
-    
-        pepo = bot
-        pepo.add_tensor_network(top,virtual=True)
-        tags = pepo.site_tag(Lx-1,Ly-1)
-        pepo.add_tensor(
-            FermionTensor(data=self.data_map['ADD'].copy(),inds=('v*','vt*','vb*'),tags=tags),virtual=True) 
-        pepo.add_tensor(
-            FermionTensor(data=self.data_map['ADD'].dagger,inds=('vb','vt','v'),tags=tags),virtual=True) 
-        for i in range(Lx):
-            for j in range(Ly): 
-                pepo.contract_tags(pepo.site_tag(i,j),inplace=True) 
-        return pepo 
-    def trace_virtual(self,pepo):
-        tags = pepo.site_tag(pepo.Lx-1,pepo.Ly-1)
-        pepo.add_tensor(FermionTensor(data=self.data_map['occ'].dagger,inds=('v*',),tags=tags),virtual=True)
-        pepo.add_tensor(FermionTensor(data=self.data_map['occ'].copy(),inds=('v',),tags=tags),virtual=True)
-        pepo.contract_tags(tags,inplace=True)
-        pepo.add_tag('BRA')
-        return pepo
+    def __init__(self,Lx,Ly,discard=None,grad_by_ad=True):
+        super().init_contraction()
+        self.Lx,self.Ly = Lx,Ly
+        self.discard = discard 
+        self.grad_by_ad = True if deterministic else grad_by_ad
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[self.key],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
-    def config_parity(self,config,ix1,ix2):
-        return sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2
-    def complete_plq(self,plq,norm):
-        return plq
-    def _2numpy(self,data):
-        if self.backend=='torch':
-            try:
-                data = data.to_flat()
-            except AttributeError:
-                data = self._torch2numpy(data) 
-        return data
-    def tsr_grad(self,tsr,set_zero=True):
-        return tsr.get_grad(set_zero=set_zero) 
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
-
-        data = data_map['h1']
-        data = np.transpose(data,axes=(0,2,1,3))
-        self.key = 'h1'
-        self.data_map = {self.key:data}
 
         self.pairs = []
         for i in range(self.Lx):
@@ -489,12 +349,6 @@ class Hubbard(Hamiltonian):
         dx = site2[0]-site1[0]
         dy = site2[1]-site1[1]
         return site1,(dx+1,dy+1)
-    def get_coeffs(self,L):
-        coeffs = []
-        for i in range(L):
-            if i+1 < L:
-                coeffs.append((i,i+1,-self.t))
-        return coeffs
     def pair_coeff(self,site1,site2):
         return -self.t
     def pair_valid(self,i1,i2):
@@ -521,6 +375,19 @@ class Hubbard(Hamiltonian):
 ####################################################################################
 from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ContractionEngine,ExchangeSampler_):
+    def __init__(self,Lx,Ly,seed=None,burn_in=0,thresh=1e-14):
+        super().init_contraction()
+        self.Lx,self.Ly = Lx,Ly
+        self.nsite = self.Lx * self.Ly
+
+        self.rng = np.random.default_rng(seed)
+        self.exact = False
+        self.dense = False
+        self.burn_in = burn_in 
+        self.amplitude_factory = None
+        self.alternate = False # True if autodiff else False
+        self.backend = 'numpy'
+        self.thresh = thresh
     def new_pair(self,i1,i2):
         if SYMMETRY=='u11':
             return self.new_pair_u11(i1,i2)
