@@ -754,7 +754,25 @@ class J1J2(Hamiltonian):
     def pair_valid(self,i1,i2):
         return True
     def compute_local_energy_eigen(self,config):
-        return 0.
+        e = 0.
+        # NN
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                ix1 = self.flatten(i,j)
+                if j+1<self.Ly:
+                    ix2 = self.flatten(i,j+1) 
+                    e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+                if i+1<self.Lx:
+                    ix2 = self.flatten(i+1,j) 
+                    e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+        # next NN
+        for i in range(self.Lx-1):
+            for j in range(self.Ly-1):
+                ix1,ix2 = self.flatten(i,j), self.flatten(i+1,j+1)
+                e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
+                ix1,ix2 = self.flatten(i,j+1), self.flatten(i+1,j)
+                e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
+        return e
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.25*(1-(-1)**(i1+i2)))]
 ####################################################################################
