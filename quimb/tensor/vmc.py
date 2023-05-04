@@ -1,6 +1,7 @@
 import time,scipy,functools,h5py
 import numpy as np
 import scipy.sparse.linalg as spla
+from .tfqmr import tfqmr
 
 from quimb.utils import progbar as Progbar
 from mpi4py import MPI
@@ -585,6 +586,8 @@ class TNVMC: # stochastic sampling
                 self.deltas,info = spla.minres(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
             else: 
                 self.deltas,info = spla.lgmres(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
+                #self.deltas,info = spla.gcrotmk(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER)
+                #self.deltas,info = tfqmr(LinOp,self.g,tol=CG_TOL,maxiter=MAXITER,show=True)
             self.terminate[0] = 1
             COMM.Bcast(self.terminate,root=0)
             print(f'\tsolver time={time.time()-t0},exit status={info}')

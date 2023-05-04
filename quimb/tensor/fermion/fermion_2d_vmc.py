@@ -29,7 +29,7 @@ from pyblock3.algebra.ad.fermion import SparseFermionTensor
 def set_options(symmetry='u1',flat=True,deterministic=False,**compress_opts):
     this.deterministic = deterministic
     this.compress_opts = compress_opts
-    from pyblock3.algebra.fermion_ops import vaccum,creation#,H1
+    from pyblock3.algebra.fermion_ops import vaccum,creation,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
     vac = vaccum(n=1,symmetry=symmetry,flat=flat)
@@ -40,8 +40,8 @@ def set_options(symmetry='u1',flat=True,deterministic=False,**compress_opts):
                      'cre_a':cre_a,
                      'cre_b':cre_b,
                      'ann_a':cre_a.dagger,
-                     'ann_b':cre_b.dagger},
-                     'h1':H1(symmetry=symmetry,flat=flat).transpose(0,2,1,3)}
+                     'ann_b':cre_b.dagger,
+                     'h1':H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))}
     this.symmetry = symmetry
     this.flat = flat
     return this.data_map
@@ -235,12 +235,13 @@ class ContractionEngine(ContractionEngine_):
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
     def intermediate_sign(self,config,ix1,ix2):
         return (-1)**(sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2)
-    def _2numpy(self,data):
-        if self.backend=='torch':
+    def _2numpy(self,data,backend=None):
+        backend = self.backend if backend is None else backend 
+        if backend=='torch':
             try:
                 data = data.to_flat()
             except AttributeError:
-                data = self._torch2numpy(data) 
+                data = self._torch2numpy(data,backend=backend) 
         return data
     def tsr_grad(self,tsr,set_zero=True):
         return tsr.get_grad(set_zero=set_zero) 
@@ -333,6 +334,7 @@ class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
+        self.key = 'h1'
 
         self.pairs = []
         for i in range(self.Lx):

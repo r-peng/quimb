@@ -83,14 +83,15 @@ class ContractionEngine:
         if self.backend=='torch':
             data = torch.tensor(data,requires_grad=requires_grad)
         return data
-    def _torch2numpy(self,data):
-        if self.backend=='torch':
+    def _torch2numpy(self,data,backend=None):
+        backend = self.backend if backend is None else backend
+        if backend=='torch':
             data = data.detach().numpy()
             if data.size==1:
                 data = data.reshape(-1)[0]
         return data
-    def _2numpy(self,data):
-        return self._torch2numpy(data)
+    def _2numpy(self,data,backend=None):
+        return self._torch2numpy(data,backend=backend)
     def tsr_grad(self,tsr,set_zero=True):
         grad = tsr.grad
         if set_zero:
@@ -357,28 +358,25 @@ class AmplitudeFactory(ContractionEngine):
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
-    def get_grad_from_plq(self,plq,sign,cx,backend='numpy'):
+    def get_grad_from_plq(self,plq,cx,backend='numpy'):
         self.dmrg = False
         if self.dmrg:
             fn = self.get_grad_from_plq_dmrg
         else:
             fn = self.get_grad_from_plq_full
-        return fn(plq,sign,cx,backend=backend)
-    def get_grad_from_plq_full(self,plq,sign,cx,backend='numpy'):
+        return fn(plq,cx,backend=backend)
+    def get_grad_from_plq_full(self,plq,cx,backend='numpy'):
         # gradient
         vx = dict()
         for ((i0,j0),(x_bsz,y_bsz)),tn in plq.items():
-            cij = cx.get((i0,j0),1.)
             for i in range(i0,i0+x_bsz):
                 for j in range(j0,j0+y_bsz):
                     if (i,j) in vx:
                         continue
-                    vij = self.site_grad(tn.copy(),i,j) / cij 
-                    if backend=='torch':
-                        vij = vij.detach().numpy()
-                    vx[i,j] = vij
-        return self.dict2vec(vx) * sign
-    def get_grad_from_plq_dmrg(self,plq,sign,cx,backend='numpy'):
+                    cij = self._2numpy(cx[i0,j0],backend=backend)
+                    vx[i,j] = self._2numpy(self.site_grad(tn.copy(),i,j)/cij,backend=backend)
+        return self.dict2vec(vx) 
+    def get_grad_from_plq_dmrg(self,plq,cx,backend='numpy'):
         i,j = self.flat2site(self.ix)
         _,(x_bsz,y_bsz) = list(plq.keys())[0]
         # all plqs the site could be in 
@@ -407,33 +405,29 @@ class AmplitudeFactory(ContractionEngine):
 # ham class 
 ####################################################################################
 class Hamiltonian(ContractionEngine):
-    def __init__(self,Lx,Ly,discard=None,grad_by_ad=True):
+    def __init__(self,Lx,Ly,discard=None,grad_by_ad=False):
         super().init_contraction()
         self.Lx,self.Ly = Lx,Ly
         self.discard = discard 
         self.grad_by_ad = True if deterministic else grad_by_ad
-    def pair_energy_from_plq(self,tn,config,site1,site2,sign_fn):
+    def pair_tensor(self,bixs,kixs,tags=None):
+        data = self._2backend(self.data_map[self.key],False)
+        inds = bixs[0],kixs[0],bixs[1],kixs[1]
+        return Tensor(data=data,inds=inds,tags=tags) 
+    def pair_energy_from_plq(self,tn,config,site1,site2):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
             return 0.
-        eij = 0.
-        coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
-        for (i1_new,i2_new,coeff) in self.pair_terms(i1,i2):
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
-            sign_new = sign_fn(config_new)
-
-            tn_ = tn.copy()
-            for i_new,site in zip((i1_new,i2_new),(site1,site2)): 
-                tn_[tn_.site_tag(*site),'BRA'].modify(data=self._2backend(self.data_map[i_new],False))
-            try:
-                eij += coeff * sign_new * tn_.contract() 
-            except (ValueError,IndexError):
-                continue
-        return eij * coeff_comm
+        kixs = [tn.site_ind(*site) for site in [site1,site2]]
+        bixs = [kix+'*' for kix in kixs]
+        for site,kix,bix in zip([site1,site2],kixs,bixs):
+            tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
+        tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
+        try:
+            return self.pair_coeff(site1,site2) * tn.contract() 
+        except (ValueError,IndexError):
+            return 0.
     def update_plq_from_3row(self,plq,tn,i,x_bsz,y_bsz,peps):
         jmax = peps.Ly - y_bsz
         try:
@@ -476,11 +470,10 @@ class Hamiltonian(ContractionEngine):
             except AttributeError:
                 continue
         return plq
-    def pair_energies_from_plq(self,config,peps,cache_bot,cache_top,sign_fn):
+    def pair_energies_from_plq(self,config,peps,cache_bot,cache_top):
         x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
         self.get_all_bot_envs(peps,config,cache_bot,imax=self.Lx-1-x_bsz_min)
         self.get_all_top_envs(peps,config,cache_top,imin=x_bsz_min)
-        sign = sign_fn(config) 
 
         plq = dict()
         for x_bsz,y_bsz in self.plq_sz:
@@ -492,17 +485,17 @@ class Hamiltonian(ContractionEngine):
 
             tn = plq.get(key,None) 
             if tn is not None:
-                ex[site1,site2] = self.pair_energy_from_plq(tn.copy(),config,site1,site2,sign_fn) * sign
+                ex[site1,site2] = self.pair_energy_from_plq(tn.copy(),config,site1,site2) 
 
                 if site1 in cx:
                     cij = cx[site1]
                 elif site2 in cx:
                     cij = cx[site2]
                 else:
-                    cij = tn.copy().contract() * sign
+                    cij = tn.copy().contract()
                 cx[site1] = cij 
                 cx[site2] = cij 
-        return ex,cx,sign,plq
+        return ex,cx,plq
     def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
@@ -553,7 +546,6 @@ class Hamiltonian(ContractionEngine):
             ex[site1,site2] = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn) * sign
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        sign_fn = amplitude_factory.config_sign
         if (compute_v and self.grad_by_ad) or compute_Hv:
             # torch only used here
             self.backend = 'torch'
@@ -570,10 +562,12 @@ class Hamiltonian(ContractionEngine):
             cache_top = amplitude_factory.cache_top
 
         if self.deterministic:
+            sign_fn = amplitude_factory.config_sign
             ex_dict,cx,sign = self.pair_energies_deterministic(config,peps,cache_bot,cache_top,sign_fn)
             err = 0.
         else:
-            ex_dict,cx_dict,sign,plq = self.pair_energies_from_plq(config,peps,cache_bot,cache_top,sign_fn) 
+            ex_dict,cx_dict,plq = self.pair_energies_from_plq(config,peps,cache_bot,cache_top) 
+            sign = 1.
             cx,err = self.contraction_error(cx_dict)
             if self.discard is not None: # discard sample if contraction error too large
                 if err > self.discard: 
@@ -601,7 +595,7 @@ class Hamiltonian(ContractionEngine):
             vx = {site:self._2numpy(vij) for site,vij in vx.items()}
             vx = amplitude_factory.dict2vec(vx)  
         else:
-            vx = amplitude_factory.get_grad_from_plq(plq,sign,cx_dict,backend=self.backend) 
+            vx = amplitude_factory.get_grad_from_plq(plq,cx_dict,backend=self.backend) * sign 
         if not compute_Hv:
             self.update_cache(amplitude_factory,cache_top,cache_bot)
             return cx,ex,vx,None,err
@@ -631,7 +625,6 @@ class Hamiltonian(ContractionEngine):
     def update_cache(self,amplitude_factory,cache_top,cache_bot):
         if self.backend=='numpy':
             return
-        ar.set_backend(np.zeros(1))
         for key in cache_top:
             tn = cache_top[key]
             for tid in tn.tensor_map:
@@ -644,6 +637,7 @@ class Hamiltonian(ContractionEngine):
                 tsr = tn.tensor_map[tid]
                 tsr.modify(data=self._2numpy(tsr.data))
             amplitude_factory.cache_bot[key] = tn
+        ar.set_backend(np.zeros(1))
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5
@@ -672,6 +666,10 @@ class Heisenberg(Hamiltonian):
         except TypeError:
             self.Jx,self.Jy,self.Jz = J,J,J
         self.h = h
+
+        data = get_gate2((self.Jx,self.Jy,0.),to_bk=False)
+        self.key = 'Jxy'
+        self.data_map[self.key] = data
 
         self.pairs = []
         for i in range(self.Lx):
@@ -713,6 +711,10 @@ class J1J2(Hamiltonian):
         super().__init__(Lx,Ly,**kwargs)
         self.J1 = J1
         self.J2 = J2
+
+        data = get_gate2((1.,1.,0.),to_bk=False)
+        self.key = 'Jxy'
+        self.data_map[self.key] = data
 
         # NN
         self.pairs = []
