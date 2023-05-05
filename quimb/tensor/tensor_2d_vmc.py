@@ -1028,14 +1028,13 @@ class ExchangeSampler(ContractionEngine):
                 continue 
             imin = min(self.rix1+1,site1[0]) 
             imax = max(self.rix2-1,site2[0]) 
-            top = None if imax==peps.Lx-1 else cache_top[config[(imax+1)*peps.Ly:]]
-            bot = None if imin==0 else cache_bot[config[:imin*peps.Ly]]
+            top = None if imax==peps.Lx-1 else cache_top[self.config[(imax+1)*peps.Ly:]]
+            bot = None if imin==0 else cache_bot[self.config[:imin*peps.Ly]]
             i1_new,i2_new = self.new_pair(i1,i2)
             config_new = list(self.config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
             config_new = tuple(config_new)
-            sign_new = self.config_sign(config_new)
 
             bot_term = None if bot is None else bot.copy()
             for i in range(imin,self.rix1+1):
@@ -1054,7 +1053,7 @@ class ExchangeSampler(ContractionEngine):
             tn = bot_term.copy()
             tn.add_tensor_network(top_term.copy(),virtual=True)
             try:
-                py = tn.contract() 
+                py = tn.contract() ** 2 
             except (ValueError,IndexError):
                 py = 0.
             try:
