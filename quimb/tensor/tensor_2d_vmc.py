@@ -62,7 +62,8 @@ def get_product_state(Lx,Ly,config):
 ####################################################################################
 from .tensor_core import Tensor,TensorNetwork,rand_uuid,tensor_split
 class ContractionEngine:
-    def init_contraction(self,phys_dim=2):
+    def init_contraction(self,Lx,Ly,phys_dim=2):
+        self.Lx,self.Ly = Lx,Ly
         self.deterministic = deterministic
         if self.deterministic:
             self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
@@ -232,8 +233,7 @@ class ContractionEngine:
         return g.data 
 class AmplitudeFactory(ContractionEngine):
     def __init__(self,psi):
-        super().init_contraction()
-        self.Lx,self.Ly = psi.Lx,psi.Ly
+        super().init_contraction(psi.Lx,psi.Ly)
         psi.add_tag('KET')
         self.constructors = self.get_constructors(psi)
         self.get_block_dict()
@@ -406,8 +406,7 @@ class AmplitudeFactory(ContractionEngine):
 ####################################################################################
 class Hamiltonian(ContractionEngine):
     def __init__(self,Lx,Ly,discard=None,grad_by_ad=False):
-        super().init_contraction()
-        self.Lx,self.Ly = Lx,Ly
+        super().init_contraction(Lx,Ly)
         self.discard = discard 
         self.grad_by_ad = True if deterministic else grad_by_ad
     def pair_tensor(self,bixs,kixs,tags=None):
@@ -561,6 +560,7 @@ class Hamiltonian(ContractionEngine):
             cache_bot = amplitude_factory.cache_bot
             cache_top = amplitude_factory.cache_top
 
+        t0 = time.time()
         if self.deterministic:
             sign_fn = amplitude_factory.config_sign
             ex_dict,cx,sign = self.pair_energies_deterministic(config,peps,cache_bot,cache_top,sign_fn)
@@ -573,6 +573,8 @@ class Hamiltonian(ContractionEngine):
                 if err > self.discard: 
                     self.update_cache(amplitude_factory,cache_top,cache_bot)
                     return (None,) * 5
+        #print(RANK,time.time()-t0)
+        #exit()
         # energy
         ex_num = sum(ex_dict.values())
         if self.deterministic:
@@ -774,8 +776,7 @@ class J1J2(Hamiltonian):
 ####################################################################################
 class ExchangeSampler(ContractionEngine):
     def __init__(self,Lx,Ly,seed=None,burn_in=0,thresh=1e-14):
-        super().init_contraction()
-        self.Lx,self.Ly = Lx,Ly
+        super().init_contraction(Lx,Ly)
         self.nsite = self.Lx * self.Ly
 
         self.rng = np.random.default_rng(seed)
@@ -872,7 +873,7 @@ class ExchangeSampler(ContractionEngine):
             try:
                 py = tn_pair.contract()**2
             except (ValueError,IndexError):
-                py = 0.
+                continue
             #self.update_plq_test(ix1,ix2,i1_new,i2_new,py)
             try:
                 acceptance = py / self.px

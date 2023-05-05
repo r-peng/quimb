@@ -221,7 +221,8 @@ def get_product_state(Lx,Ly,spin_map):
 ####################################################################################
 from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
 class ContractionEngine(ContractionEngine_): 
-    def init_contraction(self,phys_dim=2):
+    def init_contraction(self,Lx,Ly):
+        self.Lx,self.Ly = Lx,Ly
         self.deterministic = deterministic
         if self.deterministic:
             self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
@@ -272,8 +273,7 @@ def get_parity_cum(fpeps):
 from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def __init__(self,psi):
-        super().init_contraction()
-        self.Lx,self.Ly = psi.Lx,psi.Ly
+        super().init_contraction(psi.Lx,psi.Ly)
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
         self.parity_cum = get_parity_cum(psi)
@@ -322,8 +322,7 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
     def __init__(self,Lx,Ly,discard=None,grad_by_ad=True):
-        super().init_contraction()
-        self.Lx,self.Ly = Lx,Ly
+        super().init_contraction(Lx,Ly)
         self.discard = discard 
         self.grad_by_ad = True if deterministic else grad_by_ad
     def pair_tensor(self,bixs,kixs,tags=None):
@@ -378,8 +377,7 @@ class Hubbard(Hamiltonian):
 from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ContractionEngine,ExchangeSampler_):
     def __init__(self,Lx,Ly,seed=None,burn_in=0,thresh=1e-14):
-        super().init_contraction()
-        self.Lx,self.Ly = Lx,Ly
+        super().init_contraction(Lx,Ly)
         self.nsite = self.Lx * self.Ly
 
         self.rng = np.random.default_rng(seed)
