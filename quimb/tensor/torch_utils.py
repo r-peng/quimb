@@ -188,18 +188,6 @@ def copyltu(A):
     tril0 = A.tril(diagonal=0)
     tril1 = A.tril(diagonal=-1)
     return tril0 + tril1.t()
-def QRforward_deep(A):
-    if not torch.all(torch.isfinite(A)):
-        raise ValueError("input matrix to custom QR is not finite")
-    try:
-        Q, R = torch.linalg.qr(A,mode='reduced')
-    except:
-        if be_verbose:
-            print('trouble in torch gesdd routine, falling back to scipy')
-        Q, R = scipy.linalg.svd(A.detach().numpy(), mode='economic')
-        Q = torch.from_numpy(Q)
-        R = torch.from_numpy(R)
-    return Q,R
 def QRbackward_deep(Q,R,dQ,dR):
     M = R@dR.t() - dQ.t()@Q
     M = copyltu(M)        
@@ -208,14 +196,6 @@ def QRbackward_deep(Q,R,dQ,dR):
     if not torch.all(torch.isfinite(dA)):
         raise ValueError("dA is not finite")
     return dA.t() 
-#    return tmp @ torch.linalg.inv(R.t())
-def QRforward_wide(A):
-    M,N = A.size()
-    X,Y = A.split((M,N-M),dim=1)
-    Q,U = QRforward_deep(X)
-    V = Q.t()@Y
-    R = torch.cat((U,V),dim=1)
-    return Q,R
 def QRbackward_wide(A,Q,R,dQ,dR):
     M,N = A.size()
     X,Y = A.split((M,N-M),dim=1)
@@ -230,15 +210,19 @@ def QRbackward_wide(A,Q,R,dQ,dR):
     if not torch.all(torch.isfinite(dX)):
         raise ValueError("dX is not finite")
     return torch.cat((dX.t(),Q@dV),dim=1)
-#    return torch.cat((tmp @ torch.linalg.inv(U.t())),dim=1)
 class QR(torch.autograd.Function):
     @staticmethod
     def forward(self, A):
-        M,N = A.size()
-        if M>=N: # try QR
-            Q,R = QRforward_deep(A)
-        else:
-            Q,R = QRforward_wide(A)
+        if not torch.all(torch.isfinite(A)):
+            raise ValueError("input matrix to custom QR is not finite")
+        try:
+            Q, R = torch.linalg.qr(A,mode='reduced')
+        except:
+            if be_verbose:
+                print('trouble in torch gesdd routine, falling back to scipy')
+            Q, R = scipy.linalg.svd(A.detach().numpy(), mode='economic')
+            Q = torch.from_numpy(Q)
+            R = torch.from_numpy(R)
 
         diag = R.diag()
         inds = torch.abs(diag) < epsilon
@@ -249,11 +233,6 @@ class QR(torch.autograd.Function):
             return U, SVh
 
         if fix_sign:
-            #K = min(M,N)
-            #for idx in range(K):
-            #    if R[idx,idx] < 0.:
-            #        Q[:,idx] *= -1.
-            #        R[idx,:] *= -1.
             sign = torch.sign(diag).reshape((1,-1))
             Q = Q * sign
             R = R * sign.t()

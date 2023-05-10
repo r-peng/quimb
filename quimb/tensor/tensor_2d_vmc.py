@@ -240,6 +240,7 @@ class AmplitudeFactory(ContractionEngine):
 
         self.set_psi(psi) # current state stored in self.psi
         self.backend = 'numpy'
+        self.small_mem = True
     def config_sign(self,config=None):
         return 1.
     def get_constructors(self,peps):
@@ -471,12 +472,19 @@ class Hamiltonian(ContractionEngine):
         return plq
     def pair_energies_from_plq(self,config,peps,cache_bot,cache_top):
         x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        self.get_all_bot_envs(peps,config,cache_bot,imax=self.Lx-1-x_bsz_min)
-        self.get_all_top_envs(peps,config,cache_top,imin=x_bsz_min)
+        t0 = time.time()
+        self.get_all_benvs(peps,config,cache_bot,cache_top)
+        #self.get_all_bot_envs(peps,config,cache_bot,imax=self.Lx-1-x_bsz_min)
+        #self.get_all_top_envs(peps,config,cache_top,imin=x_bsz_min)
+        t1 = time.time() - t0
 
+        t0 = time.time()
         plq = dict()
         for x_bsz,y_bsz in self.plq_sz:
             plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
+        t2 = time.time() - t0
+
+        t0 = time.time()
         ex = dict()
         cx = dict()
         for (site1,site2) in self.pairs:
@@ -494,6 +502,8 @@ class Hamiltonian(ContractionEngine):
                     cij = tn.copy().contract()
                 cx[site1] = cij 
                 cx[site2] = cij 
+        #print(RANK,t1,t2,time.time()-t0)
+        #exit()
         return ex,cx,plq
     def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
@@ -560,7 +570,6 @@ class Hamiltonian(ContractionEngine):
             cache_bot = amplitude_factory.cache_bot
             cache_top = amplitude_factory.cache_top
 
-        t0 = time.time()
         if self.deterministic:
             sign_fn = amplitude_factory.config_sign
             ex_dict,cx,sign = self.pair_energies_deterministic(config,peps,cache_bot,cache_top,sign_fn)
@@ -573,8 +582,7 @@ class Hamiltonian(ContractionEngine):
                 if err > self.discard: 
                     self.update_cache(amplitude_factory,cache_top,cache_bot)
                     return (None,) * 5
-        #print(RANK,time.time()-t0)
-        #exit()
+
         # energy
         ex_num = sum(ex_dict.values())
         if self.deterministic:
@@ -603,6 +611,7 @@ class Hamiltonian(ContractionEngine):
             return cx,ex,vx,None,err
 
         # back propagates energy gradient
+        t0 = time.time()
         ex_num.backward()
         Hvx = dict()
         for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
@@ -632,12 +641,14 @@ class Hamiltonian(ContractionEngine):
             for tid in tn.tensor_map:
                 tsr = tn.tensor_map[tid]
                 tsr.modify(data=self._2numpy(tsr.data))
+            print('top',key)
             amplitude_factory.cache_top[key] = tn
         for key in cache_bot:
             tn = cache_bot[key]
             for tid in tn.tensor_map:
                 tsr = tn.tensor_map[tid]
                 tsr.modify(data=self._2numpy(tsr.data))
+            print('bot',key)
             amplitude_factory.cache_bot[key] = tn
         ar.set_backend(np.zeros(1))
 def get_gate1():
@@ -936,6 +947,9 @@ class ExchangeSampler(ContractionEngine):
         self.config = tuple(self.config)
         return saved_rows
     def sweep_row_forward(self):
+        if self.amplitude_factory.small_mem:
+            # remove old bot envs
+            self.amplitude_factory.cache_bot = dict()
         peps = self.amplitude_factory.psi
         cache_bot = self.amplitude_factory.cache_bot
         cache_top = self.amplitude_factory.cache_top
@@ -961,6 +975,9 @@ class ExchangeSampler(ContractionEngine):
             env_bot = self.get_bot_env(i,row1_new,env_bot,tuple(self.config),cache_bot)
             row1 = row2_new
     def sweep_row_backward(self):
+        if self.amplitude_factory.small_mem:
+            # remove old top envs
+            self.amplitude_factory.cache_top = dict()
         peps = self.amplitude_factory.psi
         cache_bot = self.amplitude_factory.cache_bot
         cache_top = self.amplitude_factory.cache_top
