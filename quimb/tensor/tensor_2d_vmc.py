@@ -592,7 +592,8 @@ class Hamiltonian(ContractionEngine):
         eu = self.compute_local_energy_eigen(config)
         ex = self._2numpy(ex) + eu
         if not compute_v:
-            self.update_cache(amplitude_factory,cache_top,cache_bot)
+            if self.backend=='torch':
+                ar.set_backend(np.zeros(1))
             return cx,ex,None,None,err 
 
         # gradient
@@ -607,7 +608,8 @@ class Hamiltonian(ContractionEngine):
         else:
             vx = amplitude_factory.get_grad_from_plq(plq,cx_dict,backend=self.backend) * sign 
         if not compute_Hv:
-            self.update_cache(amplitude_factory,cache_top,cache_bot)
+            if self.backend=='torch':
+                ar.set_backend(np.zeros(1))
             return cx,ex,vx,None,err
 
         # back propagates energy gradient
@@ -619,7 +621,8 @@ class Hamiltonian(ContractionEngine):
         Hvx = {site:self._2numpy(Hvij) for site,Hvij in Hvx.items()}
         Hvx = amplitude_factory.dict2vec(Hvx) 
         Hvx += eu * vx 
-        self.update_cache(amplitude_factory,cache_top,cache_bot)
+        if self.backend=='torch':
+            ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err
     def contraction_error(self,cx):
         nsite = self.Lx * self.Ly
@@ -633,24 +636,6 @@ class Hamiltonian(ContractionEngine):
             mean = sum(cij for cij in cx.values()) / nsite
             err = sqmean - mean**2
             return mean,np.fabs(err)
-    def update_cache(self,amplitude_factory,cache_top,cache_bot):
-        if self.backend=='numpy':
-            return
-        for key in cache_top:
-            tn = cache_top[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            print('top',key)
-            amplitude_factory.cache_top[key] = tn
-        for key in cache_bot:
-            tn = cache_bot[key]
-            for tid in tn.tensor_map:
-                tsr = tn.tensor_map[tid]
-                tsr.modify(data=self._2numpy(tsr.data))
-            print('bot',key)
-            amplitude_factory.cache_bot[key] = tn
-        ar.set_backend(np.zeros(1))
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5
@@ -795,7 +780,6 @@ class ExchangeSampler(ContractionEngine):
         self.dense = False
         self.burn_in = burn_in 
         self.amplitude_factory = None
-        self.alternate = False # True if autodiff else False
         self.backend = 'numpy'
         self.thresh = thresh
     def initialize(self,config):
@@ -820,14 +804,11 @@ class ExchangeSampler(ContractionEngine):
         if batchsize==0:
             return None,None
         t0 = time.time()
-        _alternate = self.alternate 
-        self.alternate = True # always do alternate sweep in burn in 
         for n in range(batchsize):
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
         #print(f'RANK={RANK},burn in time={time.time()-t0}')
-        self.alternate = _alternate
         return self.config,self.omega
     def new_pair(self,i1,i2):
         return i2,i1
@@ -1011,11 +992,7 @@ class ExchangeSampler(ContractionEngine):
             self._sample()
         # setup to compute all opposite env for gradient
         self.amplitude_factory.update_scheme(-self.sweep_row_dir) 
-
-        if self.alternate: # for burn in 
-            self.sweep_row_dir *= -1
-        else: # actual sampling 
-            self.sweep_row_dir = self.rng.choice([-1,1]) 
+        self.sweep_row_dir *= -1
         return self.config,self.px
     def _sample(self):
         if self.sweep_row_dir == 1:
