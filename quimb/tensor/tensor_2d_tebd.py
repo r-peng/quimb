@@ -79,6 +79,18 @@ class LocalHam2D(LocalHamGen):
                     H2[coo_a, coo_b] = default_H2
 
         super().__init__(H2=H2, H1=H1)
+    def _expm_cached(self,x,y):
+        cache = self._op_cache["expm"]
+        key = (id(x), y)
+        if key not in cache:
+            x = x.reshape((4,4))
+    
+            el, ev = do("linalg.eigh", x)
+            x  = ev @ do("diag", do("exp", el * y)) @ dag(ev)
+    
+            x = x.reshape((2,)*4)
+            cache[key] = x
+        return cache[key]
 
     @property
     def nsites(self):
