@@ -282,6 +282,7 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 
         self.set_psi(psi) # current state stored in self.psi
         self.backend = 'numpy'
+        self.small_mem = True
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
