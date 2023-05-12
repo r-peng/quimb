@@ -1,4 +1,4 @@
-import time,itertools
+import time,itertools,psutil
 import numpy as np
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -485,12 +485,13 @@ class AmplitudeFactory(ContractionEngine):
 # ham class 
 ####################################################################################
 class Hamiltonian(ContractionEngine):
-    def __init__(self,Lx,Ly,discard=None,grad_by_ad=False,tmpdir=None):
+    def __init__(self,Lx,Ly,discard=None,grad_by_ad=False,tmpdir=None,log_every=1):
         super().init_contraction(Lx,Ly)
         self.discard = discard 
         self.grad_by_ad = True if deterministic else grad_by_ad
         self.tmpdir = tmpdir
         if self.tmpdir is not None:
+            self.log_every = log_every
             self.t0 = time.time()
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[self.key],False)
@@ -629,9 +630,11 @@ class Hamiltonian(ContractionEngine):
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         if self.tmpdir is not None:
-             mem = psutil.virtual_memory()
-             with open(tmpdir+f'RANK{RANK}.log','a') as f:
-                 f.write(f'time={time.time()-self.t0},percent={mem.percent}\n')
+             if RANK % self.log_every==0:
+                 mem = psutil.virtual_memory()
+                 with open(self.tmpdir+f'RANK{RANK}.log','a') as f:
+                     #f.write(f'time={time.time()-self.t0},percent={mem.percent},cache_bot={len(amplitude_factory.cache_bot)},cache_top={len(amplitude_factory.cache_top)}\n')
+                     f.write(f'time={time.time()-self.t0},percent={mem.percent}\n')
         if (compute_v and self.grad_by_ad) or compute_Hv:
             # torch only used here
             self.backend = 'torch'
@@ -905,12 +908,16 @@ class ExchangeSampler(ContractionEngine):
     def new_pair(self,i1,i2):
         return i2,i1
     def get_pairs(self,i,j):
-        bonds_map = {'l':((i,j),(i+1,j)),
-                     'd':((i,j),(i,j+1)),
-                     'r':((i,j+1),(i+1,j+1)),
-                     'u':((i+1,j),(i+1,j+1)),
-                     'x':((i,j),(i+1,j+1)),
-                     'y':((i,j+1),(i+1,j))}
+        bonds_map = {'l':((i,j),((i+1)%self.Lx,j)),
+                     'd':((i,j),(i,(j+1)%self.Ly)),
+                     'r':((i,(j+1)%self.Ly),((i+1)%self.Lx,(j+1)%self.Ly)),
+                     'u':(((i+1)%self.Lx,j),((i+1)%self.Lx,(j+1)%self.Ly)),
+                     'x':((i,j),((i+1)%self.Lx,(j+1)%self.Ly)),
+                     'y':((i,(j+1)%self.Ly),((i+1)%self.Lx,j))}
+        for key in bonds_map:
+            site1,site2 = bonds_map[key]
+            ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+            bonds_map[key] = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
         bonds = []
         order = 'ldru' 
         for key in order:
@@ -1092,19 +1099,27 @@ class ExchangeSampler(ContractionEngine):
         else:
             self.sweep_row_backward()
     def _sample_deterministic(self):
-        if self.sweep_row_dir == 1:
-            sweep_row = range(0,self.Lx-1)
-        else:
-            sweep_row = range(self.Lx-2,-1,-1)
-        if self.sweep_col_dir == 1:
-            sweep_col = range(0,self.Ly-1)
-        else:
-            sweep_col = range(self.Ly-2,-1,-1)
+        imax = self.Lx-1 if self.pbc else self.Lx-2
+        jmax = self.Ly-1 if self.pbc else self.Ly-2
+        sweep_row = range(0,imax+1) if self.sweep_row_dir==1 else range(imax,-1,-1)
+        sweep_col = range(0,jmax+1) if self.sweep_col_dir==1 else range(jmax,-1,-1)
+
         peps = self.amplitude_factory.psi
         cache_bot = self.amplitude_factory.cache_bot
         cache_top = self.amplitude_factory.cache_top
         for i,j in itertools.product(sweep_row,sweep_col):
             self.update_pair_deterministic(i,j,peps,cache_bot,cache_top)
+
+        cache_bot_new = dict()
+        for i in range(self.rix1+1):
+            key = self.config[:(i+1)*self.Ly]
+            cache_bot_new[key] = cache_bot[key]
+        cache_top_new = dict()
+        for i in range(self.rix2,self.Lx):
+            key = self.config[i*self.Ly:]
+            cache_top_new[key] = cache_top[key]
+        self.amplitude_factory.cache_bot = cache_bot_new
+        self.amplitude_factory.cache_top = cache_top_new
     def update_pair_deterministic(self,i,j,peps,cache_bot,cache_top):
         pairs = self.get_pairs(i,j)
         for site1,site2 in pairs:
