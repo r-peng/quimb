@@ -741,18 +741,18 @@ class Hamiltonian(ContractionEngine):
             for j in range(self.Ly):
                 if i+1<self.Lx and j+1<self.Ly:
                     where = (i,j),(i+1,j+1)
-                    self.pairs.append(where)
+                    ls.append(where)
                     where = (i,j+1),(i+1,j)
-                    self.pairs.append(where)
+                    ls.append(where)
                 else:
                     if self.pbc:
                         ix1 = self.flatten(i,j),self.flatten((i+1)%self.Lx,(j+1)%self.Ly)
                         where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                        self.pairs.append(where)
+                        ls.append(where)
                         
                         ix1 = self.flatten(i,(j+1)%self.Ly),self.flatten((i+1)%self.Lx,j)
                         where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                        self.pairs.append(where)
+                        ls.append(where)
         return ls
 def get_gate1():
     return np.array([[1,0],

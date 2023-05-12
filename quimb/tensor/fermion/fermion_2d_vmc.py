@@ -26,8 +26,9 @@ pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
 from pyblock3.algebra.ad.fermion import SparseFermionTensor
-def set_options(symmetry='u1',flat=True,deterministic=False,**compress_opts):
-    this.deterministic = deterministic
+def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
+    this.pbc = pbc
+    this.deterministic = True if pbc else deterministic
     this.compress_opts = compress_opts
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
@@ -223,6 +224,7 @@ from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
 class ContractionEngine(ContractionEngine_): 
     def init_contraction(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly
+        self.pbc = pbc
         self.deterministic = deterministic
         if self.deterministic:
             self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
@@ -322,10 +324,14 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 ####################################################################################
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def __init__(self,Lx,Ly,discard=None,grad_by_ad=True):
+    def __init__(self,Lx,Ly,discard=None,grad_by_ad=True,tmpdir=None,log_every=1):
         super().init_contraction(Lx,Ly)
         self.discard = discard 
         self.grad_by_ad = True if deterministic else grad_by_ad
+        self.tmpdir = tmpdir
+        if self.tmpdir is not None:
+            self.log_every = log_every
+            self.t0 = time.time()
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[self.key],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
