@@ -3,6 +3,8 @@ import numpy as np
 import scipy.sparse.linalg as spla
 from .tfqmr import tfqmr
 #from memory_profiler import profile
+from pympler.classtracker import ClassTracker
+from pympler import asizeof 
 
 from quimb.utils import progbar as Progbar
 from mpi4py import MPI
@@ -92,6 +94,23 @@ def blocking_analysis(weights, energies, neql, printQ=False):
 ##################################################################################################
 # VMC engine 
 ##################################################################################################
+def profile(vmc,ham,amp_fac,sampler):
+    if RANK==0:
+        return
+    for name,inst in zip(['tnvmc','ham','amp_fac','sampler'],[vmc,ham,amp_fac,sampler]):
+        tracker = ClassTracker()
+        tracker.track_object(inst,resolution_level=2)
+        tracker.create_snapshot()
+        tracker.stats.print_summary()
+    print('size top=',asizeof.asizeof(amp_fac.cache_top))
+    print('size bot=',asizeof.asizeof(amp_fac.cache_bot))
+    print('size blk_dict=',asizeof.asizeof(amp_fac.block_dict))
+    print('size psi=',asizeof.asizeof(amp_fac.psi))
+    print('size psi.tensor_map=',asizeof.asizeof(amp_fac.psi.tensor_map))
+    for tid in amp_fac.psi.tensor_map:
+        tsr = amp_fac.psi.tensor_map[tid]
+        print(f'tid={tid},size={asizeof.asizeof(tsr)},owners={asizeof.asizeof(tsr._owners)}')
+        print(tsr._owners)
 class TNVMC: # stochastic sampling
     def __init__(
         self,
@@ -158,6 +177,8 @@ class TNVMC: # stochastic sampling
         self.cond2 = None
         self.check = None 
         self.accept_ratio = None
+
+        profile(self,self.ham,self.amplitude_factory,self.sampler)
     def normalize(self,x):
         if self.init_norm is not None:
             norm = np.linalg.norm(x)
@@ -169,7 +190,9 @@ class TNVMC: # stochastic sampling
             self.step = step
             self.sample()
             self.extract_energy_gradient()
+            profile(self,self.ham,self.amplitude_factory,self.sampler)
             self.transform_gradients()
+            profile(self,self.ham,self.amplitude_factory,self.sampler)
             COMM.Bcast(self.x,root=0) 
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.amplitude_factory.update(self.x,fname=fname,root=0)
@@ -268,6 +291,7 @@ class TNVMC: # stochastic sampling
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
+            profile(self,self.ham,self.amplitude_factory,self.sampler)
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p

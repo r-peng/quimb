@@ -6,6 +6,7 @@ from itertools import product, cycle, starmap, combinations, count, chain
 from ..utils import pairwise
 from .tensor_2d_tebd import SimpleUpdate as SimpleUpdate_ 
 from .tensor_core import Tensor, contract_strategy
+
 def gen_bond_coos(psi):
     ls = []
     for i in range(psi.Lx):
@@ -26,13 +27,11 @@ def gen_long_range_path(ij_a, ij_b, Lx,Ly, sequence=None):
     ia, ja = ij_a
     ib, jb = ij_b
 
-    if ia==ib:
-        assert jb==ja+1 or (ja==0 and jb==Ly-1)
+    if ia==ib or ja==jb: # Heisenberg
         return ij_a,ij_b
-    elif ja==jb:
-        assert ib==ia+1 or (ia==0 and ib==Lx-1)
-        return ij_a,ij_b
-    
+    else: # J1-J2
+        site = random.choice([(ia,jb),(ib,ja)])
+        return ij_a,site,ij_b 
 def nearest_neighbors(coo, Lx, Ly):
     i,j = coo
     return ((i-1)%Lx,j),(i,(j-1)%Ly),(i,(j+1)%Ly),((i+1)%Lx,j) 
