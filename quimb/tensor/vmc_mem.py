@@ -95,22 +95,22 @@ def blocking_analysis(weights, energies, neql, printQ=False):
 # VMC engine 
 ##################################################################################################
 def profile(vmc,ham,amp_fac,sampler):
-    if RANK==0:
+    if RANK>0:
         return
-    for name,inst in zip(['tnvmc','ham','amp_fac','sampler'],[vmc,ham,amp_fac,sampler]):
-        tracker = ClassTracker()
-        tracker.track_object(inst,resolution_level=2)
-        tracker.create_snapshot()
-        tracker.stats.print_summary()
-    print('size top=',asizeof.asizeof(amp_fac.cache_top))
-    print('size bot=',asizeof.asizeof(amp_fac.cache_bot))
-    print('size blk_dict=',asizeof.asizeof(amp_fac.block_dict))
-    print('size psi=',asizeof.asizeof(amp_fac.psi))
-    print('size psi.tensor_map=',asizeof.asizeof(amp_fac.psi.tensor_map))
-    for tid in amp_fac.psi.tensor_map:
-        tsr = amp_fac.psi.tensor_map[tid]
-        print(f'tid={tid},size={asizeof.asizeof(tsr)},owners={asizeof.asizeof(tsr._owners)}')
-        print(tsr._owners)
+    #for name,inst in zip(['tnvmc','ham','amp_fac','sampler'],[vmc,ham,amp_fac,sampler]):
+    #    tracker = ClassTracker()
+    #    tracker.track_object(inst,resolution_level=2)
+    #    tracker.create_snapshot()
+    #    tracker.stats.print_summary()
+    #print('size top=',asizeof.asizeof(amp_fac.cache_top))
+    #print('size bot=',asizeof.asizeof(amp_fac.cache_bot))
+    #print('size blk_dict=',asizeof.asizeof(amp_fac.block_dict))
+    #print('size psi=',asizeof.asizeof(amp_fac.psi))
+    #print('size psi.tensor_map=',asizeof.asizeof(amp_fac.psi.tensor_map))
+    #for tid in amp_fac.psi.tensor_map:
+    #    tsr = amp_fac.psi.tensor_map[tid]
+    #    print(f'tid={tid},size={asizeof.asizeof(tsr)},owners={asizeof.asizeof(tsr._owners)}')
+    #    print(tsr._owners)
 class TNVMC: # stochastic sampling
     def __init__(
         self,
@@ -242,6 +242,7 @@ class TNVMC: # stochastic sampling
             err_max = max(err_max,self.buf[3])
             ncurr += 1
             #print(ncurr)
+            profile(self,self.ham,self.amplitude_factory,self.sampler)
             if ncurr >= samplesize: # send termination message to all workers
                 self.terminate[0] = 1
                 for worker in range(1,SIZE):

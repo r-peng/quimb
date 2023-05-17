@@ -164,7 +164,6 @@ class ContractionEngine:
         data = self._2backend(self.data_map[ci],False)
         return Tensor(data=data,inds=inds,tags=tags)
     def get_mid_env(self,i,peps,config,append=''):
-        #row = peps.select(peps.row_tag(i)).copy()
         row = peps.select(peps.row_tag(i),virtual=False)
         key = config[i*peps.Ly:(i+1)*peps.Ly]
         # compute mid env for row i
@@ -214,7 +213,6 @@ class ContractionEngine:
             cache[key] = None 
             return None
         tn = env_prev.copy()
-        #tn.add_tensor_network(row,virtual=True)
         tn.add_tensor_network(row,virtual=False)
         try:
             if self.pbc:
@@ -249,7 +247,6 @@ class ContractionEngine:
             cache[key] = None 
             return None
         tn = row
-        #tn.add_tensor_network(env_prev.copy(),virtual=True)
         tn.add_tensor_network(env_prev,virtual=False)
         try:
             if self.pbc:
@@ -285,7 +282,6 @@ class ContractionEngine:
             tags = first_col if j==0 else (first_col,tn.col_tag(j))
             try:
                 tn ^= tags
-                #lenvs[j] = tn.select(first_col).copy()
                 lenvs[j] = tn.select(first_col,virtual=False)
             except (ValueError,IndexError):
                 return lenvs
@@ -298,7 +294,6 @@ class ContractionEngine:
             tags = last_col if j==tn.Ly-1 else (tn.col_tag(j),last_col)
             try:
                 tn ^= tags
-                #renvs[j] = tn.select(last_col).copy()
                 renvs[j] = tn.select(last_col,virtual=False)
             except (ValueError,IndexError):
                 return renvs
@@ -427,15 +422,12 @@ class AmplitudeFactory(ContractionEngine):
             return 0.
         if self.deterministic:
             tn = env_bot.copy()
-            #tn.add_tensor_network(env_top.copy(),virtual=True)
             tn.add_tensor_network(env_top,virtual=False)
         elif self.compute_bot: 
             tn = env_bot.copy()
-            #tn.add_tensor_network(self.get_mid_env(self.Lx-1,self.psi,config),virtual=True) 
             tn.add_tensor_network(self.get_mid_env(self.Lx-1,self.psi,config),virtual=False) 
         elif self.compute_top:
             tn = self.get_mid_env(0,self.psi,config)
-            #tn.add_tensor_network(env_top.copy(),virtual=True)
             tn.add_tensor_network(env_top,virtual=False)
         try:
             return tn.contract()
@@ -528,16 +520,13 @@ class Hamiltonian(ContractionEngine):
         renvs = self.get_all_renvs(tn.copy(),jmin=y_bsz)
         for j in range(jmax+1): 
             tags = [tn.col_tag(j+ix) for ix in range(y_bsz)]
-            #cols = tn.select(tags,which='any').copy()
             cols = tn.select(tags,which='any',virtual=False)
             try:
                 if j>0:
                     other = cols
                     cols = lenvs[j-1]
-                    #cols.add_tensor_network(other,virtual=True)
                     cols.add_tensor_network(other,virtual=False)
                 if j<jmax:
-                    #cols.add_tensor_network(renvs[j+y_bsz],virtual=True)
                     cols.add_tensor_network(renvs[j+y_bsz],virtual=False)
                 plq[(i,j),(x_bsz,y_bsz)] = cols.view_like_(peps)
             except (AttributeError,TypeError): # lenv/renv is None
@@ -552,15 +541,12 @@ class Hamiltonian(ContractionEngine):
             try:
                 tn = self.get_mid_env(i,peps,config)
                 for ix in range(1,x_bsz):
-                    #tn.add_tensor_network(self.get_mid_env(i+ix,peps,config),virtual=True)
                     tn.add_tensor_network(self.get_mid_env(i+ix,peps,config),virtual=False)
                 if i>0:
                     other = tn 
                     tn = cache_bot[config[:i*peps.Ly]].copy()
-                    #tn.add_tensor_network(other,virtual=True)
                     tn.add_tensor_network(other,virtual=False)
                 if i<imax:
-                    #tn.add_tensor_network(cache_top[config[(i+x_bsz)*peps.Ly:]].copy(),virtual=True)
                     tn.add_tensor_network(cache_top[config[(i+x_bsz)*peps.Ly:]],virtual=False)
                 plq = self.update_plq_from_3row(plq,tn,i,x_bsz,y_bsz,peps)
             except AttributeError:
@@ -626,7 +612,6 @@ class Hamiltonian(ContractionEngine):
                 continue
 
             tn = bot_term.copy()
-            #tn.add_tensor_network(top_term.copy(),virtual=True)
             tn.add_tensor_network(top_term,virtual=False)
             try:
                 eij += coeff * sign_new * tn.contract() 
@@ -636,7 +621,6 @@ class Hamiltonian(ContractionEngine):
     def pair_energies_deterministic(self,config,peps,cache_bot,cache_top,sign_fn):
         env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
         tn = env_bot.copy()
-        #tn.add_tensor_network(env_top.copy(),virtual=True)
         tn.add_tensor_network(env_top,virtual=False)
         sign = sign_fn(config) 
         cx = tn.contract() * sign
@@ -986,7 +970,6 @@ class ExchangeSampler(ContractionEngine):
         for col in cols[1:]:
             if col is None:
                 return tn,saved_rows
-            #tn_plq.add_tensor_network(col.copy(),virtual=True)
             tn_plq.add_tensor_network(col,virtual=False)
         tn_plq.view_like_(tn)
         pairs = self.get_pairs(i,j) 
@@ -1020,7 +1003,6 @@ class ExchangeSampler(ContractionEngine):
         self.config = list(self.config)
         tn = rows[0].copy()
         for row in rows[1:]:
-            #tn.add_tensor_network(row.copy(),virtual=True)
             tn.add_tensor_network(row,virtual=False)
         saved_rows = tn.copy()
         try:
@@ -1031,7 +1013,6 @@ class ExchangeSampler(ContractionEngine):
         first_col = tn.col_tag(0)
         for j in range(self.Ly-1): # 0,...,Ly-2
             tags = first_col,tn.col_tag(j),tn.col_tag(j+1)
-            #cols = [tn.select(tags,which='any').copy()]
             cols = [tn.select(tags,which='any',virtual=False)]
             if j<self.Ly-2:
                 cols.append(renvs[j+2])
@@ -1045,7 +1026,6 @@ class ExchangeSampler(ContractionEngine):
         self.config = list(self.config)
         tn = rows[0].copy()
         for row in rows[1:]:
-            #tn.add_tensor_network(row.copy(),virtual=True)
             tn.add_tensor_network(row,virtual=False)
         saved_rows = tn.copy()
         try:
@@ -1059,7 +1039,6 @@ class ExchangeSampler(ContractionEngine):
             if j>1: 
                 cols.append(lenvs[j-2])
             tags = tn.col_tag(j-1),tn.col_tag(j),last_col
-            #cols.append(tn.select(tags,which='any').copy())
             cols.append(tn.select(tags,which='any',virtual=False))
             tn,saved_rows = self.update_plq(i,j-1,cols,tn,saved_rows) 
             # update new renv
@@ -1090,8 +1069,8 @@ class ExchangeSampler(ContractionEngine):
             if i<self.Lx-2:
                 rows.append(cache_top[self.config[(i+2)*self.Ly:]]) 
             saved_rows = sweep_col(i,rows)
-            row1_new = saved_rows.select(peps.row_tag(i),virtual=True)
-            row2_new = saved_rows.select(peps.row_tag(i+1),virtual=True)
+            row1_new = saved_rows.select(peps.row_tag(i),virtual=False)
+            row2_new = saved_rows.select(peps.row_tag(i+1),virtual=False)
             # update new env_h
             env_bot = self.get_bot_env(i,row1_new,env_bot,tuple(self.config),cache_bot)
             row1 = row2_new
@@ -1118,8 +1097,8 @@ class ExchangeSampler(ContractionEngine):
             if i<self.Lx-1:
                 rows.append(env_top) 
             saved_rows = sweep_col(i-1,rows)
-            row1_new = saved_rows.select(peps.row_tag(i),virtual=True)
-            row2_new = saved_rows.select(peps.row_tag(i-1),virtual=True)
+            row1_new = saved_rows.select(peps.row_tag(i),virtual=False)
+            row2_new = saved_rows.select(peps.row_tag(i-1),virtual=False)
             # update new env_h
             env_top = self.get_top_env(i,row1_new,env_top,tuple(self.config),cache_top)
             row1 = row2_new
@@ -1193,7 +1172,6 @@ class ExchangeSampler(ContractionEngine):
                 continue
 
             tn = bot_term.copy()
-            #tn.add_tensor_network(top_term.copy(),virtual=True)
             tn.add_tensor_network(top_term,virtual=False)
             try:
                 py = tn.contract() ** 2 
