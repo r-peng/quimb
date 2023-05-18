@@ -1,6 +1,6 @@
 import time,psutil
 #import time,tracemalloc,psutil,gc
-#from pympler import muppy,summary
+from pympler import muppy,summary
 #tracemalloc.start()
 t0 = time.time()
 snaps = []
@@ -8,19 +8,19 @@ snaps = []
 def snapshots(tmpdir,RANK,n1=5,n2=10):
     #snaps.append(tracemalloc.take_snapshot())
 
-    #ls = muppy.get_objects()
-    #sum_ = summary.summarize(ls) 
-    #summary.print_(sum_)
+    ls = muppy.get_objects()
+    sum_ = summary.summarize(ls) 
+    summary.print_(sum_)
     #ls = muppy.filter(ls,Type=dict)
     #nprint = 10
     #every = len(ls) // nprint
     #print(ls[::every])
 
-    #mem = psutil.virtual_memory()
-    #print(f'time={time.time()-t0},percent={mem.percent}')
+    mem = psutil.virtual_memory()
+    print(f'time={time.time()-t0},percent={mem.percent}')
     #for tup in ls[::every]:
     #    print(tup,muppy.get_referents(tup,level=2))
-    with open(tmpdir+f'RANK{RANK}.log','a') as f:
+    #with open(tmpdir+f'RANK{RANK}.log','a') as f:
         #f.write('\n')
 
         #cnt1 = gc.get_count()
@@ -28,8 +28,8 @@ def snapshots(tmpdir,RANK,n1=5,n2=10):
         #cnt2 = gc.get_count()
         #f.write(f'time={times[-1]-t0},gc_count1={cnt1},gc_count2={cnt2}\n')
 
-        mem = psutil.virtual_memory()
-        f.write(f'time={time.time()-t0},percent={mem.percent}\n')
+        #mem = psutil.virtual_memory()
+        #f.write(f'time={time.time()-t0},percent={mem.percent}\n')
 
         #ls = muppy.get_objects()
         #ls = muppy.filter(ls,Type=tuple)

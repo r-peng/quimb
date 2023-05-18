@@ -14,37 +14,23 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
 be_verbose = True
-epsilon = 1e-12
+cutoff = 1e-10
+epsilon = cutoff * 1e-2 
 fix_sign = True 
 #fix_sign = False 
 
-#def safe_inverse(x):
-#    return x/(x.pow(2) + epsilon)
-#def safe_inverse(x):
-#    new = torch.zeros_like(x)
-#    shape = x.size()
-#    if len(shape)==1:
-#        inds = range(shape[0])
-#    elif len(shape)==2:
-#        inds = list(itertools.product(range(shape[0]),range(shape[1])))
-#    else:
-#        raise ValueError
-#    for ind in inds:
-#        xi = x[ind]
-#        if torch.abs(xi)>epsilon:
-#            new[ind] = 1./xi 
-#        else:
-#            new[ind] = 1./epsilon * torch.sign(xi)
-#    return new 
 def safe_inverse(x):
-    #return 1./(x + torch.sign(x) * epsilon)
-    return 1./(x + epsilon)
+    return x/(x.pow(2) + epsilon)
+#def safe_inverse(x):
+#    return 1./(x + epsilon)
 def make_zeros(A):
     M,N = A.size()
     U = torch.zeros(M,1)
     S = torch.zeros(1)
     Vh = torch.zeros(1,N)
     return U,S,Vh
+def is_one(T):
+    return (torch.max(torch.abs(T-torch.ones_like(T))).detach().numpy() < epsilon)
 def SVDforward(A):
     #if torch.linalg.norm(A) < epsilon: # A is zero
     #    return make_zeros(A)
@@ -71,10 +57,10 @@ def SVDforward(A):
         Vh = torch.from_numpy(Vh)
 
     # trim
-    ind = S > epsilon
+    ind = S > cutoff
     if len(ind)==0:
         return make_zeros(A)
-    if np.linalg.norm(S-np.ones_like(S)) < epsilon: # A is isometry
+    if is_one(S): # A is isometry
         M,N = A.size()
         if M>=N:
             return A,S,torch.eye(N,dtype=A.dtype)
@@ -99,9 +85,9 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
         raise ValueError("dVh is not finite")
     M = U.size(0)
     N = Vh.size(1)
-    if S[0]<epsilon:
+    if S[0]<cutoff:
         return torch.zeros(M,N)
-    if np.linalg.norm(S-torch.ones_like(S)) < epsilon: # A is isometry
+    if is_one(S): # A is isometry
         if M>=N:
             return dU
         else:
@@ -111,6 +97,7 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
     #        print('warning! degenerate singular values', S,S[i],S[i+1])
 
     F = (S - S[:, None])
+    F.diagonal().fill_(1)
     F = safe_inverse(F)
     F.diagonal().fill_(0)
 
