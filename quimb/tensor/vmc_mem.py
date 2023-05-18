@@ -2,7 +2,12 @@ import time,scipy,functools,h5py
 import numpy as np
 import scipy.sparse.linalg as spla
 from .tfqmr import tfqmr
+
 #from memory_profiler import profile
+from pympler.classtracker import ClassTracker
+from pympler import muppy,summary
+import psutil
+t0 = time.time()
 
 from quimb.utils import progbar as Progbar
 from mpi4py import MPI
@@ -20,7 +25,6 @@ def _fn(psi):
     for tid in psi.tensor_map:
         tsr = psi.tensor_map[tid]
         assert len(tsr._owners)==1
-
 ##################################################################################################
 # VMC utils
 ##################################################################################################
@@ -247,23 +251,35 @@ class TNVMC: # stochastic sampling
         print('\tcontraction err=',err_mean / len(self.e),err_max)
         self.e = np.array(self.e)
         self.f = np.array(self.f)
+    def profile(self,n):
+        if RANK!=1:
+            return
+        for obj in [self,self.sampler,self.sampler.amplitude_factory]:
+            tracker = ClassTracker()
+            tracker.track_object(obj)
+            tracker.create_snapshot()
+            tracker.stats.print_summary()
+        ls = muppy.get_objects()
+        sum_ = summary.summarize(ls) 
+        summary.print_(sum_)
+        mem = psutil.virtual_memory()
+        print(f'n={n},time={time.time()-t0},percent={mem.percent}')
+        psi = self.sampler.amplitude_factory.psi
+        _fn(psi)
+        for key,psi in self.sampler.amplitude_factory.cache_top.items():
+            _fn(psi)
+        for key,psi in self.sampler.amplitude_factory.cache_bot.items():
+            _fn(psi)
+
     def _sample_stochastic(self,compute_v=True,compute_Hv=False):
         self.buf[1] = 1.
+        n = 0
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
             cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
                 config,self.sampler.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
-
-            psi = self.sampler.amplitude_factory.psi
-            _fn(psi)
-            print(len(self.sampler.amplitude_factory.cache_top))
-            for key,psi in self.sampler.amplitude_factory.cache_top.items():
-                _fn(psi)
-            print(len(self.sampler.amplitude_factory.cache_bot))
-            for key,psi in self.sampler.amplitude_factory.cache_bot.items():
-                _fn(psi)
 
             if cx is None or np.fabs(ex) > DISCARD:
                 print(f'RANK={RANK},config={config},cx={cx},ex={ex}')
@@ -284,6 +300,10 @@ class TNVMC: # stochastic sampling
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
+
+            n += 1
+            self.profile(n)
+
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:

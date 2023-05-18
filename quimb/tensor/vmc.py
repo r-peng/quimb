@@ -251,6 +251,7 @@ class TNVMC: # stochastic sampling
             if cx is None or np.fabs(ex) > DISCARD:
                 print(f'RANK={RANK},config={config},cx={cx},ex={ex}')
                 ex = 0.
+                err = 0.
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype)
                 if compute_Hv:

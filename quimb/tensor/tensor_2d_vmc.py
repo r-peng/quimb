@@ -705,15 +705,13 @@ class Hamiltonian(ContractionEngine):
     def contraction_error(self,cx):
         nsite = self.Lx * self.Ly
         if self.backend=='torch':
-            sqmean = sum(cij.pow(2) for cij in cx.values()) / nsite # mean(px) 
-            mean = sum(cij for cij in cx.values()) / nsite
-            err = sqmean - mean.pow(2)
-            return self._2numpy(mean),self._2numpy(err.abs())
+            sqmean = self._2numpy(sum(cij.pow(2) for cij in cx.values()) / nsite) # mean(px) 
+            mean = self._2numpy(sum(cij for cij in cx.values()) / nsite)
         else:
             sqmean = sum(cij**2 for cij in cx.values()) / nsite
             mean = sum(cij for cij in cx.values()) / nsite
-            err = sqmean - mean**2
-            return mean,np.fabs(err)
+        err = sqmean - mean**2
+        return mean,np.fabs(err/mean)
     def nn_pairs(self):
         ls = [] 
         for i in range(self.Lx):
