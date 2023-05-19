@@ -378,6 +378,18 @@ class Hubbard(Hamiltonian):
         if ndiff==0:
             sign = i1-i2
             return [(0,3,sign),(3,0,sign)]
+class DensityMatrix(Hamiltonian):
+    def __init__(self,Lx,Ly):
+        self.Lx,self.Ly = Lx,Ly 
+        self.pairs = [] 
+        self.data = np.zeros((Lx,Ly))
+        self.n = 0.
+    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+        self.n += 1.
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                self.data[i,j] += pn_map[config[self.flatten(i,j)]]
+        return 0.,0.,None,None,0. 
 ####################################################################################
 # sampler 
 ####################################################################################

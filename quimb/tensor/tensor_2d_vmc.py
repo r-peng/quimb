@@ -554,7 +554,7 @@ class Hamiltonian(ContractionEngine):
         return plq
     def pair_energies_from_plq(self,config,peps,cache_bot,cache_top):
         x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        self.get_all_benvs(peps,config,cache_bot,cache_top)
+        self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
 
         plq = dict()
         for x_bsz,y_bsz in self.plq_sz:
@@ -843,43 +843,56 @@ class J1J2(Hamiltonian):
             return self.J2
         return self.J1
     def pair_valid(self,i1,i2):
-        return True
+        if i1==i2:
+            return False
+        else:
+            return True
     def compute_local_energy_eigen(self,config):
-        e = 0.
         # NN
+        e1 = 0.
         for i in range(self.Lx):
             for j in range(self.Ly):
-                ix1 = self.flatten(i,j)
+                s1 = (-1) ** config[self.flatten(i,j)]
                 if j+1<self.Ly:
-                    ix2 = self.flatten(i,j+1) 
-                    e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+                    e1 += s1 * (-1)**config[self.flatten(i,j+1)]
                 else:
                     if self.pbc:
-                        ix2 = self.flatten(i,0)
-                        e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+                        e1 += s1 * (-1)**config[self.flatten(i,0)]
                 if i+1<self.Lx:
-                    ix2 = self.flatten(i+1,j) 
-                    e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+                    e1 += s1 * (-1)**config[self.flatten(i+1,j)]
+                else:
                     if self.pbc:
-                        ix2 = self.flatten(0,j)
-                        e += .25 * self.J1 * (-1)**(config[ix1]+config[ix2])
+                        e1 += s1 * (-1)**config[self.flatten(0,j)]
         # next NN
+        e2 = 0. 
         for i in range(self.Lx):
             for j in range(self.Ly):
                 if i+1<self.Lx and j+1<self.Ly: 
                     ix1,ix2 = self.flatten(i,j), self.flatten(i+1,j+1)
-                    e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
+                    e2 += (-1)**(config[ix1]+config[ix2])
                     ix1,ix2 = self.flatten(i,j+1), self.flatten(i+1,j)
-                    e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
+                    e2 += (-1)**(config[ix1]+config[ix2])
                 else:
                     if self.pbc:
                         ix1,ix2 = self.flatten(i,j), self.flatten((i+1)%self.Lx,(j+1)%self.Ly)
-                        e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
+                        e2 += (-1)**(config[ix1]+config[ix2])
                         ix1,ix2 = self.flatten(i,(j+1)%self.Ly), self.flatten((i+1)%self.Lx,j)
-                        e += .25 * self.J2 * (-1)**(config[ix1]+config[ix2])
-        return e
+                        e2 += (-1)**(config[ix1]+config[ix2])
+        return .25 * (e1 *self.J1 + e2 * self.J2) 
     def pair_terms(self,i1,i2):
-        return [(1-i1,1-i2,.25*(1-(-1)**(i1+i2)))]
+        return [(1-i1,1-i2,.5)]
+class SpinDensity(Hamiltonian):
+    def __init__(self,Lx,Ly):
+        self.Lx,self.Ly = Lx,Ly 
+        self.pairs = [] 
+        self.data = np.zeros((Lx,Ly))
+        self.n = 0.
+    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+        self.n += 1.
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                self.data[i,j] += (-1) ** [config[self.flatten(i,j)]]
+        return 0.,0.,None,None,0. 
 ####################################################################################
 # sampler 
 ####################################################################################

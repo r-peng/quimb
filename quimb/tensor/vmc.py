@@ -144,6 +144,7 @@ class TNVMC: # stochastic sampling
             #        maxsize=maxsize,restart_size=restart_size,maxiter=maxiter,tol=CG_TOL) 
 
         # to be set before run
+        self.progbar = False
         self.tmpdir = None
         self.config = None
         self.omega = None
@@ -216,6 +217,10 @@ class TNVMC: # stochastic sampling
             samplesize = len(self.sampler.nonzeros)
         else:
             samplesize = self.batchsize if samplesize is None else samplesize
+
+        if self.progbar:
+            pg = Progbar(total=samplesize)
+
         self.f = []
         self.e = []
         err_mean = 0.
@@ -230,6 +235,8 @@ class TNVMC: # stochastic sampling
             err_mean += self.buf[3]
             err_max = max(err_max,self.buf[3])
             ncurr += 1
+            if self.progbar:
+                pg.update()
             #print(ncurr)
             if ncurr >= samplesize: # send termination message to all workers
                 self.terminate[0] = 1
@@ -804,84 +811,22 @@ class TNVMC: # stochastic sampling
         err = (Eerr**2 + self.Eerr**2)**.5
         print(f'\tpredict={dEm},actual={(dE,err)}')
         return (dE < 0.) 
-class DMRG(TNVMC):
-    def __init__(
-        self,
-        ham,
-        sampler,
-        amplitude_factory,
-        optimizer='sr',
-        **kwargs,
-    ):
-        # parse ham
-        self.ham = ham
-        self.nsite = ham.Lx * ham.Ly
+    def measure(self,fname=None):
+        self.sample(compute_v=False,compute_Hv=False)
 
-        # parse sampler
-        self.sampler = sampler
-        self.exact_sampling = sampler.exact
+        sendbuf = np.array([self.ham.n])
+        recvbuf = np.zeros_like(sendbuf) 
+        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+        n = recvbuf[0]
 
-        # parse wfn 
-        self.amplitude_factory = amplitude_factory         
-        self.x = self.amplitude_factory.get_x()
-        self.block_dict = self.amplitude_factory.get_block_dict()
-
-        # parse gradient optimizer
-        self.optimizer = optimizer
-        self.compute_Hv = False
-        self.solve = 'matrix'
-        if self.optimizer in ['rgn','lin']:
-            self.ham.initialize_pepo(self.amplitude_factory.psi)
-            self.compute_Hv = True
-        if self.optimizer=='lin':
-            self.xi = kwargs.get('xi',0.5)
-
-        # to be set before run
-        self.ix = 0 
-        self.direction = 1
-        self.config = None
-        self.batchsize = None
-        self.ratio = None
-        self.batchsize_small = None
-        self.rate1 = None # rate for SGD,SR
-        self.rate2 = None # rate for LIN,RGN
-        self.cond1 = None
-        self.cond2 = None
-        self.check = None 
-        self.accept_ratio = None
-    def next_ix(self):
-        if self.direction == 1 and self.ix == self.nsite-1:
-            self.direction = -1
-        elif self.direction == -1 and self.ix == 0:
-            self.direction = 1
-        self.ix += self.direction 
-    def set_nparam(self):
-        start,stop = self.block_dict[self.ix]
-        self.nparam = stop - start
-        if self.ratio is not None:
-            self.batchsize = max(self.batchsize_small,self.nparam * self.ratio) 
-    def run(self,start,stop,tmpdir=None):
-        for step in range(start,stop):
-            self.amplitude_factory.ix = self.ix
-            self.set_nparam()
-            if RANK==0:
-                print(f'ix={self.ix},nparam={self.nparam}')
-            self.step = step
-            self.sample()
-            self.extract_energy_gradient()
-            self.transform_gradients()
-            COMM.Bcast(self.x,root=0) 
-            psi = self.amplitude_factory.update(self.x)
-            self.ham.update_cache(self.ix)
-            if RANK==0:
-                if tmpdir is not None: # save psi to disc
-                    write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
-            #self.next_ix()
-            self.ix = (self.ix + 1) % self.nsite
-    def update(self,rate):
-        start,stop = self.block_dict[self.ix]
-        x = self.x.copy()
-        x[start:stop] -= rate * self.deltas
-        return x 
-    def _transform_gradients_o2(self):
-        super()._transform_gradients_o2(solve_sr='matrix')
+        sendbuf = self.ham.data
+        recvbuf = np.zeros_like(sendbuf) 
+        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        data = recvbuf / n
+        if fname is not None:
+            f = h5py.File(fname,'w')
+            f.create_dataset('data',data=data) 
+            f.close()
+        print(data)

@@ -152,8 +152,7 @@ class SimpleUpdate(SimpleUpdate):
             Tsval.pattern= sign_ija + string_inv[sign_ija]
             self._gauges[(ija, ijb)] = Tsval
     
-        if self.print_conv:
-            self._old_gauges = {key:val.copy() for key,val in self._gauges.items()}
+        self._old_gauges = {key:val.copy() for key,val in self._gauges.items()}
     def _unpack_gauge(self, ija, ijb):
         Ta = self._psi[ija]
         Tb = self._psi[ijb]
