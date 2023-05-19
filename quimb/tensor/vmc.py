@@ -1,4 +1,4 @@
-import time,scipy,functools,h5py
+import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
 from .tfqmr import tfqmr
@@ -170,6 +170,7 @@ class TNVMC: # stochastic sampling
         self.Sx1 = None
         self.Hx1 = None
         self.deltas = None
+        gc.collect()
     def normalize(self,x):
         if self.init_norm is not None:
             norm = np.linalg.norm(x)

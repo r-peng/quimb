@@ -152,6 +152,8 @@ class SimpleUpdate(SimpleUpdate):
             Tsval.pattern= sign_ija + string_inv[sign_ija]
             self._gauges[(ija, ijb)] = Tsval
     
+        if self.print_conv:
+            self._old_gauges = {key:val.copy() for key,val in self._gauges.items()}
     def _unpack_gauge(self, ija, ijb):
         Ta = self._psi[ija]
         Tb = self._psi[ijb]
@@ -232,6 +234,11 @@ class SimpleUpdate(SimpleUpdate):
             if bond_pair not in self.gauges:
                 self.gauges.pop((bond_pair[1], bond_pair[0]), None)
             self.gauges[bond_pair] = s
+
+            if self.print_conv:
+                s_old = self._old_gauges[bond_pair]
+                print((s-s_old).norm())
+                self._old_gauges[bond_pair] = s
 
         # absorb the 'outer' gauges from these neighbours
         for site in string:

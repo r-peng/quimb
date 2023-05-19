@@ -6,7 +6,7 @@ from .tfqmr import tfqmr
 #from memory_profiler import profile
 from pympler.classtracker import ClassTracker
 from pympler import muppy,summary
-import psutil
+import psutil,gc
 t0 = time.time()
 
 from quimb.utils import progbar as Progbar
@@ -181,6 +181,7 @@ class TNVMC: # stochastic sampling
         self.Sx1 = None
         self.Hx1 = None
         self.deltas = None
+        gc.collect()
     def normalize(self,x):
         if self.init_norm is not None:
             norm = np.linalg.norm(x)
@@ -254,14 +255,14 @@ class TNVMC: # stochastic sampling
     def profile(self,n):
         if RANK!=1:
             return
-        for obj in [self,self.sampler,self.sampler.amplitude_factory]:
-            tracker = ClassTracker()
-            tracker.track_object(obj)
-            tracker.create_snapshot()
-            tracker.stats.print_summary()
-        ls = muppy.get_objects()
-        sum_ = summary.summarize(ls) 
-        summary.print_(sum_)
+        #for obj in [self,self.sampler,self.sampler.amplitude_factory]:
+        #    tracker = ClassTracker()
+        #    tracker.track_object(obj)
+        #    tracker.create_snapshot()
+        #    tracker.stats.print_summary()
+        #ls = muppy.get_objects()
+        #sum_ = summary.summarize(ls) 
+        #summary.print_(sum_)
         mem = psutil.virtual_memory()
         print(f'n={n},time={time.time()-t0},percent={mem.percent}')
         psi = self.sampler.amplitude_factory.psi
