@@ -550,6 +550,7 @@ class SimpleUpdate(TEBD2D):
             )
             self._gauges[tuple(sorted((ija, ijb)))] = Tsval
 
+        self._old_gauges = {key:val.copy() for key,val in self._gauges.items()}
     @property
     def gauges(self):
         """The dictionary of bond pair coordinates to Tensors describing the
@@ -625,6 +626,11 @@ class SimpleUpdate(TEBD2D):
                 s = s / s[0]
             Tsval = self.gauges[bond_pair]
             Tsval.modify(data=s)
+
+            if self.print_conv:
+                s_old = self._old_gauges[bond_pair]
+                print(np.linalg.norm(s-s_old))
+                self._old_gauges[bond_pair] = s
 
         # absorb the 'outer' gauges from these neighbours
         for site in string:

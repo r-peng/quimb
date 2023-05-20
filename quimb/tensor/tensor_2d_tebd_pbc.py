@@ -1,5 +1,6 @@
 
 import random
+import numpy as np
 from autoray import do, dag, conj, reshape
 from itertools import product, cycle, starmap, combinations, count, chain
 
@@ -56,6 +57,7 @@ class SimpleUpdate(SimpleUpdate_):
                 ]
             )
             self._gauges[tuple(sorted((ija, ijb)))] = Tsval
+        self._old_gauges = {key:val.data for key,val in self._gauges.items()}
     def gate(self, U, where):
         """Like ``TEBD2D.gate`` but absorb and extract the relevant gauges
         before and after each gate application.
@@ -119,6 +121,11 @@ class SimpleUpdate(SimpleUpdate_):
                 s = s / s[0]
             Tsval = self.gauges[bond_pair]
             Tsval.modify(data=s)
+
+            if self.print_conv:
+                s_old = self._old_gauges[bond_pair]
+                print(np.linalg.norm(s-s_old))
+                self._old_gauges[bond_pair] = s
 
         # absorb the 'outer' gauges from these neighbours
         for site in string:
