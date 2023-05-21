@@ -839,9 +839,11 @@ class J1J2(Hamiltonian):
         # coeff for pair tsr
         dx = abs(site2[0]-site1[0])
         dy = abs(site2[1]-site1[1])
-        if dx==1 and dy==1:
-            return self.J2
-        return self.J1
+        if dx == 0:
+            return self.J1
+        if dy == 0:
+            return self.J1
+        return self.J2
     def pair_valid(self,i1,i2):
         if i1==i2:
             return False
