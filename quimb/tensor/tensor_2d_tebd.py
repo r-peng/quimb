@@ -550,7 +550,7 @@ class SimpleUpdate(TEBD2D):
             )
             self._gauges[tuple(sorted((ija, ijb)))] = Tsval
 
-        self._old_gauges = {key:val.copy() for key,val in self._gauges.items()}
+        self._old_gauges = {key:val.data for key,val in self._gauges.items()}
     @property
     def gauges(self):
         """The dictionary of bond pair coordinates to Tensors describing the

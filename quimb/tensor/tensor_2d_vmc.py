@@ -893,7 +893,7 @@ class SpinDensity(Hamiltonian):
         self.n += 1.
         for i in range(self.Lx):
             for j in range(self.Ly):
-                self.data[i,j] += (-1) ** [config[self.flatten(i,j)]]
+                self.data[i,j] += (-1) ** config[self.flatten(i,j)]
         return 0.,0.,None,None,0. 
 ####################################################################################
 # sampler 
