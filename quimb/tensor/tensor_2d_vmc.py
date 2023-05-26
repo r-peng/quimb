@@ -43,7 +43,7 @@ def write_tn_to_disc(tn, fname, provided_filename=False):
         pickle.dump(tn, f)
     return fname
 from .tensor_2d import PEPS
-def get_product_state(Lx,Ly,config,bdim=1,eps=None):
+def get_product_state(Lx,Ly,config=None,bdim=1,eps=None):
     arrays = []
     for i in range(Lx):
         row = []
@@ -55,10 +55,13 @@ def get_product_state(Lx,Ly,config,bdim=1,eps=None):
                 shape.pop()
             shape = tuple(shape) + (2,)
 
-            data = np.zeros(shape) 
-            ix = flatten(i,j,Ly)
-            ix = config[ix]
-            data[(0,)*(len(shape)-1)+(ix,)] = 1.
+            if config is None:
+                data = np.ones(shape) 
+            else:
+                data = np.zeros(shape) 
+                ix = flatten(i,j,Ly)
+                ix = config[ix]
+                data[(0,)*(len(shape)-1)+(ix,)] = 1.
             if eps is not None:
                 data += eps * np.random.rand(*shape)
             row.append(data)
@@ -220,6 +223,7 @@ class ContractionEngine:
             else:
                 tn.contract_boundary_from_bottom_(xrange=(i-1,i),**self.compress_opts)
         except (ValueError,IndexError):
+        #except (ValueError,IndexError,RuntimeError):
             tn = None
         cache[key] = tn
         return tn 
@@ -254,6 +258,7 @@ class ContractionEngine:
             else:
                 tn.contract_boundary_from_top_(xrange=(i,i+1),**self.compress_opts)
         except (ValueError,IndexError):
+        #except (ValueError,IndexError,RuntimeError):
             tn = None
         cache[key] = tn
         return tn 
@@ -656,9 +661,15 @@ class Hamiltonian(ContractionEngine):
             ex_dict,cx_dict,plq = self.pair_energies_from_plq(config,peps,cache_bot,cache_top) 
             sign = 1.
             cx,err = self.contraction_error(cx_dict)
-            if self.discard is not None: # discard sample if contraction error too large
+            if cx is None:
+                if self.backend=='torch':
+                    ar.set_backend(np.zeros(1))
+                return (None,) * 5
+            if self.discard is not None: 
+                # discard sample if contraction error too large
                 if err > self.discard: 
-                    self.update_cache(amplitude_factory,cache_top,cache_bot)
+                    if self.backend=='torch':
+                        ar.set_backend(np.zeros(1))
                     return (None,) * 5
 
         # energy
@@ -703,6 +714,8 @@ class Hamiltonian(ContractionEngine):
             ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err
     def contraction_error(self,cx):
+        #if len(cx)==0:
+        #    return None,None 
         nsite = self.Lx * self.Ly
         if self.backend=='torch':
             sqmean = self._2numpy(sum(cij.pow(2) for cij in cx.values()) / nsite) # mean(px) 
@@ -886,7 +899,6 @@ class J1J2(Hamiltonian):
 class SpinDensity(Hamiltonian):
     def __init__(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly 
-        self.pairs = [] 
         self.data = np.zeros((Lx,Ly))
         self.n = 0.
     def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
@@ -895,6 +907,32 @@ class SpinDensity(Hamiltonian):
             for j in range(self.Ly):
                 self.data[i,j] += (-1) ** config[self.flatten(i,j)]
         return 0.,0.,None,None,0. 
+    def _print(self,fname,data):
+        print(fname)
+        print(data)
+class Mz(Hamiltonian):
+    def __init__(self,Lx,Ly):
+        self.Lx,self.Ly = Lx,Ly 
+        self.nsites = Lx * Ly
+        self.data = np.zeros(1)
+        self.n = 0.
+    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+        self.n += 1.
+
+        data = 0.
+        for ix1 in range(self.nsites):
+            s1 = (-1) ** config[ix1]
+            site1 = self.flat2site(ix1)
+            for ix2 in range(ix1+1,self.nsites):
+                s2 = (-1) ** config[ix2]
+                site2 = self.flat2site(ix2)
+                  
+                dx,dy = site1[0]-site2[0],site1[1]-site2[1]
+                data += s1 * s2 * (-1)**(dx+dy)
+        self.data += data / self.nsites**2
+        return 0.,0.,None,None,0. 
+    def _print(self,fname,data):
+        print(f'fname={fname},data={data[0]}') 
 ####################################################################################
 # sampler 
 ####################################################################################

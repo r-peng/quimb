@@ -257,7 +257,7 @@ class TNVMC: # stochastic sampling
             cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
                 config,self.sampler.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
             if cx is None or np.fabs(ex) > DISCARD:
-                print(f'RANK={RANK},config={config},cx={cx},ex={ex}')
+                print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = 0.
                 err = 0.
                 if compute_v:
@@ -829,4 +829,4 @@ class TNVMC: # stochastic sampling
             f = h5py.File(fname,'w')
             f.create_dataset('data',data=data) 
             f.close()
-        print(data)
+        self.ham._print(fname,data)
