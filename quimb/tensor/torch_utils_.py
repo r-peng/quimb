@@ -14,15 +14,12 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
 be_verbose = True
-cutoff = 1e-10
-epsilon = cutoff * 1e-2 
+epsilon = 1e-12 
 fix_sign = True 
 #fix_sign = False 
 
 def safe_inverse(x):
     return x/(x.pow(2) + epsilon)
-#def safe_inverse(x):
-#    return 1./(x + epsilon)
 def make_zeros(A):
     M,N = A.size()
     U = torch.eye(n=M,m=1)
@@ -34,8 +31,7 @@ def is_one(T):
 def SVDforward(A):
     M,N = A.size()
     if M * N == 0:
-        print(RANK,'svd in zero',A)
-        exit()
+        raise ValueError(f"input matrix to custom SVD is size {(M,N)}")
     if not torch.all(torch.isfinite(A)): # A not finite
         raise ValueError("input matrix to custom SVD is not finite")
     try:
@@ -49,26 +45,8 @@ def SVDforward(A):
         Vh = torch.from_numpy(Vh)
 
     if is_one(S): # A is isometry
-        M,N = A.size()
-        if M>=N:
-            return A,S,torch.eye(N,dtype=A.dtype)
-        else:
-            return torch.eye(M,dtype=A.dtype),S,A
+        raise ValueError
 
-    # trim
-    ind = S > cutoff
-    S = S[ind]            
-    U = U[:,ind]
-    Vh = Vh[ind,:]
-    if len(S)==0:
-        print('SVD out',U.size(),S.size(),Vh.size())
-        print('U',U)
-        print('S',S)
-        print('Vh',Vh)
-        print('A',A)
-        print(ind)
-        exit()
-        return make_zeros(A)
     if fix_sign:
         # make SVD result sign-consistent across multiple runs
         for idx in range(U.size()[1]):
@@ -85,16 +63,6 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
         raise ValueError("dVh is not finite")
     M = U.size(0)
     N = Vh.size(1)
-    if S[0]<cutoff:
-        return torch.zeros(M,N)
-    if is_one(S): # A is isometry
-        if M>=N:
-            return dU
-        else:
-            return dVh    
-    #for i in range(K-1):
-    #    if torch.abs(S[i]-S[i+1])<epsilon:
-    #        print('warning! degenerate singular values', S,S[i],S[i+1])
 
     F = (S - S[:, None])
     F = safe_inverse(F)
@@ -111,8 +79,6 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
     Sv = (F-G)*(VdV-VdV.t())/2
 
     dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
-    if not torch.all(torch.isfinite(dA)):
-        raise ValueError("dA is not finite")
     Su = Sv = UdU = VdV = G = F = None   # help with memory
     Sinv = safe_inverse(S)
     NS = S.size(0)
@@ -135,8 +101,6 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
         dA += (tmp1 - tmp2)
     if not torch.all(torch.isfinite(dA)):
         raise ValueError("dA is not finite")
-    U = S = Vh = None
-    tmp1 = tmp2 = None
     return dA
 class SVD(torch.autograd.Function):
     @staticmethod
@@ -201,8 +165,7 @@ class QR(torch.autograd.Function):
     def forward(self, A):
         M,N = A.size()
         if M * N == 0:
-            print(RANK,'qr in zero',A)
-            exit()
+            raise ValueError(f"input matrix to custom QR is size {(M,N)}")
         if not torch.all(torch.isfinite(A)): # A not finite
             raise ValueError("input matrix to custom QR is not finite")
         try:
@@ -215,18 +178,14 @@ class QR(torch.autograd.Function):
             R = torch.from_numpy(R)
 
         diag = R.diag()
+        if is_one(diag):
+            print(R)
+            raise ValueError
         inds = torch.abs(diag) < epsilon
         if len(inds) > 0: # rank deficient, revert to svd
             U,S,Vh = SVDforward(A)
             SVh = S.reshape((S.size(0),1)) * Vh
             self.save_for_backward(U, S, Vh)
-            print('QR out',U.size(),SVh.size())
-            print('U',U)
-            print('S',S)
-            print('Vh',Vh)
-            print('A',A)
-            print('Q',Q)
-            print('R',R)
             return U, SVh
 
         if fix_sign:
@@ -234,7 +193,6 @@ class QR(torch.autograd.Function):
             Q = Q * sign
             R = R * sign.t()
         self.save_for_backward(A,Q,R)
-        print('QR out',Q.size(),R.size())
         return Q,R
         
     @staticmethod

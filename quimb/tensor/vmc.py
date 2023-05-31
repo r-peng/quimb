@@ -638,6 +638,7 @@ class TNVMC: # stochastic sampling
             dE = 0.
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
+                print(f'ix={ix},sh={stop-start}')
                 def hess(x):
                     if self.terminate[0]==1:
                         return 0
