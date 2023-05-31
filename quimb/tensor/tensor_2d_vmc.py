@@ -634,6 +634,7 @@ class Hamiltonian(ContractionEngine):
             ex[site1,site2] = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn) * sign
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
+        #print(config)
         if self.tmpdir is not None:
             if RANK % self.log_every==0:
                 snapshots(self.tmpdir,RANK)

@@ -637,7 +637,7 @@ class TNVMC: # stochastic sampling
         else:
             dE = 0.
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(self.block_dict):
+            for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
                 def hess(x):
                     if self.terminate[0]==1:
                         return 0
@@ -647,7 +647,7 @@ class TNVMC: # stochastic sampling
                     Sx = self.S[ix](x)
                     if self.terminate[0]==1:
                         return 0
-                    return Hx - self.E * Sx
+                    return Hx - E * Sx
                 deltas = self.solve_iterative(hess,g[start:stop],self.cond2,False)
                 self.deltas[start:stop] = deltas 
                 self.terminate[0] = 0
