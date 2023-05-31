@@ -620,17 +620,18 @@ class Hamiltonian(ContractionEngine):
                 cx[site1] = cij 
                 cx[site2] = cij 
         return ex,cx,plq
-    def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
+    def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn,compute_Hv):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0. 
+            return 0.,0. 
         assert site1[0] <= site2[0]
         imin = min(self.rix1+1,site1[0]) 
         imax = max(self.rix2-1,site2[0]) 
         top = None if imax==peps.Lx-1 else cache_top[config[(imax+1)*peps.Ly:]]
         bot = None if imin==0 else cache_bot[config[:imin*peps.Ly]]
         eij = 0.
+        Hvij = 0.
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
         for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
             config_new = list(config)
@@ -656,7 +657,11 @@ class Hamiltonian(ContractionEngine):
             tn = bot_term.copy()
             tn.add_tensor_network(top_term,virtual=False)
             try:
-                eij += coeff * sign_new * tn.contract() 
+                cnew = tn.contract()
+                eij += coeff * sign_new * cnew 
+                if compute_Hv:
+                    cnew.backward(retain_graph=True)
+                    
             except (ValueError,IndexError):
                 continue
         return eij * coeff_comm
@@ -667,8 +672,10 @@ class Hamiltonian(ContractionEngine):
         sign = sign_fn(config) 
         cx = tn.contract() * sign
         ex = dict()
+        Hvx = dict()
         for (site1,site2) in self.pairs:
             ex[site1,site2] = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn) * sign
+         
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         #print(config)
