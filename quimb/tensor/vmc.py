@@ -555,7 +555,8 @@ class TNVMC: # stochastic sampling
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
                 w[ix],self.deltas[start:stop],dE[ix] = \
                     _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
-            w = min(f'ix={ix},eigval={np.array(w).real}')
+                print(f'ix={ix},eigval={w[ix]}')
+            w = min(np.array(w).real)
             dE = np.sum(dE)
         print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
         if self.tmpdir is not None:

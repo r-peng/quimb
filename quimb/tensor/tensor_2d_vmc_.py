@@ -1,4 +1,4 @@
-import time,itertools
+import time,itertools,psutil
 import numpy as np
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -11,7 +11,7 @@ import sys
 import autoray as ar
 import torch
 torch.autograd.set_detect_anomaly(False)
-from .torch_utils_ import SVD,QR
+from .torch_utils_ import SVD,QR,set_max_bond
 ar.register_function('torch','linalg.svd',SVD.apply)
 ar.register_function('torch','linalg.qr',QR.apply)
 this = sys.modules[__name__]
@@ -22,6 +22,7 @@ def set_options(pbc=False,deterministic=False,cache_size=2**12,**compress_opts):
 
     #from .tensor_core import set_contract_path_cache
     #set_contract_path_cache(in_mem_cache_size=cache_size)
+    set_max_bond(compress_opts.get('max_bond',None))
 
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
@@ -543,6 +544,8 @@ class Hamiltonian(ContractionEngine):
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
             return 0.
+        mem = psutil.virtual_memory()
+        print(site1,site2,f'percent={mem.percent}')
         kixs = [tn.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
@@ -597,10 +600,14 @@ class Hamiltonian(ContractionEngine):
     def pair_energies_from_plq(self,config,peps,cache_bot,cache_top):
         x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
         self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
+        mem = psutil.virtual_memory()
+        print(f'benvs,percent={mem.percent}')
 
         plq = dict()
         for x_bsz,y_bsz in self.plq_sz:
             plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
+        mem = psutil.virtual_memory()
+        print(f'plq,percent={mem.percent}')
 
         ex = dict()
         cx = dict()
@@ -619,19 +626,20 @@ class Hamiltonian(ContractionEngine):
                     cij = tn.copy().contract()
                 cx[site1] = cij 
                 cx[site2] = cij 
+        mem = psutil.virtual_memory()
+        print(f'e,percent={mem.percent}')
         return ex,cx,plq
-    def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn,compute_Hv):
+    def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.,0. 
+            return 0.
         assert site1[0] <= site2[0]
         imin = min(self.rix1+1,site1[0]) 
         imax = max(self.rix2-1,site2[0]) 
         top = None if imax==peps.Lx-1 else cache_top[config[(imax+1)*peps.Ly:]]
         bot = None if imin==0 else cache_bot[config[:imin*peps.Ly]]
         eij = 0.
-        Hvij = 0.
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
         for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
             config_new = list(config)
@@ -657,11 +665,7 @@ class Hamiltonian(ContractionEngine):
             tn = bot_term.copy()
             tn.add_tensor_network(top_term,virtual=False)
             try:
-                cnew = tn.contract()
-                eij += coeff * sign_new * cnew 
-                if compute_Hv:
-                    cnew.backward(retain_graph=True)
-                    
+                eij += coeff * sign_new * tn.contract()
             except (ValueError,IndexError):
                 continue
         return eij * coeff_comm
@@ -672,13 +676,12 @@ class Hamiltonian(ContractionEngine):
         sign = sign_fn(config) 
         cx = tn.contract() * sign
         ex = dict()
-        Hvx = dict()
         for (site1,site2) in self.pairs:
             ex[site1,site2] = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn) * sign
          
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        #print(config)
+        print(config)
         if self.tmpdir is not None:
             if RANK % self.log_every==0:
                 snapshots(self.tmpdir,RANK)
@@ -745,6 +748,8 @@ class Hamiltonian(ContractionEngine):
             if self.backend=='torch':
                 ar.set_backend(np.zeros(1))
             return cx,ex,vx,None,err
+        mem = psutil.virtual_memory()
+        print(f'g,percent={mem.percent}')
 
         # back propagates energy gradient
         t0 = time.time()
@@ -757,6 +762,8 @@ class Hamiltonian(ContractionEngine):
         Hvx += eu * vx 
         if self.backend=='torch':
             ar.set_backend(np.zeros(1))
+        mem = psutil.virtual_memory()
+        print(f'H,percent={mem.percent}')
         return cx,ex,vx,Hvx,err
     def contraction_error(self,cx):
         #if len(cx)==0:
