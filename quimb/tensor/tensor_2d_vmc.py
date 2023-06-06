@@ -563,7 +563,7 @@ class Hamiltonian(ContractionEngine):
             return self.pair_coeff(site1,site2) * ex 
         except (ValueError,IndexError):
             return None 
-    def batch_local_hessian(self,batch_idx,config,amplitude_factory): # only used for Hessian
+    def batch_hessian(self,batch_idx,config,amplitude_factory): # only used for Hessian
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
@@ -625,14 +625,14 @@ class Hamiltonian(ContractionEngine):
         # compute plq grad
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
-    def compute_local_energy_hessian(self,config,amplitude_factory): # for Hessian only
+    def compute_local_energy_hessian(self,config,amplitude_factory): 
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
         ex,Hvx = 0.,0.
         cx,vx = dict(),dict()
         for batch_idx in self.batched_pairs:
-            ex_,Hvx_,cx_,vx_ = self.batch_local_hessian(batch_idx,config,amplitude_factory)  
+            ex_,Hvx_,cx_,vx_ = self.batch_hessian(batch_idx,config,amplitude_factory)  
             ex += ex_
             Hvx += Hvx_
             cx.update(cx_)
@@ -695,13 +695,13 @@ class Hamiltonian(ContractionEngine):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.
+            return None 
         assert site1[0] <= site2[0]
         imin = min(self.rix1+1,site1[0]) 
         imax = max(self.rix2-1,site2[0]) 
         top = None if imax==peps.Lx-1 else cache_top[config[(imax+1)*peps.Ly:]]
         bot = None if imin==0 else cache_bot[config[:imin*peps.Ly]]
-        eij = 0.
+        ex = [] 
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
         for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
             config_new = list(config)
@@ -727,40 +727,90 @@ class Hamiltonian(ContractionEngine):
             tn = bot_term.copy()
             tn.add_tensor_network(top_term,virtual=False)
             try:
-                eij += coeff * sign_new * tn.contract()
+                ex.append(coeff * sign_new * tn.contract())
             except (ValueError,IndexError):
                 continue
-        return eij * coeff_comm
-    def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
-        # compute energy
-        self.backend = 'numpy'
-        peps = amplitude_factory.psi
-        cache_bot = amplitude_factory.cache_bot
-        cache_top = amplitude_factory.cache_top
-
-        env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
-
+        if len(ex)==0:
+            return None
+        return sum(ex) * coeff_comm
+    def batch_hessian_deterministic(self,config,amplitude_factory,imin_,imax_):
+        cache_top = dict()
+        cache_bot = dict()
+        peps = amplitude_factory.psi.copy()
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
+        
+        #t0 = time.time()
+        imin = min(self.rix1+1,imin_) 
+        imax = max(self.rix2-1,imax_) 
+        self.get_all_bot_envs(peps,config,cache_bot,imax=imin+1)
+        self.get_all_top_envs(peps,config,cache_top,imin=imax-1)
+        #print(f'benv,time={time.time()-t0}')
         sign_fn = amplitude_factory.config_sign
-        ex = 0. 
-        for (site1,site2) in self.pairs:
-            ex += self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn)
-        eu = self.compute_local_energy_eigen(config)
-        if not compute_v:
+
+        #t0 = time.time()
+        ex = []
+        for site1,site2 in self.batched_pairs[imin_,imax_]:
+            ex_ = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn)
+            if ex_ is not None:
+                ex.append(ex_)
+        if len(ex)==0:
+            return 0.,0.
+        ex = sum(ex) 
+        #print(f'ex,time={time.time()-t0}')
+
+        #t0 = time.time()
+        ex.backward()
+        Hvx = dict()
+        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+            Hvx[i,j] = self.tsr_grad(peps[i,j].data)  
+        Hvx = {site:self._2numpy(Hvij) for site,Hvij in Hvx.items()}
+        Hvx = amplitude_factory.dict2vec(Hvx)  
+        ex = self._2numpy(ex) 
+        #print(f'Hvx,time={time.time()-t0}')
+        return ex,Hvx
+    def pair_hessian_deterministic(self,config,amplitude_factory,site1,site2):
+        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+        i1,i2 = config[ix1],config[ix2]
+        if not self.pair_valid(i1,i2): # term vanishes 
+            return 0.,0. 
+
+        cache_top = dict()
+        cache_bot = dict()
+        peps = amplitude_factory.psi.copy()
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
+
+        coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
+        ex = 0.
+        Hvx = 0.
+        for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
+            config_new = list(config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = tuple(config_new)
+            sign_new = amplitude_factory.config_sign(config_new)
+
+            #t0 = time.time()
+            env_bot,env_top = self.get_all_benvs(peps,config_new,cache_bot,cache_top)
             tn = env_bot.copy()
             tn.add_tensor_network(env_top,virtual=False)
             cx = tn.contract() 
+            #print(f'ex,time={time.time()-t0}')
 
-            ex = ex/cx + eu
-            return cx,ex,None,None,0.
+            #t0 = time.time()
+            cx.backward()
+            vx = dict()
+            for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+                vx[i,j] = self.tsr_grad(peps[i,j].data)  
+            vx = {site:self._2numpy(vij) for site,vij in vx.items()}
+            vx = amplitude_factory.dict2vec(vx)  
+            cx = self._2numpy(cx) 
+            #print(f'Hvx,time={time.time()-t0}')
 
-        # compute_amplitude_gradient 
-        self.backend = 'torch'
-        ar.set_backend(torch.zeros(1))
-        cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
-        ar.set_backend(np.zeros(1))
-
-        ex = ex/cx + eu
-        return cx,ex,vx,None,0.
+            ex += coeff * sign_new * cx 
+            Hvx += coeff * sign_new * vx
+        return ex * coeff_comm, Hvx * coeff_comm
     def amplitude_gradient_deterministic(self,config,amplitude_factory):
         cache_top = dict()
         cache_bot = dict()
@@ -784,71 +834,67 @@ class Hamiltonian(ContractionEngine):
         cx = self._2numpy(cx)
         #print(f'vx,time={time.time()-t0}')
         return cx,vx/cx
-    def pair_energy_hessian_deterministic(self,config,amplitude_factory,site1,site2):
-        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-        i1,i2 = config[ix1],config[ix2]
-        if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.,0. 
-
-        cache_top = dict()
-        cache_bot = dict()
-        peps = amplitude_factory.psi.copy()
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-
-        coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
-        ex = 0.
-        Hvx = 0.
-        for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
-            sign_new = amplitude_factory.config_sign(config_new)
-
-            t0 = time.time()
-            env_bot,env_top = self.get_all_benvs(peps,config_new,cache_bot,cache_top)
-            tn = env_bot.copy()
-            tn.add_tensor_network(env_top,virtual=False)
-            cx = tn.contract() 
-            print(f'ex,time={time.time()-t0}')
-
-            t0 = time.time()
-            cx.backward()
-            vx = dict()
-            for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-                vx[i,j] = self.tsr_grad(peps[i,j].data)  
-            vx = {site:self._2numpy(vij) for site,vij in vx.items()}
-            vx = amplitude_factory.dict2vec(vx)  
-            cx = self._2numpy(cx) 
-            print(f'Hvx,time={time.time()-t0}')
-
-            ex += coeff * sign_new * cx 
-            Hvx += coeff * sign_new * vx
-        return ex * coeff_comm, Hvx * coeff_comm
     def compute_local_energy_hessian_deterministic(self,config,amplitude_factory):
-        print(config)
+        #print(config)
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
         cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
 
-        t0 = time.time()
+        #t0 = time.time()
         ex = 0. 
         Hvx = 0.
-        for (site1,site2) in self.pairs:
-            ex_,Hvx_ = self.pair_energy_hessian_deterministic(config,amplitude_factory,site1,site2) 
+        for key in self.batched_pairs:
+            if key=='pbc':
+                continue
+            imin,imax = key
+            ex_,Hvx_ = self.batch_hessian_deterministic(config,amplitude_factory,imin,imax) 
             ex += ex_
             Hvx += Hvx_
-        print(f'e,time={time.time()-t0}')
-        exit()
+        if self.pbc:
+            for site1,site2 in self.batched_pairs['pbc']:
+                ex_,Hvx_ = self.pair_hessian_deterministic(self,config,amplitude_factory,site1,site2)
+                ex += ex_
+                Hvx += Hvx_
+        #print(f'e,time={time.time()-t0}')
          
-        ex = self._2numpy(ex)
-        cx = self._2numpy(cx)
         eu = self.compute_local_energy_eigen(config)
         ex = ex/cx + eu
         Hvx = Hvx/cx + eu*vx
+        ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,0. 
+    def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
+        # compute energy
+        self.backend = 'numpy'
+        peps = amplitude_factory.psi
+        cache_bot = amplitude_factory.cache_bot
+        cache_top = amplitude_factory.cache_top
+
+        env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
+
+        sign_fn = amplitude_factory.config_sign
+        ex = 0. 
+        for (site1,site2) in self.pairs:
+            ex_ = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn)
+            if ex_ is not None:
+                ex += ex_
+        eu = self.compute_local_energy_eigen(config)
+        if not compute_v:
+            tn = env_bot.copy()
+            tn.add_tensor_network(env_top,virtual=False)
+            cx = tn.contract() 
+
+            ex = ex/cx + eu
+            return cx,ex,None,None,0.
+
+        # compute_amplitude_gradient 
+        self.backend = 'torch'
+        ar.set_backend(torch.zeros(1))
+        cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
+        ar.set_backend(np.zeros(1))
+
+        ex = ex/cx + eu
+        return cx,ex,vx,None,0.
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         if self.deterministic:
             if compute_Hv:
@@ -866,7 +912,7 @@ class Hamiltonian(ContractionEngine):
         mean = sum(cij for cij in cx.values()) / nsite
         err = sqmean - mean**2
         return mean,np.fabs(err/mean)
-    def nn_pairs_pbc(self):
+    def nn_pairs(self):
         ls = [] 
         for i in range(self.Lx):
             for j in range(self.Ly):
@@ -874,16 +920,18 @@ class Hamiltonian(ContractionEngine):
                     where = (i,j),(i,j+1)
                     ls.append(where)
                 else:
-                    where = (i,0),(i,j)
-                    ls.append(where)
+                    if self.pbc:
+                        where = (i,0),(i,j)
+                        ls.append(where)
                 if i+1<self.Lx:
                     where = (i,j),(i+1,j)
                     ls.append(where)
                 else:
-                    where = (0,j),(i,j)
-                    ls.append(where)
+                    if self.pbc:
+                        where = (0,j),(i,j)
+                        ls.append(where)
         return ls
-    def diag_pairs_pbc(self):
+    def diag_pairs(self):
         ls = [] 
         for i in range(self.Lx):
             for j in range(self.Ly):
@@ -893,14 +941,68 @@ class Hamiltonian(ContractionEngine):
                     where = (i,j+1),(i+1,j)
                     ls.append(where)
                 else:
-                    ix1,ix2 = self.flatten(i,j),self.flatten((i+1)%self.Lx,(j+1)%self.Ly)
-                    where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                    ls.append(where)
-                    
-                    ix1,ix2 = self.flatten(i,(j+1)%self.Ly),self.flatten((i+1)%self.Lx,j)
-                    where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                    ls.append(where)
+                    if self.pbc:
+                        ix1,ix2 = self.flatten(i,j),self.flatten((i+1)%self.Lx,(j+1)%self.Ly)
+                        where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
+                        ls.append(where)
+                        
+                        ix1,ix2 = self.flatten(i,(j+1)%self.Ly),self.flatten((i+1)%self.Lx,j)
+                        where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
+                        ls.append(where)
         return ls
+    def batch_nnh(self):
+        for i in range(self.Lx):
+            ls = self.batched_pairs.get((i,i),[])
+            for j in range(self.Ly):
+                if j+1<self.Ly:
+                    where = (i,j),(i,j+1)
+                    ls.append(where)
+                else:
+                    if self.pbc:
+                        where = (i,0),(i,j)
+                        ls.append(where)
+            self.batched_pairs[i,i] = ls
+    def batch_nnv(self):
+        for i in range(self.Lx-1):
+            ls = self.batched_pairs.get((i,i+1),[])
+            for j in range(self.Ly):
+                where = (i,j),(i+1,j)
+                ls.append(where)
+            self.batched_pairs[i,i+1] = ls
+        if not self.pbc:
+            return
+        ls = self.batched_pairs.get('pbc',[]) 
+        for j in range(self.Ly):
+            where = (0,j),(i,j)
+            ls.append(where)
+        self.batched_pairs['pbc'] = ls
+    def batch_diag(self):
+        for i in range(self.Lx-1):
+            ls = self.batched_pairs.get((i,i+1),[])
+            for j in range(self.Ly):
+                if i+1<self.Lx and j+1<self.Ly:
+                    where = (i,j),(i+1,j+1)
+                    ls.append(where)
+                    where = (i,j+1),(i+1,j)
+                    ls.append(where)
+                else:
+                    if self.pbc:
+                        where = (i,j),(i+1,(j+1)%self.Ly)
+                        ls.append(where)
+                        
+                        where = (i,(j+1)%self.Ly),(i+1,j)
+                        ls.append(where)
+            self.batched_pairs[i,i+1] = ls
+        if not self.pbc:
+            return
+        ls = self.batched_pairs.get('pbc',[])
+        for j in range(self.Ly):
+            where = (0,(j+1)%self.Ly),(self.Lx-1,j)
+            ls.append(where)
+            
+            where = (0,j),(self.Lx-1,(j+1)%self.Ly)
+            ls.append(where)
+        self.batched_pairs['pbc'] = ls 
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5
@@ -1006,46 +1108,48 @@ class J1J2(Hamiltonian):
         self.key = 'Jxy'
         self.data_map[self.key] = data
 
-        if self.pbc:
-            self.pairs = self.nn_pairs_pbc() + self.diag_pairs_pbc()
+        self.pairs = self.nn_pairs() + self.diag_pairs() # list of all pairs, for SR
+        if self.deterministic:
+            self.batch_deterministic()
         else:
-            self.batched_pairs = dict()
-            batchsize = max(self.Lx // self.nbatch, 2)
-            for i in range(self.Lx):
-                batch_idx = i // batchsize
-                if batch_idx not in self.batched_pairs:
-                    self.batched_pairs[batch_idx] = [],[] 
-                rows,pairs = self.batched_pairs[batch_idx]
-                rows.append(i)
-                if i+1 < self.Lx:
-                    rows.append(i+1)
-                for j in range(self.Ly):
-                    if j+1<self.Ly: # NN
-                        where = (i,j),(i,j+1)
-                        pairs.append(where)
-                    if i+1<self.Lx: # NN
-                        where = (i,j),(i+1,j)
-                        pairs.append(where)
-                    if i+1<self.Lx and j+1<self.Ly: # diag
-                        where = (i,j),(i+1,j+1)
-                        pairs.append(where)
-                        where = (i,j+1),(i+1,j)
-                        pairs.append(where)
-            self.pairs = []
-            for batch_idx in self.batched_pairs:
-                rows,pairs = self.batched_pairs[batch_idx]
-                imin,imax = min(rows),max(rows)
-                plq_types = (imin,imax-1,2,2),
-                bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
-                self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs # bot_ix,top_ix,pairs 
-                self.pairs += pairs
-            self.plq_sz = (2,2),
-            #for batch_idx in self.batched_pairs:
-            #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
-            #    print(batch_idx,bix,tix,plq_types)
-            #    print(pairs)
-            if RANK==0:
-                print('nbatch=',len(self.batched_pairs))
+            self.batch()
+    def batch(self):
+        self.batched_pairs = dict()
+        batchsize = max(self.Lx // self.nbatch, 2)
+        for i in range(self.Lx):
+            batch_idx = i // batchsize
+            if batch_idx not in self.batched_pairs:
+                self.batched_pairs[batch_idx] = [],[] 
+            rows,pairs = self.batched_pairs[batch_idx]
+            rows.append(i)
+            if i+1 < self.Lx:
+                rows.append(i+1)
+            for j in range(self.Ly):
+                if j+1<self.Ly: # NN
+                    where = (i,j),(i,j+1)
+                    pairs.append(where)
+                if i+1<self.Lx: # NN
+                    where = (i,j),(i+1,j)
+                    pairs.append(where)
+                if i+1<self.Lx and j+1<self.Ly: # diag
+                    where = (i,j),(i+1,j+1)
+                    pairs.append(where)
+                    where = (i,j+1),(i+1,j)
+                    pairs.append(where)
+        for batch_idx in self.batched_pairs:
+            rows,pairs = self.batched_pairs[batch_idx]
+            imin,imax = min(rows),max(rows)
+            plq_types = (imin,imax-1,2,2),
+            bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
+            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs # bot_ix,top_ix,pairs 
+        self.plq_sz = (2,2),
+        if RANK==0:
+            print('nbatch=',len(self.batched_pairs))
+    def batch_deterministic(self):
+        self.batched_pairs = dict()
+        self.batch_nnh() 
+        self.batch_nnv() 
+        self.batch_diag() 
     def pair_key(self,site1,site2):
         i0 = min(site1[0],site2[0],self.Lx-2)
         j0 = min(site1[1],site2[1],self.Ly-2)
