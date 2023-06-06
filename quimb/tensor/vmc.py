@@ -17,18 +17,25 @@ MAXITER = 100
 ##################################################################################################
 # VMC utils
 ##################################################################################################
-def _rgn_block_solve(H,E,S,g,cond):
+def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
+    sh = len(g)
     # hessian 
     hess = H - E * S
-    # smallest eigenvalue
-    w = np.linalg.eigvals(hess)
-    idx = np.argmin(w.real)
-    wmin = w[idx]
+    R = S + eta * np.eye(sh)
+
+    wmin = -1. + 0.j
+    eps = eps0 / 2.
+    while wmin.real < 0.:
+        # smallest eigenvalue
+        eps *= 2.
+        w = np.linalg.eigvals(hess + R/eps)
+        idx = np.argmin(w.real)
+        wmin = w[idx]
     # solve
-    deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
+    deltas = np.linalg.solve(hess + R/eps,g)
     # compute model energy
-    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
-    return wmin,deltas,dE
+    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
+    return deltas,dE,wmin,eps
 def _lin_block_solve(H,E,S,g,Hvmean,vmean,cond):
     Hi0 = g
     H0j = Hvmean - E * vmean
@@ -547,15 +554,15 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
+            self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
         else:
             w = [None] * self.nsite
             dE = np.zeros(self.nsite)  
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
-                w[ix],self.deltas[start:stop],dE[ix] = \
-                    _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
-                print(f'ix={ix},eigval={w[ix]}')
+                self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
+                    self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
+                print(f'ix={ix},eigval={w[ix]},eps={eps}')
             w = min(np.array(w).real)
             dE = np.sum(dE)
         print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
@@ -577,15 +584,13 @@ class TNVMC: # stochastic sampling
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
         return dE
-    def solve_iterative(self,A,b,cond,symm):
+    def solve_iterative(self,A,b,symm):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)
         sh = len(b)
         if RANK==0:
             t0 = time.time()
-            def _A(x):
-                return A(x) + cond * x
-            LinOp = spla.LinearOperator((sh,sh),matvec=_A,dtype=b.dtype)
+            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=b.dtype)
             if symm:
                 deltas,info = spla.minres(LinOp,b,tol=CG_TOL,maxiter=MAXITER)
             else: 
@@ -606,11 +611,15 @@ class TNVMC: # stochastic sampling
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         if solve_full: 
-            self.deltas = self.solve_iterative(self.S,g,self.cond1,True)
+            def R(x):
+                return self.S(x) + self.cond1 * x
+            self.deltas = self.solve_iterative(R,g,True)
         else:
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
-                self.deltas[strt:stop] = self.solve_iterative(self.S[ix],g[start:stop],self.cond1,True)
+                def R(x):
+                    return self.S[ix](x) + self.cond1 * x
+                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True)
         if RANK==0:
             return self.update(self.rate1)
         else:
@@ -620,7 +629,7 @@ class TNVMC: # stochastic sampling
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         E = self.E if RANK==0 else 0
         if solve_full: 
-            def hess(x):
+            def A(x):
                 if self.terminate[0]==1:
                     return 0
                 Hx = self.H(x)
@@ -629,10 +638,10 @@ class TNVMC: # stochastic sampling
                 Sx = self.S(x)
                 if self.terminate[0]==1:
                     return 0
-                return Hx - E * Sx
-            self.deltas = self.solve_iterative(hess,g,self.cond2,False)
+                return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+            self.deltas = self.solve_iterative(A,g,False)
             self.terminate[0] = 0
-            hessp = hess(self.deltas)
+            hessp = A(self.deltas)
             if RANK==0:
                 dE = np.dot(self.deltas,hessp)
         else:
@@ -649,11 +658,11 @@ class TNVMC: # stochastic sampling
                     Sx = self.S[ix](x)
                     if self.terminate[0]==1:
                         return 0
-                    return Hx - E * Sx
-                deltas = self.solve_iterative(hess,g[start:stop],self.cond2,False)
+                    return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                deltas = self.solve_iterative(A,g[start:stop],False)
                 self.deltas[start:stop] = deltas 
                 self.terminate[0] = 0
-                hessp = hess(deltas)
+                hessp = A(deltas)
                 if RANK==0:
                     dE += np.dot(hessp,deltas)
         if RANK==0:
@@ -667,7 +676,7 @@ class TNVMC: # stochastic sampling
             dE = self._transform_gradients_lin()
         else:
             raise NotImplementedError
-        xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         deltas_rgn = self.deltas
         if self.check is None:
             return xnew_rgn

@@ -756,25 +756,25 @@ class Hamiltonian(ContractionEngine):
         # compute_amplitude_gradient 
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
-        cx,vx = self.amplitude_gradient_determinstic(config,amplitude_factory)
+        cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
         ar.set_backend(np.zeros(1))
 
         ex = ex/cx + eu
         return cx,ex,vx,None,0.
-    def amplitude_gradient_deterministic(self,config,amplitde_factory):
+    def amplitude_gradient_deterministic(self,config,amplitude_factory):
         cache_top = dict()
         cache_bot = dict()
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        t0 = time.time()
+        #t0 = time.time()
         env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
         tn = env_bot.copy()
         tn.add_tensor_network(env_top,virtual=False)
         cx = tn.contract() 
-        print('cx,time={time.time()-t0}')
+        #print(f'cx,time={time.time()-t0}')
 
-        t0 = time.time()
+        #t0 = time.time()
         cx.backward()
         vx = dict()
         for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
@@ -782,13 +782,13 @@ class Hamiltonian(ContractionEngine):
         vx = {site:self._2numpy(vij) for site,vij in vx.items()}
         vx = amplitude_factory.dict2vec(vx)  
         cx = self._2numpy(cx)
-        print('vx,time={time.time()-t0}')
+        #print(f'vx,time={time.time()-t0}')
         return cx,vx/cx
-    def pair_energy_hessian_deterministic(self,config,amplitude_factory):
+    def pair_energy_hessian_deterministic(self,config,amplitude_factory,site1,site2):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return None
+            return 0.,0. 
 
         cache_top = dict()
         cache_bot = dict()
@@ -811,7 +811,7 @@ class Hamiltonian(ContractionEngine):
             tn = env_bot.copy()
             tn.add_tensor_network(env_top,virtual=False)
             cx = tn.contract() 
-            print('ex,time={time.time()-t0}')
+            print(f'ex,time={time.time()-t0}')
 
             t0 = time.time()
             cx.backward()
@@ -831,13 +831,13 @@ class Hamiltonian(ContractionEngine):
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
-        cx,vx = self.amplitude_gradient_deterministic(self.config,amplitude_factory)
+        cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
 
         t0 = time.time()
         ex = 0. 
         Hvx = 0.
         for (site1,site2) in self.pairs:
-            ex_,Hvx_ = self.pair_energy_hessian_deterministic(config,amplitde_factory,site1,site2) 
+            ex_,Hvx_ = self.pair_energy_hessian_deterministic(config,amplitude_factory,site1,site2) 
             ex += ex_
             Hvx += Hvx_
         print(f'e,time={time.time()-t0}')
