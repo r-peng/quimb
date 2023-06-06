@@ -18,10 +18,13 @@ epsilon = 1e-12
 fix_sign = True 
 #fix_sign = False 
 
+this = sys.modules[__name__]
+def set_max_bond(max_bond):
+    this.max_bond = max_bond
+this.n = 0
+
 def safe_inverse(x):
     return x/(x.pow(2) + epsilon)
-#def safe_inverse(x):
-#    return 1./(x + epsilon)
 def make_zeros(A):
     M,N = A.size()
     U = torch.eye(n=M,m=1)
@@ -47,11 +50,11 @@ def SVDforward(A):
         Vh = torch.from_numpy(Vh)
 
     if is_one(S): # A is isometry
-        M,N = A.size()
-        if M>=N:
-            return A,S,torch.eye(N,dtype=A.dtype)
-        else:
-            return torch.eye(M,dtype=A.dtype),S,A
+        raise ValueError
+    if max_bond is not None:
+        U = U[:,:max_bond]
+        S = S[:max_bond]
+        Vh = Vh[:max_bond,:]
 
     if fix_sign:
         # make SVD result sign-consistent across multiple runs
@@ -69,14 +72,6 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
         raise ValueError("dVh is not finite")
     M = U.size(0)
     N = Vh.size(1)
-    if is_one(S): # A is isometry
-        if M>=N:
-            return dU
-        else:
-            return dVh    
-    #for i in range(K-1):
-    #    if torch.abs(S[i]-S[i+1])<epsilon:
-    #        print('warning! degenerate singular values', S,S[i],S[i+1])
 
     F = (S - S[:, None])
     F = safe_inverse(F)
@@ -93,8 +88,6 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
     Sv = (F-G)*(VdV-VdV.t())/2
 
     dA = U @ (Su + Sv + torch.diag(dS)) @ Vh
-    if not torch.all(torch.isfinite(dA)):
-        raise ValueError("dA is not finite")
     Su = Sv = UdU = VdV = G = F = None   # help with memory
     Sinv = safe_inverse(S)
     NS = S.size(0)
@@ -117,14 +110,14 @@ def SVDbackward(dU,dS,dVh,U,S,Vh):
         dA += (tmp1 - tmp2)
     if not torch.all(torch.isfinite(dA)):
         raise ValueError("dA is not finite")
-    U = S = Vh = None
-    tmp1 = tmp2 = None
     return dA
 class SVD(torch.autograd.Function):
     @staticmethod
     def forward(self, A):
         U,S,Vh = SVDforward(A)
         self.save_for_backward(U, S, Vh)
+        this.n += 3
+        #print(this.n)
         return U, S, Vh
     @staticmethod
     def backward(self, dU, dS, dVh):
@@ -196,6 +189,9 @@ class QR(torch.autograd.Function):
             R = torch.from_numpy(R)
 
         diag = R.diag()
+        if is_one(diag):
+            print(R)
+            raise ValueError
         inds = torch.abs(diag) < epsilon
         if len(inds) > 0: # rank deficient, revert to svd
             U,S,Vh = SVDforward(A)
@@ -208,6 +204,8 @@ class QR(torch.autograd.Function):
             Q = Q * sign
             R = R * sign.t()
         self.save_for_backward(A,Q,R)
+        this.n += 3
+        #print(this.n)
         return Q,R
         
     @staticmethod
@@ -251,6 +249,7 @@ def test_qr():
     t0 = time.time()
     assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
     print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
+
 if __name__=='__main__':
     test_svd()
     test_qr()

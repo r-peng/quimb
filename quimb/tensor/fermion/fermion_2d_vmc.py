@@ -17,7 +17,7 @@ import torch
 #torch.autograd.set_detect_anomaly(True)
 torch.autograd.set_detect_anomaly(False)
 
-from ..torch_utils import SVD,QR
+from ..torch_utils import SVD,QR,set_max_bond
 ar.register_function('torch','linalg.svd',SVD.apply)
 ar.register_function('torch','linalg.qr',QR.apply)
 
@@ -30,6 +30,8 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     this.pbc = pbc
     this.deterministic = True if pbc else deterministic
     this.compress_opts = compress_opts
+    set_max_bond(compress_opts.get('max_bond',None))
+
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
@@ -324,10 +326,9 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 ####################################################################################
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def __init__(self,Lx,Ly,discard=None,grad_by_ad=True,tmpdir=None,log_every=1):
+    def __init__(self,Lx,Ly,nbatch=1,tmpdir=None,log_every=1):
         super().init_contraction(Lx,Ly)
-        self.discard = discard 
-        self.grad_by_ad = True if deterministic else grad_by_ad
+        self.nbatch = nbatch
         self.tmpdir = tmpdir
         if self.tmpdir is not None:
             self.log_every = log_every
@@ -342,16 +343,42 @@ class Hubbard(Hamiltonian):
         self.t,self.u = t,u
         self.key = 'h1'
 
-        self.pairs = []
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                if j+1<self.Ly:
-                    where = (i,j),(i,j+1)
-                    self.pairs.append(where)
-                if i+1<self.Lx:
-                    where = (i,j),(i+1,j)
-                    self.pairs.append(where)
-        self.plq_sz = (1,2),(2,1)
+        if self.pbc:
+            self.pairs = self.nn_pairs_pbc()
+        else:
+            self.batched_pairs = dict() 
+            batchsize = self.Lx // self.nbatch 
+            for i in range(self.Lx):
+                batch_idx = i // batchsize
+                if batch_idx not in self.batched_pairs:
+                    self.batched_pairs[batch_idx] = [],[] 
+                rows,pairs = self.batched_pairs[batch_idx]
+                rows.append(i)
+                if i+1 < self.Lx:
+                    rows.append(i+1)
+                for j in range(self.Ly):
+                    if j+1<self.Ly:
+                        where = (i,j),(i,j+1)
+                        pairs.append(where)
+                    if i+1<self.Lx:
+                        where = (i,j),(i+1,j)
+                        pairs.append(where)
+            self.pairs = []
+            for batch_idx in self.batched_pairs:
+                rows,pairs = self.batched_pairs[batch_idx]
+                imin,imax = min(rows),max(rows)
+                bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix,pairs 
+                plq_types = (imin,imax,1,2), (imin,imax-1,2,1),# i0_min,i0_max,x_bsz,y_bsz
+                self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
+                self.pairs += pairs
+            self.plq_sz = (1,2),(2,1)
+            #for batch_idx in self.batched_pairs:
+            #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
+            #    print(batch_idx,bix,tix,plq_types)
+            #    print(pairs)
+            if RANK==0:
+                print('nbatch=',len(self.batched_pairs))
+            #exit()
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]

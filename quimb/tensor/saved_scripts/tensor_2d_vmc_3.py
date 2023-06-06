@@ -1,4 +1,4 @@
-import time,itertools,psutil
+import time,itertools
 import numpy as np
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -11,17 +11,15 @@ import sys
 import autoray as ar
 import torch
 torch.autograd.set_detect_anomaly(False)
-from .torch_utils_ import SVD,QR,set_max_bond
+from .torch_utils import SVD,QR,set_max_bond
 ar.register_function('torch','linalg.svd',SVD.apply)
 ar.register_function('torch','linalg.qr',QR.apply)
 this = sys.modules[__name__]
-def set_options(pbc=False,deterministic=False,cache_size=2**12,**compress_opts):
+def set_options(pbc=False,deterministic=False,**compress_opts):
     this.pbc = pbc
     this.deterministic = True if pbc else deterministic
     this.compress_opts = compress_opts
 
-    #from .tensor_core import set_contract_path_cache
-    #set_contract_path_cache(in_mem_cache_size=cache_size)
     set_max_bond(compress_opts.get('max_bond',None))
 
 def flatten(i,j,Ly): # flattern site to row order
@@ -68,7 +66,7 @@ def get_product_state(Lx,Ly,config=None,bdim=1,eps=None):
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
-from .tensor_core import Tensor,TensorNetwork,rand_uuid,group_inds
+from .tensor_core import Tensor,TensorNetwork,rand_uuid
 def peps2pbc(peps):
     vbonds = [rand_uuid() for j in range(peps.Ly)]
     hbonds = [rand_uuid() for i in range(peps.Lx)]
@@ -181,71 +179,26 @@ class ContractionEngine:
         except (ValueError,IndexError):
             row = None 
         return row
-    def compress_row_pbc(self,tn,i):
-        for j in range(self.Ly): # compress between j,j+1
-            tn.compress_between(tn.site_tag(i,j),tn.site_tag(i,(j+1)%self.Ly),
-                                **self.compress_opts)
+    def canonize_row(self,tn,i,j,dist,step):
+        seq = [(j+step*ix)%self.Ly for ix in range(dist+1)]
+        for ix in range(dist,0,-1): # left canonize to j
+            tag1,tag2 = tn.site_tag(i,seq[ix]),tn.site_tag(i,seq[ix-1])
+            tn.canonize_between(tag1,tag2,absorb='right')
         return tn
-    def tensor_compress_bond(self,T1,T2,absorb='right'):
-        # TODO:check for absorb='left'
-        left_env_ix, shared_ix, right_env_ix = group_inds(T1, T2)
-        if not shared_ix:
-            raise ValueError("The tensors specified don't share an bond.")
-        elif len(shared_ix) > 1:
-            # fuse multibonds
-            T1.fuse_({shared_ix[0]: shared_ix})
-            T2.fuse_({shared_ix[0]: shared_ix})
-            shared_ix = (shared_ix[0],)
-        T1_inds,T2_inds = T1.inds,T2.inds
-
-        # a) -> b)
-        tmp_ix = rand_uuid()
-        T1.reindex_({shared_ix[0]:tmp_ix})
-        T2.reindex_({shared_ix[0]:tmp_ix})
-        if absorb=='right': # assume T2 is isometric
-            T1_L, T1_R = T1.split(left_inds=left_env_ix, right_inds=(tmp_ix,),
-                                  get='tensors', method='qr')
-            M,T2_R = T1_R,T2
-        elif absorb=='left': # assume T1 is isometric
-            T2_L, T2_R = T2.split(left_inds=(tmp_ix,), right_inds=right_env_ix,
-                                  get='tensors', method='lq')
-            T1_L,M = T1,T2_L
-        else:
-            raise NotImplementedError(f'absorb={absorb}')
-        # c) -> d)
-        M_L, *s, M_R = M.split(left_inds=T1_L.bonds(M), get='tensors',
-                               absorb=absorb, **self.compress_opts)
-
-        # make sure old bond being used
-        ns_ix, = M_L.bonds(M_R)
-        M_L.reindex_({ns_ix: shared_ix[0]})
-        M_R.reindex_({ns_ix: shared_ix[0]})
-
-        # d) -> e)
-        T1C = T1_L.contract(M_L, output_inds=T1_inds)
-        T2C = M_R.contract(T2_R, output_inds=T2_inds)
-
-        # update with the new compressed data
-        T1.modify(data=T1C.data)
-        T2.modify(data=T2C.data)
-
-        if absorb == 'right':
-            T1.modify(left_inds=left_env_ix)
-        else:
-            T2.modify(left_inds=right_env_ix)
-    def compress_row_obc(self,tn,i):
-        tn.canonize_row(i,sweep='left')
-        for j in range(self.Ly-1):
-            self.tensor_compress_bond(tn[i,j],tn[i,j+1],absorb='right')        
+    def compress_row(self,tn,i,max_bond=None,cutoff=1e-10,canonize=None):
+        for j in range(self.Ly): # compress between j,j+1
+            if canonize is not None: # canonize=canonize_dist
+                if j==0:
+                    tn = self.canonize_row(tn,i,j,canonize,-1)
+                tn = self.canonize_row(tn,i,j+1,canonize,1)
+            tn.compress_between(tn.site_tag(i,j),tn.site_tag(i,(j+1)%self.Ly),
+                                max_bond=max_bond,cutoff=cutoff,absorb='right')
         return tn
     def contract_boundary_single(self,tn,i,iprev):
         for j in range(self.Ly):
             tag1,tag2 = tn.site_tag(iprev,j),tn.site_tag(i,j)
             tn.contract_((tag1,tag2),which='any')
-        if self.pbc:
-            return self.compress_row_pbc(tn,i)
-        else:
-            return self.compress_row_obc(tn,i)
+        return self.compress_row(tn,i,**self.compress_opts)
     def get_bot_env(self,i,row,env_prev,config,cache):
         # contract mid env for row i with prev bot env 
         key = config[:(i+1)*row.Ly]
@@ -264,8 +217,12 @@ class ContractionEngine:
         tn = env_prev.copy()
         tn.add_tensor_network(row,virtual=False)
         try:
-            tn = self.contract_boundary_single(tn,i,i-1)
+            if self.pbc:
+                tn = self.contract_boundary_single(tn,i,i-1)
+            else:
+                tn.contract_boundary_from_bottom_(xrange=(i-1,i),**self.compress_opts)
         except (ValueError,IndexError):
+        #except (ValueError,IndexError,RuntimeError):
             tn = None
         cache[key] = tn
         return tn 
@@ -295,8 +252,12 @@ class ContractionEngine:
         tn = row
         tn.add_tensor_network(env_prev,virtual=False)
         try:
-            tn = self.contract_boundary_single(tn,i,i+1)
+            if self.pbc:
+                tn = self.contract_boundary_single(tn,i,i+1)
+            else:
+                tn.contract_boundary_from_top_(xrange=(i,i+1),**self.compress_opts)
         except (ValueError,IndexError):
+        #except (ValueError,IndexError,RuntimeError):
             tn = None
         cache[key] = tn
         return tn 
@@ -544,8 +505,6 @@ class Hamiltonian(ContractionEngine):
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
             return 0.
-        mem = psutil.virtual_memory()
-        print(site1,site2,f'percent={mem.percent}')
         kixs = [tn.site_ind(*site) for site in [site1,site2]]
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip([site1,site2],kixs,bixs):
@@ -600,14 +559,10 @@ class Hamiltonian(ContractionEngine):
     def pair_energies_from_plq(self,config,peps,cache_bot,cache_top):
         x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
         self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
-        mem = psutil.virtual_memory()
-        print(f'benvs,percent={mem.percent}')
 
         plq = dict()
         for x_bsz,y_bsz in self.plq_sz:
             plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
-        mem = psutil.virtual_memory()
-        print(f'plq,percent={mem.percent}')
 
         ex = dict()
         cx = dict()
@@ -626,14 +581,12 @@ class Hamiltonian(ContractionEngine):
                     cij = tn.copy().contract()
                 cx[site1] = cij 
                 cx[site2] = cij 
-        mem = psutil.virtual_memory()
-        print(f'e,percent={mem.percent}')
         return ex,cx,plq
     def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.
+            return 0. 
         assert site1[0] <= site2[0]
         imin = min(self.rix1+1,site1[0]) 
         imax = max(self.rix2-1,site2[0]) 
@@ -665,7 +618,7 @@ class Hamiltonian(ContractionEngine):
             tn = bot_term.copy()
             tn.add_tensor_network(top_term,virtual=False)
             try:
-                eij += coeff * sign_new * tn.contract()
+                eij += coeff * sign_new * tn.contract() 
             except (ValueError,IndexError):
                 continue
         return eij * coeff_comm
@@ -678,10 +631,9 @@ class Hamiltonian(ContractionEngine):
         ex = dict()
         for (site1,site2) in self.pairs:
             ex[site1,site2] = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn) * sign
-         
         return ex,cx,sign 
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
-        print(config)
+        #print(config)
         if self.tmpdir is not None:
             if RANK % self.log_every==0:
                 snapshots(self.tmpdir,RANK)
@@ -728,6 +680,8 @@ class Hamiltonian(ContractionEngine):
             ex = sum([eij/cx_dict[site1] for (site1,_),eij in ex_dict.items()])
         eu = self.compute_local_energy_eigen(config)
         ex = self._2numpy(ex) + eu
+        #print(RANK,config,ex)
+        #exit()
         if not compute_v:
             if self.backend=='torch':
                 ar.set_backend(np.zeros(1))
@@ -748,8 +702,6 @@ class Hamiltonian(ContractionEngine):
             if self.backend=='torch':
                 ar.set_backend(np.zeros(1))
             return cx,ex,vx,None,err
-        mem = psutil.virtual_memory()
-        print(f'g,percent={mem.percent}')
 
         # back propagates energy gradient
         t0 = time.time()
@@ -762,8 +714,6 @@ class Hamiltonian(ContractionEngine):
         Hvx += eu * vx 
         if self.backend=='torch':
             ar.set_backend(np.zeros(1))
-        mem = psutil.virtual_memory()
-        print(f'H,percent={mem.percent}')
         return cx,ex,vx,Hvx,err
     def contraction_error(self,cx):
         #if len(cx)==0:
