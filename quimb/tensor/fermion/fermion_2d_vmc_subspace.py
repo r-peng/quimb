@@ -25,197 +25,6 @@ import pyblock3.algebra.ad
 pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
-from pyblock3.algebra.ad.fermion import SparseFermionTensor
-def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
-    this.pbc = pbc
-    this.deterministic = True if pbc else deterministic
-    this.compress_opts = compress_opts
-    set_max_bond(compress_opts.get('max_bond',None))
-
-    this.data_map = dict()
-    for subspace in ['a','b']:
-        from pyblock.algebra.fermion_setting import set_subspace
-        set_subspace(subspace)
-        from pyblock3.algebra.fermion_ops import vaccum,creation,H1
-        cre = creation(spin=subspace,symmetry=symmetry,flat=flat)
-        vac = vaccum(n=1,symmetry=symmetry,flat=flat)
-        occ = np.tensordot(cre,vac,axes=([1],[0])) 
-        h1 = H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))
-        this.data_map['cre_'+subspace] = cre
-        this.data_map['vac_'+subspace] = vac 
-        this.data_map['occ_'+subspace] = occ 
-        this.data_map['h1_'+subspace] = h1
-       
-    this.symmetry = symmetry
-    this.flat = flat
-    return this.data_map
-pn_map = [0,1,1,2]
-config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
-from ..tensor_2d_vmc import flatten,flat2site 
-#####################################################################################
-# READ/WRITE FTN FUNCS
-#####################################################################################
-import pickle,uuid
-from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid,tensor_split
-def load_ftn_from_disc(fname, delete_file=False):
-
-    # Get the data
-    if type(fname) != str:
-        data = fname
-    else:
-        # Open up the file
-        with open(fname, 'rb') as f:
-            data = pickle.load(f)
-
-    # Set up a dummy fermionic tensor network
-    tn = FermionTensorNetwork([])
-
-    # Put the tensors into the ftn
-    tensors = [None,] * data['ntensors']
-    for i in range(data['ntensors']):
-
-        # Get the tensor
-        ten_info = data['tensors'][i]
-        ten = ten_info['tensor']
-        ten = FermionTensor(ten.data, inds=ten.inds, tags=ten.tags)
-
-        # Get/set tensor info
-        tid, site = ten_info['fermion_info']
-        ten.fermion_owner = None
-        ten._avoid_phase = False
-
-        # Add the required phase
-        ten.phase = ten_info['phase']
-
-        # Add to tensor list
-        tensors[site] = (tid, ten)
-
-    # Add tensors to the tn
-    for (tid, ten) in tensors:
-        tn.add_tensor(ten, tid=tid, virtual=True)
-
-    # Get addition attributes needed
-    tn_info = data['tn_info']
-
-    # Set all attributes in the ftn
-    extra_props = dict()
-    for props in tn_info:
-        extra_props[props[1:]] = tn_info[props]
-
-    # Convert it to the correct type of fermionic tensor network
-    tn = tn.view_as_(data['class'], **extra_props)
-
-    # Remove file (if desired)
-    if delete_file:
-        delete_ftn_from_disc(fname)
-
-    # Return resulting tn
-    return tn
-
-def rand_fname():
-    return str(uuid.uuid4())
-def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
-
-    # Create a generic dictionary to hold all information
-    data = dict()
-
-    # Save which type of tn this is
-    data['class'] = type(tn)
-
-    # Add information relevant to the tensors
-    data['tn_info'] = dict()
-    for e in tn._EXTRA_PROPS:
-        data['tn_info'][e] = getattr(tn, e)
-
-    # Add the tensors themselves
-    data['tensors'] = []
-    ntensors = 0
-    for ten in tn.tensors:
-        ten_info = dict()
-        ten_info['fermion_info'] = ten.get_fermion_info()
-        ten_info['phase'] = ten.phase
-        ten_info['tensor'] = ten
-        data['tensors'].append(ten_info)
-        ntensors += 1
-    data['ntensors'] = ntensors
-
-    # If tmpdir is None, then return the dictionary
-    if tmpdir is None:
-        return data
-
-    # Write fermionic tensor network to disc
-    else:
-        # Create a temporary file
-        if provided_filename:
-            fname = tmpdir
-            print('saving to ', fname)
-        else:
-            if tmpdir[-1] != '/': 
-                tmpdir = tmpdir + '/'
-            fname = tmpdir + rand_fname()
-
-        # Write to a file
-        with open(fname, 'wb') as f:
-            pickle.dump(data, f)
-
-        # Return the filename
-        return fname
-####################################################################################
-# initialization fxns
-####################################################################################
-def get_vaccum(Lx,Ly,subspace):
-    from pyblock.algebra.fermion_setting import set_subspace
-    set_subspace(subspace)
-
-    from pyblock3.algebra.fermion_ops import bonded_vaccum
-    from ..tensor_2d import PEPS
-    from .fermion_2d import FPEPS
-    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1)
-    ftn = FermionTensorNetwork([])
-    ind_to_pattern_map = dict()
-    inv_pattern = {"+":"-", "-":"+"}
-    def get_pattern(inds):
-        """
-        make sure patterns match in input tensors, eg,
-        --->A--->B--->
-         i    j    k
-        pattern for A_ij = +-
-        pattern for B_jk = +-
-        the pattern of j index must be reversed in two operands
-        """
-        pattern = ""
-        for ix in inds[:-1]:
-            if ix in ind_to_pattern_map:
-                ipattern = inv_pattern[ind_to_pattern_map[ix]]
-            else:
-                nmin = pattern.count("-")
-                ipattern = "-" if nmin*2<len(pattern) else "+"
-                ind_to_pattern_map[ix] = ipattern
-            pattern += ipattern
-        pattern += "+" # assuming last index is the physical index
-        return pattern
-    for ix, iy in itertools.product(range(tn.Lx), range(tn.Ly)):
-        T = tn[ix, iy]
-        pattern = get_pattern(T.inds)
-        #put vaccum at site (ix, iy) and apply a^{\dagger}
-        data = bonded_vaccum((1,)*(T.ndim-1), pattern=pattern,
-                             symmetry=symmetry,flat=flat)
-        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
-        ftn.add_tensor(new_T, virtual=False)
-    ftn.view_as_(FPEPS, like=tn)
-    return ftn
-def create_particle(fpeps,site,spin):
-    cre = data_map['cre_'+spin].copy()
-    T = fpeps[fpeps.site_tag(*site)]
-    trans_order = list(range(1,T.ndim))+[0] 
-    data = np.tensordot(cre, T.data, axes=((1,), (-1,))).transpose(trans_order)
-    T.modify(data=data)
-    return fpeps
-def get_product_state(Lx,Ly,spin,sites):
-    fpeps = get_vaccum(Lx,Ly,spin)
-    for site in sites:
-        fpeps = create_particle(fpeps,site,spin)
-    return fpeps
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
@@ -236,7 +45,7 @@ class ContractionEngine(ContractionEngine_):
         else:
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
     def intermediate_sign(self,config,ix1,ix2):
-        return (-1)**(sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2)
+        return (-1)**(sum(config[ix1+1:ix2]) % 2)
     def _2numpy(self,data,backend=None):
         backend = self.backend if backend is None else backend 
         if backend=='torch':
@@ -250,7 +59,7 @@ class ContractionEngine(ContractionEngine_):
     def get_bra_tsr(self,fpeps,cij,i,j,append=''):
         inds = fpeps.site_ind(i,j)+append,
         tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
-        key = {0:'vac',1:'occ'}[ci]
+        key = {0:'vac_',1:'occ_'}[ci]
         data = self._2backend(data_map[key+self.spin].dagger,False)
         return FermionTensor(data=data,inds=inds,tags=tags)
     def site_grad(self,ftn_plq,i,j):
@@ -320,34 +129,111 @@ class SubspaceAmplitudeFactory(ContractionEngine,BosonAmplitudeFactory):
             if fname is not None: # save psi to disc
                 write_ftn_to_disc(psi,fname,provided_filename=True)
         return psi
+def config_to_ab(config):
+    config_a = [None] * len(config)
+    config_b = [None] * len(config)
+    map_a = {0:0,1:1,2:0,3:1}
+    map_b = {0:0,1:0,2:1,3:1}
+    for ix,ci in enumerate(config):
+        config_a[ix] = map_a[ci] 
+        config_b[ix] = map_b[ci] 
+    return tuple(config_a),tuple(config_b)
+def config_from_ab(config_a,config_b):
+    map_ = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
+    return tuple([map_[config_a[ix],config_b[ix]] for ix in len(config_a)])
+def parse_config(config):
+    if len(config)==2:
+        config_a,config_b = config
+        config_full = self.config_from_ab(config_a,config_b)
+    else:
+        config_full = config
+        config_a,config_b = self.config_to_ab(config)
+    return config_a,config_b,config_full
 class AmplitudeFactory:
     def __init__(self,psi_a,psi_b,psi_boson):
-        self.amplitude_factory_a = SubspaceAmplitudeFactory(psi_a,'a')
-        self.amplitude_factory_b = SubspaceAmplitudeFactory(psi_b,'b')
-        self.amplitude_factory_boson = BosonAmplitudeFactory(psi_boson)
+        self.psi = [None] * 3
+        self.psi[0] = SubspaceAmplitudeFactory(psi_a,'a')
+        self.psi[1] = SubspaceAmplitudeFactory(psi_b,'b')
+        self.psi[2] = BosonAmplitudeFactory(psi_boson)
 
-        
+        self.nparam = [len(amp_fac.get_x()) for amp_fac in self.psi] 
+        self.block_dict = self.psi[0].block_dict.copy()
+        self.block_dict += [(start+self.nparam[0],stop+self.nparam[0]) \
+                           for start,stop in self.psi[1].block_dict]
+        self.block_dict += [(start+self.nparam[1],stop+self.nparam[1]) \
+                           for start,stop in self.psi[2].block_dict]
+
+    def config_sign(self,config=None):
+        raise NotImplementedError
+    def get_constructors(self,peps=None):
+        raise NotImplementedError
+    def get_block_dict(self):
+        raise NotImplementedError
+    def tensor2vec(self,tsr,ix=None):
+        raise NotImplementedError
+    def dict2vecs(self,dict_=None):
+        raise NotImplementedError
+    def dict2vec(self,dict_=None):
+        raise NotImplementedError
+    def psi2vecs(self,psi=None):
+        raise NotImplementedError
+    def psi2vec(self,psi=None):
+        raise NotImplementedError
+    def split_vec(self,x=None):
+        raise NotImplementedError
+    def vec2tensor(self,x=None,ix=None):
+        raise NotImplementedError
+    def vec2dict(self,x=None): 
+        raise NotImplementedError
+    def vec2psi(self,x=None,inplace=None): 
+        raise NotImplementedError
+    def get_x(self):
+        return np.concatenate([amp_fac.get_x() for amp_fac in self.psi])
+    def update(self,x,fname=None,root=0):
+        fname_ = fname + '_a' if fname is not None else fname
+        self.psi[0].update(x[:self.nparam[0]],fname=fname_,root=root)
+
+        fname_ = fname + '_b' if fname is not None else fname
+        self.psi[1].update(x[self.nparam[0]:self.nparam[0]+self.nparam[1]],fname=fname_,root=root)
+
+        fname_ = fname + '_boson' if fname is not None else fname
+        self.psi[2].update(x[self.nparam[0]+self.nparam[1]:],fname=fname_,root=root)
+    def set_psi(self,psi=None):
+        raise NotImplementedError
+    def unsigned_amplitude(self,config):
+        config_a,config_b,config_full = parse_config(config)
+        c0 = self.psi[0].unsigned_amplitude(config_a) 
+        c1 = self.psi[1].unsigned_amplitude(config_b) 
+        c2 = self.psi[2].unsigned_amplitude(config_full) 
+        return c0 * c1 * c2
+    def amplitude(self,config=None):
+        raise NotImplementedError
+    def get_grad_from_plq(self,plq=None,cx=None,backend=None):
+        raise NotImplementedError
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
-class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def __init__(self,Lx,Ly,nbatch=1,tmpdir=None,log_every=1):
+from ..tensor_2d_vmc import Hamiltonian as BosonHamiltonian
+class SubspaceHamiltonian(ContractionEngine,BosonHamiltonian):
+    def __init__(self,Lx,Ly,spin,nbatch=1):
         super().init_contraction(Lx,Ly)
+        self.spin = spin
         self.nbatch = nbatch
-        self.tmpdir = tmpdir
-        if self.tmpdir is not None:
-            self.log_every = log_every
-            self.t0 = time.time()
     def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
+        data = self._2backend(self.data_map[self.key+self.spin],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
+class Hamiltonian:
+    def __init__(self,Lx,Ly,nbatch=1):
+        self.ham = [None] * 3
+        self.ham[0] = SubspaceHamiltonian(Lx,Ly,'a',nbatch=nbatch)
+        self.ham[1] = SubspaceHamiltonian(Lx,Ly,'b',nbatch=nbatch)
+        self.ham[2] = BosonHamiltonian(Lx,Ly,nbatch=nbatch)
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
-        self.key = 'h1'
+        self.key = 'h1_'
 
         if self.pbc:
             self.pairs = self.nn_pairs_pbc()

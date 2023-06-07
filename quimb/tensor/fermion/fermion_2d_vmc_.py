@@ -26,27 +26,43 @@ pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
 from pyblock3.algebra.ad.fermion import SparseFermionTensor
+from pyblock.algebra.fermion_setting import set_subspace
 def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
     this.pbc = pbc
     this.deterministic = True if pbc else deterministic
     this.compress_opts = compress_opts
     set_max_bond(compress_opts.get('max_bond',None))
 
+    for subspace in ['a','b']:
+        set_subspace(subspace)
+        from pyblock3.algebra.fermion_ops import vaccum,creation,H1
+        cre = creation(spin=subspace,symmetry=symmetry,flat=flat)
+        vac = vaccum(n=1,symmetry=symmetry,flat=flat)
+        occ = np.tensordot(cre,vac,axes=([1],[0])) 
+        this.data_map[f'cre_{subspace}_{subspace}'] = cre
+        this.data_map[f'ann_{subspace}_{subspace}'] = cre.dagger 
+        this.data_map[f'occ_{subspace}_{subspace}'] = occ 
+        this.data_map['vac_'+subspace] = vac 
+        this.data_map['h1_'+subspace] = H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))
+
+    set_subspace('full')
     from pyblock3.algebra.fermion_ops import vaccum,creation,H1
     cre_a = creation(spin='a',symmetry=symmetry,flat=flat)
     cre_b = creation(spin='b',symmetry=symmetry,flat=flat)
+    this.data_map['cre_a_full'] = cre_a
+    this.data_map['cre_b_full'] = cre_b
+    this.data_map['ann_a_full'] = cre_a.dagger
+    this.data_map['ann_b_full'] = cre_b.dagger
+
     vac = vaccum(n=1,symmetry=symmetry,flat=flat)
     occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
     occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
     occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
-    this.data_map = {0:vac,1:occ_a,2:occ_b,3:occ_db,
-                     'cre_a':cre_a,
-                     'cre_b':cre_b,
-                     'ann_a':cre_a.dagger,
-                     'ann_b':cre_b.dagger,
-                     'h1':H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))}
-    this.symmetry = symmetry
-    this.flat = flat
+    this.data_map['vac_full'] = vac
+    this.data_map['occ_a_full'] = occ_a
+    this.data_map['occ_b_full'] = occ_b
+    this.data_map['occ_db_full'] = occ_db
+    this.data_map['h1_full'] = H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))}
     return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
@@ -162,13 +178,8 @@ def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
 ####################################################################################
 # initialization fxns
 ####################################################################################
-def get_vaccum(Lx,Ly):
-    """
-    helper function to generate initial guess from regular PEPS
-    |psi> = \prod (|alpha> + |beta>) at each site
-    this function only works for half filled case with U1 symmetry
-    Note energy of this wfn is 0
-    """
+def get_vaccum(Lx,Ly,symmetry='u1',flat=True,subspace='full'):
+    set_subspace(subspace)
     from pyblock3.algebra.fermion_ops import bonded_vaccum
     from ..tensor_2d import PEPS
     from .fermion_2d import FPEPS
@@ -206,26 +217,27 @@ def get_vaccum(Lx,Ly):
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)
     return ftn
-def create_particle(fpeps,site,spin):
-    cre = data_map[f'cre_{spin}'].copy()
+def create_particle(fpeps,site,spin,subspace='full'):
+    cre = data_map[f'cre_{spin}_{subspace}'].copy()
     T = fpeps[fpeps.site_tag(*site)]
     trans_order = list(range(1,T.ndim))+[0] 
     data = np.tensordot(cre, T.data, axes=((1,), (-1,))).transpose(trans_order)
     T.modify(data=data)
     return fpeps
-def get_product_state(Lx,Ly,spin_map):
-    fpeps = get_vaccum(Lx,Ly)
+def get_product_state(Lx,Ly,spin_map,symmetry='u1',flat=True,subspace='full'):
+    fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,subspace=subspace)
     for spin,sites in spin_map.items():
         for site in sites:
-            fpeps = create_particle(fpeps,site,spin)
+            fpeps = create_particle(fpeps,site,spin,subspace=subspace)
     return fpeps
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
 from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
 class ContractionEngine(ContractionEngine_): 
-    def init_contraction(self,Lx,Ly):
+    def init_contraction(self,Lx,Ly,subspace='full'):
         self.Lx,self.Ly = Lx,Ly
+        self.subspace = subspace
         self.pbc = pbc
         self.deterministic = deterministic
         if self.deterministic:
@@ -239,7 +251,8 @@ class ContractionEngine(ContractionEngine_):
         else:
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
     def intermediate_sign(self,config,ix1,ix2):
-        return (-1)**(sum([pn_map[ci] for ci in config[ix1+1:ix2]]) % 2)
+        pn = [pn_map[ci] for ci in config[ix1+1:ix2]] if self.subspace=='full' else config[ix1+1:ix2]
+        return (-1)**(sum(pns) % 2)
     def _2numpy(self,data,backend=None):
         backend = self.backend if backend is None else backend 
         if backend=='torch':
@@ -253,6 +266,7 @@ class ContractionEngine(ContractionEngine_):
     def get_bra_tsr(self,fpeps,ci,i,j,append=''):
         inds = fpeps.site_ind(i,j)+append,
         tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
+        
         data = self._2backend(data_map[ci].dagger,False)
         return FermionTensor(data=data,inds=inds,tags=tags)
     def site_grad(self,ftn_plq,i,j):

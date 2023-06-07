@@ -24,10 +24,10 @@ def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     R = S + eta * np.eye(sh)
 
     wmin = -1. + 0.j
-    eps = eps0 / 2.
+    eps = eps0 * 2.
     while wmin.real < 0.:
         # smallest eigenvalue
-        eps *= 2.
+        eps /= 2.
         w = np.linalg.eigvals(hess + R/eps)
         idx = np.argmin(w.real)
         wmin = w[idx]
@@ -257,6 +257,7 @@ class TNVMC: # stochastic sampling
         self.f = np.array(self.f)
     def _sample_stochastic(self,compute_v=True,compute_Hv=False):
         self.buf[1] = 1.
+        e = []
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
@@ -280,6 +281,7 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
+                e.append(ex)
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
@@ -287,6 +289,11 @@ class TNVMC: # stochastic sampling
             self.v = np.array(self.v)
         if compute_Hv:
             self.Hv = np.array(self.Hv)
+            f = h5py.File(f'./RANK{RANK}.hdf5','w')
+            f.create_dataset('Hv',data=self.Hv)
+            f.create_dataset('v',data=self.v)
+            f.create_dataset('e',data=np.array(e))
+            f.close()
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p

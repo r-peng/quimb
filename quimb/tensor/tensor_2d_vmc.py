@@ -5,7 +5,7 @@ COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
-from pympler import muppy,summary
+#from pympler import muppy,summary
 
 # set tensor symmetry
 import sys
@@ -520,6 +520,7 @@ class AmplitudeFactory(ContractionEngine):
         except (ValueError,IndexError):
             return 0.
     def amplitude(self,config):
+        raise NotImplementedError
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
@@ -533,14 +534,10 @@ class AmplitudeFactory(ContractionEngine):
 ####################################################################################
 # ham class 
 ####################################################################################
-from .profiler import snapshots
 class Hamiltonian(ContractionEngine):
-    def __init__(self,Lx,Ly,nbatch=1,tmpdir=None,log_every=1):
+    def __init__(self,Lx,Ly,nbatch=1):
         super().init_contraction(Lx,Ly)
         self.nbatch = nbatch
-        self.tmpdir = tmpdir
-        if self.tmpdir is not None:
-            self.log_every = log_every
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[self.key],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
