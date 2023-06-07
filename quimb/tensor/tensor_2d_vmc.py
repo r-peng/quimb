@@ -412,7 +412,7 @@ class AmplitudeFactory(ContractionEngine):
         super().init_contraction(psi.Lx,psi.Ly)
         psi.add_tag('KET')
         self.constructors = self.get_constructors(psi)
-        self.get_block_dict()
+        self.block_dict = self.get_block_dict()
 
         self.set_psi(psi) # current state stored in self.psi
         self.backend = 'numpy'
@@ -432,7 +432,6 @@ class AmplitudeFactory(ContractionEngine):
             stop = start + size
             ls[ix] = start,stop
             start = stop
-        self.block_dict = ls
         return ls
     def tensor2vec(self,tsr,ix=None):
         return tsr.flatten()
