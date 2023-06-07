@@ -535,8 +535,8 @@ class AmplitudeFactory(ContractionEngine):
 # ham class 
 ####################################################################################
 class Hamiltonian(ContractionEngine):
-    def __init__(self,Lx,Ly,nbatch=1):
-        super().init_contraction(Lx,Ly)
+    def __init__(self,Lx,Ly,nbatch=1,phys_dim=2):
+        super().init_contraction(Lx,Ly,phys_dim=phys_dim)
         self.nbatch = nbatch
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[self.key],False)
@@ -999,6 +999,39 @@ class Hamiltonian(ContractionEngine):
             where = (0,j),(self.Lx-1,(j+1)%self.Ly)
             ls.append(where)
         self.batched_pairs['pbc'] = ls 
+    def batch_nn_plq(self):
+        self.batched_pairs = dict() 
+        batchsize = max(self.Lx // self.nbatch,2)
+        for i in range(self.Lx):
+            batch_idx = i // batchsize
+            if batch_idx not in self.batched_pairs:
+                self.batched_pairs[batch_idx] = [],[] 
+            rows,pairs = self.batched_pairs[batch_idx]
+            rows.append(i)
+            if i+1 < self.Lx:
+                rows.append(i+1)
+            for j in range(self.Ly):
+                if j+1<self.Ly:
+                    where = (i,j),(i,j+1)
+                    pairs.append(where)
+                if i+1<self.Lx:
+                    where = (i,j),(i+1,j)
+                    pairs.append(where)
+        self.pairs = []
+        for batch_idx in self.batched_pairs:
+            rows,pairs = self.batched_pairs[batch_idx]
+            imin,imax = min(rows),max(rows)
+            bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix,pairs 
+            plq_types = (imin,imax,1,2), (imin,imax-1,2,1),# i0_min,i0_max,x_bsz,y_bsz
+            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
+            self.pairs += pairs
+        self.plq_sz = (1,2),(2,1)
+        #for batch_idx in self.batched_pairs:
+        #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
+        #    print(batch_idx,bix,tix,plq_types)
+        #    print(pairs)
+        if RANK==0:
+            print('nbatch=',len(self.batched_pairs))
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5
@@ -1032,35 +1065,15 @@ class Heisenberg(Hamiltonian):
         self.key = 'Jxy'
         self.data_map[self.key] = data
 
-        if self.pbc:
-            self.pairs = self.nn_pairs() 
+        self.pairs = self.nn_pairs()
+        if self.deterministic:
+            self.batch_deterministic()
         else:
-            self.batched_pairs = dict()
-            batchsize = self.Lx // self.nbatch 
-            for i in range(self.Lx):
-                batch_idx = i // batchsize
-                if batch_idx not in self.batched_pairs:
-                    self.batched_pairs[batch_idx] = [],[] 
-                rows,pairs = self.batched_pairs[batch_idx]
-                rows.append(i)
-                if i+1 < self.Lx:
-                    rows.append(i+1)
-                for j in range(self.Ly):
-                    if j+1<self.Ly: # NN
-                        where = (i,j),(i,j+1)
-                        pairs.append(where)
-                    if i+1<self.Lx: # NN
-                        where = (i,j),(i+1,j)
-                        pairs.append(where)
-            self.pairs = []
-            for batch_idx in self.batched_pairs:
-                rows,pairs = self.batched_pairs[batch_idx]
-                imin,imax = min(rows),max(rows)
-                bix,tix = imax-1,imin+1 # bot_ix,top_ix,pairs 
-                plq_types = (imin,imax,1,2), (imin,imax-1,2,1),# i0_min,i0_max,x_bsz,y_bsz
-                self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
-                self.pairs += pairs
-            self.plq_sz = (1,2),(2,1)
+            self.batch_nn_plq()
+    def batch_deterministic(self):
+        self.batched_pairs = dict()
+        self.batch_nnh() 
+        self.batch_nnv() 
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]
@@ -1139,6 +1152,10 @@ class J1J2(Hamiltonian):
             bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
             self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs # bot_ix,top_ix,pairs 
         self.plq_sz = (2,2),
+        #for batch_idx in self.batched_pairs:
+        #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
+        #    print(batch_idx,bix,tix,plq_types)
+        #    print(pairs)
         if RANK==0:
             print('nbatch=',len(self.batched_pairs))
     def batch_deterministic(self):
@@ -1198,6 +1215,13 @@ class J1J2(Hamiltonian):
         return .25 * (e1 *self.J1 + e2 * self.J2) 
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
+
+class HubbardBoson(Hamiltonian):
+    def __init__(self,t,u,Lx,Ly,**kwargs):
+        super().__init__(Lx,Ly,phys_dim=4)
+        self.t = t
+        self.u = u
+
 class SpinDensity(Hamiltonian):
     def __init__(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly 

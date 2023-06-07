@@ -26,13 +26,14 @@ pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
 from pyblock3.algebra.ad.fermion import SparseFermionTensor
-from pyblock.algebra.fermion_setting import set_subspace
+from pyblock3.algebra.fermion_setting import set_subspace
 def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
     this.pbc = pbc
     this.deterministic = True if pbc else deterministic
     this.compress_opts = compress_opts
     set_max_bond(compress_opts.get('max_bond',None))
 
+    this.data_map = dict()
     for subspace in ['a','b']:
         set_subspace(subspace)
         from pyblock3.algebra.fermion_ops import vaccum,creation,H1
@@ -62,7 +63,7 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     this.data_map['occ_a_full'] = occ_a
     this.data_map['occ_b_full'] = occ_b
     this.data_map['occ_db_full'] = occ_db
-    this.data_map['h1_full'] = H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))}
+    this.data_map['h1_full'] = H1(symmetry=symmetry,flat=flat).transpose((0,2,1,3))
     return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
@@ -250,9 +251,13 @@ class ContractionEngine(ContractionEngine_):
             return data.copy()
         else:
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
+    def pn(self,config,start,stop):
+        if self.subspace=='full':
+            return config[start:stop] 
+        else:
+            return [pn_map[ci] for ci in config[start:stop]]
     def intermediate_sign(self,config,ix1,ix2):
-        pn = [pn_map[ci] for ci in config[ix1+1:ix2]] if self.subspace=='full' else config[ix1+1:ix2]
-        return (-1)**(sum(pns) % 2)
+        return (-1)**(sum(self.pn(config,ix1+1,ix2)) % 2)
     def _2numpy(self,data,backend=None):
         backend = self.backend if backend is None else backend 
         if backend=='torch':
@@ -265,9 +270,12 @@ class ContractionEngine(ContractionEngine_):
         return tsr.get_grad(set_zero=set_zero) 
     def get_bra_tsr(self,fpeps,ci,i,j,append=''):
         inds = fpeps.site_ind(i,j)+append,
-        tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
-        
-        data = self._2backend(data_map[ci].dagger,False)
+        tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA' 
+        if self.subspace=='full':
+            key = {0:'vac_full',1:'occ_a_full',2:'occ_b_full',3:'occ_db_full'}[ci] 
+        else:
+            key = {0:f'vac_{self.subspace}',1:'occ_{self.subspace}_{self.subspace}'}[ci]
+        data = self._2backend(data_map[key].dagger,False)
         return FermionTensor(data=data,inds=inds,tags=tags)
     def site_grad(self,ftn_plq,i,j):
         ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
@@ -290,8 +298,8 @@ def get_parity_cum(fpeps):
     return np.cumsum(np.array(parity[::-1]))
 from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
-    def __init__(self,psi):
-        super().init_contraction(psi.Lx,psi.Ly)
+    def __init__(self,psi,subspace='full'):
+        super().init_contraction(psi.Lx,psi.Ly,subspace=subspace)
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
         self.parity_cum = get_parity_cum(psi)
@@ -304,7 +312,7 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
-            parity[i] = sum([pn_map[ci] for ci in config[i*self.Ly:(i+1)*self.Ly]]) % 2
+            parity[i] = sum(self.pn(config,i*self.Ly,(i+1)*self.Ly)) % 2
         parity = np.array(parity[::-1])
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
@@ -340,11 +348,11 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 ####################################################################################
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def __init__(self,Lx,Ly,nbatch=1):
-        super().init_contraction(Lx,Ly)
+    def __init__(self,Lx,Ly,nbatch=1,subspace='full'):
+        super().init_contraction(Lx,Ly,subspace=subspace)
         self.nbatch = nbatch
     def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
+        data = self._2backend(self.data_map[f'{self.key}_{self.subspace}'],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
 class Hubbard(Hamiltonian):
@@ -353,42 +361,15 @@ class Hubbard(Hamiltonian):
         self.t,self.u = t,u
         self.key = 'h1'
 
-        if self.pbc:
-            self.pairs = self.nn_pairs_pbc()
+        self.pairs = self.nn_pairs()
+        if self.deterministic:
+            self.batch_deterministic()
         else:
-            self.batched_pairs = dict() 
-            batchsize = self.Lx // self.nbatch 
-            for i in range(self.Lx):
-                batch_idx = i // batchsize
-                if batch_idx not in self.batched_pairs:
-                    self.batched_pairs[batch_idx] = [],[] 
-                rows,pairs = self.batched_pairs[batch_idx]
-                rows.append(i)
-                if i+1 < self.Lx:
-                    rows.append(i+1)
-                for j in range(self.Ly):
-                    if j+1<self.Ly:
-                        where = (i,j),(i,j+1)
-                        pairs.append(where)
-                    if i+1<self.Lx:
-                        where = (i,j),(i+1,j)
-                        pairs.append(where)
-            self.pairs = []
-            for batch_idx in self.batched_pairs:
-                rows,pairs = self.batched_pairs[batch_idx]
-                imin,imax = min(rows),max(rows)
-                bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix,pairs 
-                plq_types = (imin,imax,1,2), (imin,imax-1,2,1),# i0_min,i0_max,x_bsz,y_bsz
-                self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
-                self.pairs += pairs
-            self.plq_sz = (1,2),(2,1)
-            #for batch_idx in self.batched_pairs:
-            #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
-            #    print(batch_idx,bix,tix,plq_types)
-            #    print(pairs)
-            if RANK==0:
-                print('nbatch=',len(self.batched_pairs))
-            #exit()
+            self.batch_nn_plq()
+    def batch_deterministic(self):
+        self.batched_pairs = dict()
+        self.batch_nnh() 
+        self.batch_nnv() 
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]

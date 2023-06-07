@@ -21,7 +21,6 @@ fix_sign = True
 this = sys.modules[__name__]
 def set_max_bond(max_bond):
     this.max_bond = max_bond
-this.n = 0
 
 def safe_inverse(x):
     return x/(x.pow(2) + epsilon)
@@ -51,10 +50,10 @@ def SVDforward(A):
 
     if is_one(S): # A is isometry
         raise ValueError
-    if max_bond is not None:
-        U = U[:,:max_bond]
-        S = S[:max_bond]
-        Vh = Vh[:max_bond,:]
+    #if max_bond is not None:
+    #    U = U[:,:max_bond]
+    #    S = S[:max_bond]
+    #    Vh = Vh[:max_bond,:]
 
     if fix_sign:
         # make SVD result sign-consistent across multiple runs
@@ -116,8 +115,6 @@ class SVD(torch.autograd.Function):
     def forward(self, A):
         U,S,Vh = SVDforward(A)
         self.save_for_backward(U, S, Vh)
-        this.n += 3
-        #print(this.n)
         return U, S, Vh
     @staticmethod
     def backward(self, dU, dS, dVh):
@@ -204,8 +201,6 @@ class QR(torch.autograd.Function):
             Q = Q * sign
             R = R * sign.t()
         self.save_for_backward(A,Q,R)
-        this.n += 3
-        #print(this.n)
         return Q,R
         
     @staticmethod

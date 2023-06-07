@@ -257,7 +257,9 @@ class TNVMC: # stochastic sampling
         self.f = np.array(self.f)
     def _sample_stochastic(self,compute_v=True,compute_Hv=False):
         self.buf[1] = 1.
-        e = []
+        #c = []
+        #e = []
+        #configs = []
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
@@ -281,7 +283,9 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
-                e.append(ex)
+            #c.append(cx)
+            #e.append(ex)
+            #configs.append(list(config))
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
@@ -289,11 +293,14 @@ class TNVMC: # stochastic sampling
             self.v = np.array(self.v)
         if compute_Hv:
             self.Hv = np.array(self.Hv)
-            f = h5py.File(f'./RANK{RANK}.hdf5','w')
-            f.create_dataset('Hv',data=self.Hv)
-            f.create_dataset('v',data=self.v)
-            f.create_dataset('e',data=np.array(e))
-            f.close()
+        #f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
+        #if compute_Hv:
+        #    f.create_dataset('Hv',data=self.Hv)
+        #f.create_dataset('v',data=self.v)
+        #f.create_dataset('e',data=np.array(e))
+        #f.create_dataset('c',data=np.array(c))
+        #f.create_dataset('config',data=np.array(configs))
+        #f.close()
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p
@@ -645,7 +652,8 @@ class TNVMC: # stochastic sampling
                 Sx = self.S(x)
                 if self.terminate[0]==1:
                     return 0
-                return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                #return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                return Hx - E * Sx + self.cond2 * x
             self.deltas = self.solve_iterative(A,g,False)
             self.terminate[0] = 0
             hessp = A(self.deltas)
@@ -848,3 +856,48 @@ class TNVMC: # stochastic sampling
             f.create_dataset('data',data=data) 
             f.close()
         self.ham._print(fname,data)
+    def debug_torch(self,tmpdir,step,rank=None):
+        if RANK==0:
+            return
+        if rank is not None:
+            if RANK!=rank:
+                return
+        f = h5py.File(tmpdir+f'step{step}RANK{RANK}.hdf5','r')
+        e = f['e'][:]
+        v = f['v'][:]
+        configs = f['config'][:]
+        f.close()
+        e_new = []
+        c_new = []
+        v_new = []
+        Hv_new = []
+        n = len(e)
+        print(f'RANK={RANK},n={n}')
+        for i in range(n):
+            config = tuple(configs[i,:])
+            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
+                config,self.sampler.amplitude_factory,compute_v=True,compute_Hv=True)
+            if cx is None or np.fabs(ex) > DISCARD:
+                print(f'RANK={RANK},cx={cx},ex={ex}')
+                ex = 0.
+                err = 0.
+                if compute_v:
+                    vx = np.zeros(self.nparam,dtype=self.dtype)
+                if compute_Hv:
+                    Hvx = np.zeros(self.nparam,dtype=self.dtype)
+            e_new.append(ex) 
+            c_new.append(cx) 
+            v_new.append(vx)
+            Hv_new.append(Hvx)
+            err_e = np.fabs(ex-e[i])
+            err_v = np.linalg.norm(vx-v[i,:])
+            if err_e > 1e-6 or err_v > 1e-6: 
+                print(f'RANK={RANK},config={config},ex={ex},ex_sr={e[i]},err_e={err_e},err_v={err_v}')
+            #else:
+            #    print(f'RANK={RANK},i={i}')
+        f = h5py.File(f'./step{step}RANK{RANK}.hdf5','w')
+        f.create_dataset('Hv',data=np.array(Hv_new))
+        f.create_dataset('v',data=np.array(v_new))
+        f.create_dataset('e',data=np.array(e_new))
+        f.create_dataset('c',data=np.array(c_new))
+        f.close()

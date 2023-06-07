@@ -25,110 +25,8 @@ import pyblock3.algebra.ad
 pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
-####################################################################################
-# amplitude fxns 
-####################################################################################
-from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
-class ContractionEngine(ContractionEngine_): 
-    def init_contraction(self,Lx,Ly):
-        self.Lx,self.Ly = Lx,Ly
-        self.pbc = pbc
-        self.deterministic = deterministic
-        if self.deterministic:
-            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-        self.compress_opts = compress_opts
-
-        self.data_map = data_map
-    def _2backend(self,data,requires_grad):
-        if self.backend=='numpy':
-            return data.copy()
-        else:
-            return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
-    def intermediate_sign(self,config,ix1,ix2):
-        return (-1)**(sum(config[ix1+1:ix2]) % 2)
-    def _2numpy(self,data,backend=None):
-        backend = self.backend if backend is None else backend 
-        if backend=='torch':
-            try:
-                data = data.to_flat()
-            except AttributeError:
-                data = self._torch2numpy(data,backend=backend) 
-        return data
-    def tsr_grad(self,tsr,set_zero=True):
-        return tsr.get_grad(set_zero=set_zero) 
-    def get_bra_tsr(self,fpeps,cij,i,j,append=''):
-        inds = fpeps.site_ind(i,j)+append,
-        tags = fpeps.site_tag(i,j),fpeps.row_tag(i),fpeps.col_tag(j),'BRA'
-        key = {0:'vac_',1:'occ_'}[ci]
-        data = self._2backend(data_map[key+self.spin].dagger,False)
-        return FermionTensor(data=data,inds=inds,tags=tags)
-    def site_grad(self,ftn_plq,i,j):
-        ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
-        tid = ket.get_fermion_info()[0]
-        ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
-        g = ftn_plq.contract(output_inds=ket.inds[::-1])
-        return g.data.dagger 
-def compute_fpeps_parity(fs,start,stop):
-    if start==stop:
-        return 0
-    tids = [fs.get_tid_from_site(site) for site in range(start,stop)]
-    tsrs = [fs.tensor_order[tid][0] for tid in tids] 
-    return sum([tsr.parity for tsr in tsrs]) % 2
-def get_parity_cum(fpeps):
-    parity = []
-    fs = fpeps.fermion_space
-    for i in range(1,fpeps.Lx): # only need parity of row 1,...,Lx-1
-        start,stop = i*fpeps.Ly,(i+1)*fpeps.Ly
-        parity.append(compute_fpeps_parity(fs,start,stop))
-    return np.cumsum(np.array(parity[::-1]))
 from ..tensor_2d_vmc import AmplitudeFactory as BosonAmplitudeFactory
-class SubspaceAmplitudeFactory(ContractionEngine,BosonAmplitudeFactory):
-    def __init__(self,psi,spin):
-        super().init_contraction(psi.Lx,psi.Ly)
-        self.spin = spin 
-        psi.reorder(direction='row',inplace=True)
-        psi.add_tag('KET')
-        self.parity_cum = get_parity_cum(psi)
-        self.constructors = self.get_constructors(psi)
-        self.block_dict = self.get_block_dict()
-
-        self.set_psi(psi) # current state stored in self.psi
-        self.backend = 'numpy'
-        self.small_mem = True
-    def config_sign(self,config): # config is spin separated
-        parity = [None] * self.Lx
-        for i in range(self.Lx):
-            parity[i] = sum(config[i*self.Ly:(i+1)*self.Ly]) % 2
-        parity = np.array(parity[::-1])
-        parity_cum = np.cumsum(parity[:-1])
-        parity_cum += self.parity_cum 
-        return (-1)**(np.dot(parity[1:],parity_cum) % 2)
-    def get_constructors(self,fpeps):
-        from .block_interface import Constructor
-        constructors = [None] * (fpeps.Lx * fpeps.Ly)
-        for i,j in itertools.product(range(fpeps.Lx),range(fpeps.Ly)):
-            data = fpeps[fpeps.site_tag(i,j)].data
-            bond_infos = [data.get_bond_info(ax,flip=False) \
-                          for ax in range(data.ndim)]
-            cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=this.flat)
-            dq = data.dq
-            size = cons.vector_size(dq)
-            ix = flatten(i,j,fpeps.Ly)
-            constructors[ix] = (cons,dq),size,(i,j)
-        return constructors
-    def tensor2vec(self,tsr,ix):
-        cons,dq = self.constructors[ix][0]
-        return cons.tensor_to_vector(tsr) 
-    def vec2tensor(self,x,ix):
-        cons,dq = self.constructors[ix][0]
-        return cons.vector_to_tensor(x,dq)
-    def update(self,x,fname=None,root=0):
-        psi = self.vec2psi(x,inplace=True)
-        self.set_psi(psi) 
-        if RANK==root:
-            if fname is not None: # save psi to disc
-                write_ftn_to_disc(psi,fname,provided_filename=True)
-        return psi
+from .fermion_2d_vmc_ import AmplitudeFactory as FermionAmplitudeFactory
 def config_to_ab(config):
     config_a = [None] * len(config)
     config_b = [None] * len(config)
@@ -152,8 +50,8 @@ def parse_config(config):
 class AmplitudeFactory:
     def __init__(self,psi_a,psi_b,psi_boson):
         self.psi = [None] * 3
-        self.psi[0] = SubspaceAmplitudeFactory(psi_a,'a')
-        self.psi[1] = SubspaceAmplitudeFactory(psi_b,'b')
+        self.psi[0] = FermionAmplitudeFactory(psi_a,subspace='a')
+        self.psi[1] = FermionAmplitudeFactory(psi_b,subspace='b')
         self.psi[2] = BosonAmplitudeFactory(psi_boson)
 
         self.nparam = [len(amp_fac.get_x()) for amp_fac in self.psi] 
@@ -213,64 +111,15 @@ class AmplitudeFactory:
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc import Hamiltonian as BosonHamiltonian
-class SubspaceHamiltonian(ContractionEngine,BosonHamiltonian):
-    def __init__(self,Lx,Ly,spin,nbatch=1):
-        super().init_contraction(Lx,Ly)
-        self.spin = spin
-        self.nbatch = nbatch
-    def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key+self.spin],False)
-        inds = bixs[0],kixs[0],bixs[1],kixs[1]
-        return FermionTensor(data=data,inds=inds,tags=tags) 
+from .fermion_2d_vmc_ import Hubbard as HubbardFermion
 class Hamiltonian:
-    def __init__(self,Lx,Ly,nbatch=1):
-        self.ham = [None] * 3
-        self.ham[0] = SubspaceHamiltonian(Lx,Ly,'a',nbatch=nbatch)
-        self.ham[1] = SubspaceHamiltonian(Lx,Ly,'b',nbatch=nbatch)
-        self.ham[2] = BosonHamiltonian(Lx,Ly,nbatch=nbatch)
+    pass
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
-        super().__init__(Lx,Ly,**kwargs)
-        self.t,self.u = t,u
-        self.key = 'h1_'
+        self.ham = [None] * 3
+        self.ham[0] = HubbardFermion(t,u,Lx,Ly,subspace='a',**kwargs)
+        self.ham[1] = HubbardFermion(t,u,Lx,Ly,subspace='b',**kwargs)
 
-        if self.pbc:
-            self.pairs = self.nn_pairs_pbc()
-        else:
-            self.batched_pairs = dict() 
-            batchsize = self.Lx // self.nbatch 
-            for i in range(self.Lx):
-                batch_idx = i // batchsize
-                if batch_idx not in self.batched_pairs:
-                    self.batched_pairs[batch_idx] = [],[] 
-                rows,pairs = self.batched_pairs[batch_idx]
-                rows.append(i)
-                if i+1 < self.Lx:
-                    rows.append(i+1)
-                for j in range(self.Ly):
-                    if j+1<self.Ly:
-                        where = (i,j),(i,j+1)
-                        pairs.append(where)
-                    if i+1<self.Lx:
-                        where = (i,j),(i+1,j)
-                        pairs.append(where)
-            self.pairs = []
-            for batch_idx in self.batched_pairs:
-                rows,pairs = self.batched_pairs[batch_idx]
-                imin,imax = min(rows),max(rows)
-                bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix,pairs 
-                plq_types = (imin,imax,1,2), (imin,imax-1,2,1),# i0_min,i0_max,x_bsz,y_bsz
-                self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
-                self.pairs += pairs
-            self.plq_sz = (1,2),(2,1)
-            #for batch_idx in self.batched_pairs:
-            #    bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
-            #    print(batch_idx,bix,tix,plq_types)
-            #    print(pairs)
-            if RANK==0:
-                print('nbatch=',len(self.batched_pairs))
-            #exit()
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]
