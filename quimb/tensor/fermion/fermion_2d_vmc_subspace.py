@@ -111,15 +111,207 @@ class AmplitudeFactory:
 ####################################################################################
 # ham class 
 ####################################################################################
+from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
+class Hamiltonian(Hamiltonian_):
+    def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
+        exs = [None] * 3
+        cxs = [None] * 3
+        plqs = [None] * 3
+        peps = [None] * 3
+        for ix in range(3):
+            peps_ = amplitude_factory.psi[ix].psi.copy()
+            for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+                peps_[i,j].modify(data=self.ham[ix]._2backend(peps[i,j].data,True))
+            peps[ix] = peps_
+            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].batch_pair_energies_from_plq(configs[ix],peps_)
+
+        ex = []
+        for ix in range(2):
+            ex1,ex2 = exs[ix],exs[2][ix]
+            for site1,site2 in ex1:
+                ex.append(ex1[site1,site2] * ex2[site1,site2])
+
+        if len(ex)>0:
+            ex_num = sum(ex)
+            ex_num.backward()
+            Hvx = [None] * 3
+            for ix in range(3):
+                Hvx_ = dict()
+                peps_ = peps[ix]
+                _2numpy = self.ham[ix]._2numpy
+                tsr_grad = self.ham[ix].tsr_grad
+                for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+                    Hvx_[i,j] = _2numpy(tsr_grad(peps[i,j].data))
+                Hvx[ix] = amplitude_factory.psi[ix].dict2vec(Hvx_)  
+
+            ex = 0.
+            cx2 = cxs[2]
+            np2 = self.ham[2]._2numpy
+            for ix in range(2):
+                ex1,ex2,cx1 = exs[ix],exs[2][ix],cxs[ix]
+                np1 = self.ham[ix]._2numpy
+                for site1,site2 in ex1:
+                    ex += np1(ex1[site1,site2]) * np2(ex2[site1,site2]) / (cx1[site1] * cx2[site1])
+        else:
+            ex = 0.
+            Hvx = 0.
+
+        vxs = [None] * 3
+        for ix in range(3):
+            vxs[ix] = amplitude_factory.psi[ix].get_grad_from_plq(
+                          plqs[ix],cxs[ix],backend=self.backend))
+        return ex,Hvx,cxs,vxs 
+    def compute_local_energy_hessian(config,amplitude_factory):
+        return
+    def compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=True):
+        exs = [None] * 3
+        cxs = [None] * 3
+        plqs = [None] * 3
+        configs = parse_config(config)
+        for ix in range(3):
+            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].pair_energies_from_plq(
+                                           configs[ix],amplitude_factory.psi[ix])
+        
+        ex = 0.
+        cx2 = cxs[2]
+        for ix in range(2):
+            ex1,ex2,cx1 = exs[ix],exs[2][ix],cxs[ix]
+            for site1,site2 in ex1:
+                ex += ex1[site1,site2] * ex2[site1,site2] / (cx1[site1] * cx2[site1])
+        eu = self.compute_local_energy_eigen(config_full)
+        ex += eu
+
+        if not compute_v:
+            cx,err = self.contraction_error(cxs)
+            return cx,ex,None,None,err 
+
+        vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(
+                 plqs[ix],cxs[ix],backend=self.backend) for ix in range(3)])
+        cx,err = self.contraction_error(cxs)
+        return cx,ex,vx,None,err
+    def contraction_error(self,cxs):
+        cx = 1.
+        err = 0.
+        for ix in range(3): 
+            cx_,err_ = self.ham[ix].contraction_error(cxs[ix])
+            cx *= cx_
+            err = max(err,err_)
+        return cx,err
+    def compute_local_energy_hessian_deterministic(config,amplitude_factory):
+        return 
+    def compute_local_energy_gradient_deterministic(config,amplitude_factory,compute_v=True):
+        return 
 from .fermion_2d_vmc_ import Hubbard as HubbardFermion
-class Hamiltonian:
-    pass
+class HubbardBoson(Hamiltonian_):
+    def __init__(self,Lx,Ly,**kwargs):
+        super().__init__(Lx,Ly,phys_dim=4)
+
+        # alpha
+        h1a = np.zeros((4,)*4)
+        for ki in [1,3]:
+            for kj in [0,2]:
+                bi = {1:0,3:2}[ki]
+                bj = {0:1,2:3}[kj]
+                h1a[bi,ki,bj,kj] = 1.
+                h1a[bj,kj,bi,ki] = 1.
+
+        # beta
+        h1b = np.zeros((4,)*4)
+        for ki in [2,3]:
+            for kj in [0,1]:
+                bi = {2:0,3:1}[ki]
+                bj = {0:2,1:3}[kj]
+                h1b[bi,ki,bj,kj] = 1.
+                h1b[bj,kj,bi,ki] = 1.
+        self.key = 'h1'
+        self.data_map[self.key+'a'] = h1a 
+        self.data_map[self.key+'b'] = h1b 
+
+        self.pairs = self.nn_pairs()
+        if self.deterministic:
+            self.batch_deterministic()
+        else:
+            self.batch_nn_plq()
+    def batch_deterministic(self):
+        self.batched_pairs = dict()
+        self.batch_nnh() 
+        self.batch_nnv() 
+    def pair_key(self,site1,site2):
+        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
+        dx = site2[0]-site1[0]
+        dy = site2[1]-site1[1]
+        return site1,(dx+1,dy+1)
+    def pair_coeff(self,site1,site2):
+        return 1. 
+    def pair_valid(self,i1,i2):
+        if i1==i2:
+            return False
+        else:
+            return True
+    def pair_terms(self,i1,i2):
+        pn_map = {0:0,1:1,2:1,3:2}
+        n1,n2 = pn_map[i1],pn_map[i2]
+        nsum,ndiff = n1+n2,abs(n1-n2)
+        if ndiff==1:
+            return [(i2,i1,1)]
+        if ndiff==2:
+            return [(1,2,1),(2,1,1)] 
+        if ndiff==0:
+            return [(0,3,1),(3,0,1)]
+    def pair_tensor(self,bixs,kixs,spin,tags=None):
+        data = self._2backend(self.data_map[self.key+spin],False)
+        inds = bixs[0],kixs[0],bixs[1],kixs[1]
+        return Tensor(data=data,inds=inds,tags=tags) 
+    def pair_energy_from_plq(self,tn,config,site1,site2,spin):
+        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+        i1,i2 = config[ix1],config[ix2] 
+        if not self.pair_valid(i1,i2): # term vanishes 
+            return None 
+        kixs = [tn.site_ind(*site) for site in [site1,site2]]
+        bixs = [kix+'*' for kix in kixs]
+        for site,kix,bix in zip([site1,site2],kixs,bixs):
+            tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
+        tn.add_tensor(self.pair_tensor(bixs,kixs,spin),virtual=True)
+        try:
+            t0 = time.time()
+            ex = tn.contract()
+            #print(time.time()-t0)
+            return self.pair_coeff(site1,site2) * ex 
+        except (ValueError,IndexError):
+            return None 
+    def _pair_energies_from_plq(self,plq,pairs):
+        exa = dict()
+        exb = dict()
+        cx = dict()
+        for (site1,site2) in pairs:
+            key = self.pair_key(site1,site2)
+
+            tn = plq.get(key,None) 
+            if tn is not None:
+                eija = self.pair_energy_from_plq(tn.copy(),config,site1,site2,'a') 
+                if eija is not None:
+                    exa[site1,site2] = eija
+                eijb = self.pair_energy_from_plq(tn.copy(),config,site1,site2,'b') 
+                if eijb is not None:
+                    exb[site1,site2] = eijb
+
+                if site1 in cx:
+                    cij = cx[site1]
+                elif site2 in cx:
+                    cij = cx[site2]
+                else:
+                    cij = self._2numpy(tn.copy().contract())
+                cx[site1] = cij 
+                cx[site2] = cij 
+        #print(f'e,time={time.time()-t0}')
+        return (exa,exb),cx
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
-        self.ham = [None] * 3
+        self.ham = [None] * 4
         self.ham[0] = HubbardFermion(t,u,Lx,Ly,subspace='a',**kwargs)
         self.ham[1] = HubbardFermion(t,u,Lx,Ly,subspace='b',**kwargs)
-
+        self.ham[2] = HubbardBoson(Lx,Ly,subspace='a'**kwargs)
+        self.ham[3] = HubbardBoson(Lx,Ly,subspace='b'**kwargs)
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]

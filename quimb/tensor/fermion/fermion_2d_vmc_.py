@@ -386,6 +386,11 @@ class Hubbard(Hamiltonian):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
     def pair_terms(self,i1,i2):
+        if self.subspace=='full':
+            return pair_terms_full(i1,i2)
+        else:
+            return [(i2,i1,1)]
+    def pair_terms_full(self,i1,i2):
         n1,n2 = pn_map[i1],pn_map[i2]
         nsum,ndiff = n1+n2,abs(n1-n2)
         if ndiff==1:

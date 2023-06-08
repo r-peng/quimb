@@ -17,25 +17,37 @@ MAXITER = 100
 ##################################################################################################
 # VMC utils
 ##################################################################################################
-def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
-    sh = len(g)
+#def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
+#    sh = len(g)
+#    # hessian 
+#    hess = H - E * S
+#    R = S + eta * np.eye(sh)
+#
+#    wmin = -1. + 0.j
+#    eps = eps0 * 2.
+#    while wmin.real < 0.:
+#        # smallest eigenvalue
+#        eps /= 2.
+#        w = np.linalg.eigvals(hess + R/eps)
+#        idx = np.argmin(w.real)
+#        wmin = w[idx]
+#    # solve
+#    deltas = np.linalg.solve(hess + R/eps,g)
+#    # compute model energy
+#    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
+#    return deltas,dE,wmin,eps
+def _rgn_block_solve(H,E,S,g,cond):
     # hessian 
     hess = H - E * S
-    R = S + eta * np.eye(sh)
-
-    wmin = -1. + 0.j
-    eps = eps0 * 2.
-    while wmin.real < 0.:
-        # smallest eigenvalue
-        eps /= 2.
-        w = np.linalg.eigvals(hess + R/eps)
-        idx = np.argmin(w.real)
-        wmin = w[idx]
+    # smallest eigenvalue
+    w = np.linalg.eigvals(hess)
+    idx = np.argmin(w.real)
+    wmin = w[idx]
     # solve
-    deltas = np.linalg.solve(hess + R/eps,g)
+    deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
     # compute model energy
-    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
-    return deltas,dE,wmin,eps
+    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
+    return wmin,deltas,dE
 def _lin_block_solve(H,E,S,g,Hvmean,vmean,cond):
     Hi0 = g
     H0j = Hvmean - E * vmean
@@ -257,9 +269,9 @@ class TNVMC: # stochastic sampling
         self.f = np.array(self.f)
     def _sample_stochastic(self,compute_v=True,compute_Hv=False):
         self.buf[1] = 1.
-        #c = []
-        #e = []
-        #configs = []
+        c = []
+        e = []
+        configs = []
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
@@ -283,9 +295,10 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
-            #c.append(cx)
-            #e.append(ex)
-            #configs.append(list(config))
+            if self.debug:
+                c.append(cx)
+                e.append(ex)
+                configs.append(list(config))
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
@@ -293,14 +306,17 @@ class TNVMC: # stochastic sampling
             self.v = np.array(self.v)
         if compute_Hv:
             self.Hv = np.array(self.Hv)
-        #f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
-        #if compute_Hv:
-        #    f.create_dataset('Hv',data=self.Hv)
-        #f.create_dataset('v',data=self.v)
-        #f.create_dataset('e',data=np.array(e))
-        #f.create_dataset('c',data=np.array(c))
-        #f.create_dataset('config',data=np.array(configs))
-        #f.close()
+        if self.debug:
+            f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
+            if compute_Hv:
+                f.create_dataset('Hv',data=self.Hv)
+            if compute_v:
+                f.create_dataset('v',data=self.v)
+            f.create_dataset('e',data=np.array(e))
+            f.create_dataset('c',data=np.array(c))
+            f.create_dataset('config',data=np.array(configs))
+            f.close()
+            exit()
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p
@@ -574,9 +590,12 @@ class TNVMC: # stochastic sampling
             dE = np.zeros(self.nsite)  
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
-                self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
-                    self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
-                print(f'ix={ix},eigval={w[ix]},eps={eps}')
+                #self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
+                #    self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
+                #print(f'ix={ix},eigval={w[ix]},eps={eps}')
+                w[ix],self.deltas[start:stop],dE[ix] = _rgn_block_solve(
+                    self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
+                print(f'ix={ix},eigval={w[ix]}')
             w = min(np.array(w).real)
             dE = np.sum(dE)
         print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
@@ -691,7 +710,8 @@ class TNVMC: # stochastic sampling
             dE = self._transform_gradients_lin()
         else:
             raise NotImplementedError
-        xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        #xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         deltas_rgn = self.deltas
         if self.check is None:
             return xnew_rgn
