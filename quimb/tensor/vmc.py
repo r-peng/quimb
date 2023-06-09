@@ -363,17 +363,15 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         self.extract_energy()
         self.extract_gradient()
-        if self.optimizer in ['sr','rgn','lin']:
-            self.extract_S()
         if self.optimizer in ['rgn','lin']:
-            self.extract_H()
+            self._extract_Hvmean()
         if RANK==0:
             try:
                 print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite},gmax={np.amax(np.fabs(self.g))}')
             except TypeError:
                 print('E=',self.E)
                 print('Eerr=',self.Eerr)
-            print('\tcollect data time=',time.time()-t0)
+            print('\tcollect g,Hv time=',time.time()-t0)
             self.Eold = self.E
     def extract_energy(self):
         if RANK>0:
@@ -419,7 +417,6 @@ class TNVMC: # stochastic sampling
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
                 self.S[ix] = fxn(start=start,stop=stop)
     def extract_H(self,solve_full=None,solve_dense=None):
-        self._extract_Hvmean()
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
@@ -432,6 +429,7 @@ class TNVMC: # stochastic sampling
                 self.H[ix] = fxn(start=start,stop=stop)
     def _get_Smatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
+        t0 = time.time()
         if RANK==0:
             sh = stop-start
             vvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
@@ -447,9 +445,11 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             vmean = self.vmean[start:stop]
             S = vvsum / self.n - np.outer(vmean,vmean)
+            print('\tcollect S matrix time=',time.time()-t0)
         return S
     def _get_Hmatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
+        t0 = time.time()
         if RANK==0:
             sh = stop-start
             vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
@@ -469,6 +469,7 @@ class TNVMC: # stochastic sampling
             vmean = self.vmean[start:stop]
             g = self.g[start:stop]
             H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
+            print('\tcollect H matrix time=',time.time()-t0)
         return H
     def _get_S_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
@@ -545,6 +546,7 @@ class TNVMC: # stochastic sampling
     def _transform_gradients_sr(self,solve_dense=None,solve_full=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
         if solve_dense:
             return self._transform_gradients_sr_dense(solve_full=solve_full)
         else:
@@ -552,6 +554,8 @@ class TNVMC: # stochastic sampling
     def _transform_gradients_rgn(self,solve_dense=None,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
+        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
         if solve_dense:
             dE = self._transform_gradients_rgn_dense(solve_full=solve_full)
         else:
@@ -716,8 +720,6 @@ class TNVMC: # stochastic sampling
             return 0. 
     def _transform_gradients_o2(self,full_sr=True,dense_sr=False):
         # SR
-        if not ((full_sr==self.solve_full) and (dense_sr==self.solve_dense)):
-            self.extract_S(solve_full=full_sr,solve_dense=dense_sr)
         xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
         deltas_sr = self.deltas
 
