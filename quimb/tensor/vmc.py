@@ -149,6 +149,12 @@ class TNVMC: # stochastic sampling
             solver = kwargs.get('solver','lgmres')
             self.solver = {'lgmres':spla.lgmres,
                            'tfqmr':tfqmr}[solver] 
+            x_bsz,y_bsz = kwargs.get('block_size',(1,1))
+            nx,ny = ham.Lx // x_bsz, ham.Ly // y_bsz
+            assert ham.Lx % x_bsz==0 
+            assert ham.Ly % y_bsz==0 
+            self.blocks = []
+ 
         if self.optimizer=='lin':
             #self.xi = None
             self.xi = kwargs.get('xi',0.5)
@@ -208,8 +214,7 @@ class TNVMC: # stochastic sampling
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.sampler.amplitude_factory.update(x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
-        #self.config,self.omega = self.sampler.preprocess(self.config) 
-        self.sampler.preprocess(self.config) 
+        self.sampler.preprocess()
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
 
         self.buf = np.zeros(4)
@@ -302,6 +307,7 @@ class TNVMC: # stochastic sampling
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
+        self.sampler.config = self.config
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:
@@ -543,13 +549,13 @@ class TNVMC: # stochastic sampling
             return self._transform_gradients_sr_dense(solve_full=solve_full)
         else:
             return self._transform_gradients_sr_iterative(solve_full=solve_full)
-    def _transform_gradients_rgn(self,solve_dense=None,solve_full=None):
+    def _transform_gradients_rgn(self,solve_dense=None,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         if solve_dense:
             dE = self._transform_gradients_rgn_dense(solve_full=solve_full)
         else:
-            dE = self._transform_gradients_rgn_iterative(solve_full=solve_full)
+            dE = self._transform_gradients_rgn_iterative(solve_full=solve_full,x0=x0)
         return dE
     def _transform_gradients_sr_dense(self,solve_full=None):
         if RANK>0:
@@ -584,12 +590,14 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
+            #self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
+            w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
         else:
-            w = [None] * self.nsite
-            dE = np.zeros(self.nsite)  
+            blk_dict = self.sampler.amplitude_factory.block_dict
+            w = [None] * len(blk_dict)
+            dE = np.zeros(len(blk_dict))  
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
+            for ix,(start,stop) in enumerate(blk_dict):
                 #self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
                 #    self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
                 #print(f'ix={ix},eigval={w[ix]},eps={eps}')
@@ -617,7 +625,7 @@ class TNVMC: # stochastic sampling
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
         return dE
-    def solve_iterative(self,A,b,symm):
+    def solve_iterative(self,A,b,symm,x0=None):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)
         sh = len(b)
@@ -625,9 +633,9 @@ class TNVMC: # stochastic sampling
             t0 = time.time()
             LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=b.dtype)
             if symm:
-                deltas,info = spla.minres(LinOp,b,tol=CG_TOL,maxiter=MAXITER)
+                deltas,info = spla.minres(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
             else: 
-                deltas,info = self.solver(LinOp,b,tol=CG_TOL,maxiter=MAXITER)
+                deltas,info = self.solver(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
             self.terminate[0] = 1
             COMM.Bcast(self.terminate,root=0)
             print(f'\tsolver time={time.time()-t0},exit status={info}')
@@ -657,7 +665,7 @@ class TNVMC: # stochastic sampling
             return self.update(self.rate1)
         else:
             return np.zeros(self.nparam,dtype=self.dtype)
-    def _transform_gradients_rgn_iterative(self,solve_full=None):
+    def _transform_gradients_rgn_iterative(self,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         E = self.E if RANK==0 else 0
@@ -673,7 +681,7 @@ class TNVMC: # stochastic sampling
                     return 0
                 #return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
                 return Hx - E * Sx + self.cond2 * x
-            self.deltas = self.solve_iterative(A,g,False)
+            self.deltas = self.solve_iterative(A,g,False,x0=x0)
             self.terminate[0] = 0
             hessp = A(self.deltas)
             if RANK==0:
@@ -682,8 +690,9 @@ class TNVMC: # stochastic sampling
             dE = 0.
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
-                print(f'ix={ix},sh={stop-start}')
-                def hess(x):
+                if RANK==0:
+                    print(f'ix={ix},sh={stop-start}')
+                def A(x):
                     if self.terminate[0]==1:
                         return 0
                     Hx = self.H[ix](x)
@@ -692,8 +701,10 @@ class TNVMC: # stochastic sampling
                     Sx = self.S[ix](x)
                     if self.terminate[0]==1:
                         return 0
-                    return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
-                deltas = self.solve_iterative(A,g[start:stop],False)
+                    #return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                    return Hx - E * Sx + self.cond2 * x
+                x0_ = None if x0 is None else x0[start:stop]
+                deltas = self.solve_iterative(A,g[start:stop],False,x0=x0_)
                 self.deltas[start:stop] = deltas 
                 self.terminate[0] = 0
                 hessp = A(deltas)
@@ -704,8 +715,14 @@ class TNVMC: # stochastic sampling
         else:
             return 0. 
     def _transform_gradients_o2(self,full_sr=True,dense_sr=False):
+        # SR
+        if not ((full_sr==self.solve_full) and (dense_sr==self.solve_dense)):
+            self.extract_S(solve_full=full_sr,solve_dense=dense_sr)
+        xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
+        deltas_sr = self.deltas
+
         if self.optimizer=='rgn':
-            dE = self._transform_gradients_rgn()
+            dE = self._transform_gradients_rgn(x0=deltas_sr)
         elif self.optimizer=='lin':
             dE = self._transform_gradients_lin()
         else:
@@ -715,11 +732,6 @@ class TNVMC: # stochastic sampling
         deltas_rgn = self.deltas
         if self.check is None:
             return xnew_rgn
-        # SR
-        if not ((full_sr==self.solve_full) and (dense_sr==self.solve_dense)):
-            self.extract_S(solve_full=full_sr,solve_dense=dense_sr)
-        xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
-        deltas_sr = self.deltas
         
         if RANK==0:
             g = self.g

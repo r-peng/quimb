@@ -418,9 +418,7 @@ class AmplitudeFactory(ContractionEngine):
         self.constructors = self.get_constructors(psi)
         self.block_dict = self.get_block_dict(blks)
         if RANK==0:
-            sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
-            print('sizes=',sizes)
 
         self.set_psi(psi) # current state stored in self.psi
         self.backend = 'numpy'
@@ -581,29 +579,7 @@ class Hamiltonian(ContractionEngine):
             return self.pair_coeff(site1,site2) * ex 
         except (ValueError,IndexError):
             return None 
-    def batch_hessian(self,batch_idx,config,amplitude_factory): # only used for Hessian
-        peps = amplitude_factory.psi.copy()
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-
-        #print(batch_idx)
-        # compute benvs
-        #t0 = time.time()
-        cache_bot,cache_top = dict(),dict()
-        bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
-        self.get_all_bot_envs(peps,config,cache_bot,imax=bix)
-        self.get_all_top_envs(peps,config,cache_top,imin=tix)
-        #print(f'benv,time={time.time()-t0}')
-
-        # form plqs
-        #t0 = time.time()
-        plq = dict()
-        for imin,imax,x_bsz,y_bsz in plq_types:
-            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top,imin=imin,imax=imax))
-        #print(f'plq,time={time.time()-t0}')
-
-        # compute energy numerator 
-        #t0 = time.time()
+    def _pair_energies_from_plq(self,plq,paris):
         ex = dict()
         cx = dict()
         for (site1,site2) in pairs:
@@ -623,17 +599,48 @@ class Hamiltonian(ContractionEngine):
                     cij = self._2numpy(tn.copy().contract())
                 cx[site1] = cij 
                 cx[site2] = cij 
-        #print(f'e,time={time.time()-t0}')
+        return ex,cx
+    def batch_pair_energies_from_plq(self,batch_idx,config,peps):
+        cache_bot,cache_top = dict(),dict()
+        bix,tix,plq_types,pairs = self.batched_pairs[batch_idx]
+        self.get_all_bot_envs(peps,config,cache_bot,imax=bix)
+        self.get_all_top_envs(peps,config,cache_top,imin=tix)
 
+        # form plqs
+        plq = dict()
+        for imin,imax,x_bsz,y_bsz in plq_types:
+            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top,imin=imin,imax=imax))
+
+        # compute energy numerator 
+        ex,cx = self._pair_energies_from_plq(plq,pairs)
+        return ex,cx,plq
+    def pair_energies_from_plq(self,config,amplitude_factory): 
+        self.backend = 'numpy'
+        peps = amplitude_factory.psi
+        cache_bot = amplitude_factory.cache_bot
+        cache_top = amplitude_factory.cache_top
+
+        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
+        self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
+
+        plq = dict()
+        for x_bsz,y_bsz in self.plq_sz:
+            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
+
+        ex,cx = self._pair_energies_from_plq(plq,self.pairs)
+        return ex,cx,plq
+    def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
+        peps = amplitude_factory.psi.copy()
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
+        ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config,peps)
         # back-prop energy numerator
-        #t0 = time.time()
         if len(ex)>0:
             ex_num = sum(ex.values())
             ex_num.backward()
             Hvx = dict()
             for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
                 Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
-            #print(f'H,time={time.time()-t0}')
             Hvx = amplitude_factory.dict2vec(Hvx)  
             ex = sum([self._2numpy(eij)/cx[site] for (site,_),eij in ex.items()])
         else:
@@ -643,14 +650,14 @@ class Hamiltonian(ContractionEngine):
         # compute plq grad
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
-    def compute_local_energy_hessian(self,config,amplitude_factory): 
+    def compute_local_energy_hessian_from_plq(self,config,amplitude_factory): 
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
         ex,Hvx = 0.,0.
         cx,vx = dict(),dict()
         for batch_idx in self.batched_pairs:
-            ex_,Hvx_,cx_,vx_ = self.batch_hessian(batch_idx,config,amplitude_factory)  
+            ex_,Hvx_,cx_,vx_ = self.batch_hessian_from_plq(batch_idx,config,amplitude_factory)  
             ex += ex_
             Hvx += Hvx_
             cx.update(cx_)
@@ -666,38 +673,8 @@ class Hamiltonian(ContractionEngine):
         Hvx = Hvx/cx + eu*vx
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err 
-    def compute_local_energy_gradient(self,config,amplitude_factory,compute_v=True):
-        self.backend = 'numpy'
-        peps = amplitude_factory.psi
-        cache_bot = amplitude_factory.cache_bot
-        cache_top = amplitude_factory.cache_top
-
-        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
-
-        plq = dict()
-        for x_bsz,y_bsz in self.plq_sz:
-            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
-
-        ex = dict()
-        cx = dict()
-        for (site1,site2) in self.pairs:
-            key = self.pair_key(site1,site2)
-
-            tn = plq.get(key,None) 
-            if tn is not None:
-                eij = self.pair_energy_from_plq(tn.copy(),config,site1,site2) 
-                if eij is not None:
-                    ex[site1,site2] = eij
-
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = tn.copy().contract()
-                cx[site1] = cij 
-                cx[site2] = cij 
+    def compute_local_energy_gradient_from_plq(self,config,amplitude_factory,compute_v=True):
+        ex,cx,plq = self.pair_energies_from_plq(config,amplitude_factory)
 
         ex = sum([eij/cx[site1] for (site1,_),eij in ex.items()])
         eu = self.compute_local_energy_eigen(config)
@@ -921,9 +898,9 @@ class Hamiltonian(ContractionEngine):
                 return self.compute_local_energy_gradient_deterministic(config,amplitude_factory,compute_v=compute_v)
         else:
             if compute_Hv:
-                return self.compute_local_energy_hessian(config,amplitude_factory)
+                return self.compute_local_energy_hessian_from_plq(config,amplitude_factory)
             else:
-                return self.compute_local_energy_gradient(config,amplitude_factory,compute_v=compute_v)
+                return self.compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=compute_v)
     def contraction_error(self,cx):
         nsite = self.Lx * self.Ly
         sqmean = sum(cij**2 for cij in cx.values()) / nsite
@@ -1296,10 +1273,11 @@ class ExchangeSampler1(ContractionEngine):
             self.config = config 
         self.sweep_row_dir = self.rng.choice([-1,1]) 
         self.px = self.amplitude_factory.prob(self.config)
+        #print(self.px)
+        #exit()
 
         if RANK==0:
-            print('\tprob=',self.px)
-            return 
+            return None,None
         t0 = time.time()
         burn_in = self.burn_in if burn_in is None else burn_in
         for n in range(burn_in):
@@ -1579,9 +1557,10 @@ class ExchangeSampler2(ContractionEngine):
         if config is not None:
             self.config = config 
         self.px = self.amplitude_factory.prob(self.config)
+        #print(self.px)
+        #exit()
 
         if RANK==0:
-            print('\tprob=',self.px)
             return None,None
         t0 = time.time()
         burn_in = self.burn_in if burn_in is None else burn_in

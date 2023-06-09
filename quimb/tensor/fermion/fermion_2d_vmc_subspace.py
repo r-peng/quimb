@@ -114,16 +114,13 @@ class AmplitudeFactory:
 from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
-        exs = [None] * 3
-        cxs = [None] * 3
-        plqs = [None] * 3
-        peps = [None] * 3
+        exs,cxs,plqs,wfns = [None] * 3,[None] * 3,[None] * 3,[None] * 3
         for ix in range(3):
-            peps_ = amplitude_factory.psi[ix].psi.copy()
+            peps = amplitude_factory.psi[ix].psi.copy()
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-                peps_[i,j].modify(data=self.ham[ix]._2backend(peps[i,j].data,True))
-            peps[ix] = peps_
-            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].batch_pair_energies_from_plq(configs[ix],peps_)
+                peps[i,j].modify(data=self.ham[ix]._2backend(peps[i,j].data,True))
+            wfns[ix] = peps
+            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].batch_pair_energies_from_plq(configs[ix],peps)
 
         ex = []
         for ix in range(2):
@@ -134,15 +131,15 @@ class Hamiltonian(Hamiltonian_):
         if len(ex)>0:
             ex_num = sum(ex)
             ex_num.backward()
-            Hvx = [None] * 3
+            Hvxs = [None] * 3
             for ix in range(3):
-                Hvx_ = dict()
-                peps_ = peps[ix]
+                Hvx = dict()
+                peps = wfns[ix]
                 _2numpy = self.ham[ix]._2numpy
                 tsr_grad = self.ham[ix].tsr_grad
                 for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-                    Hvx_[i,j] = _2numpy(tsr_grad(peps[i,j].data))
-                Hvx[ix] = amplitude_factory.psi[ix].dict2vec(Hvx_)  
+                    Hvx[i,j] = _2numpy(tsr_grad(peps[i,j].data))
+                Hvxs[ix] = amplitude_factory.psi[ix].dict2vec(Hvx)  
 
             ex = 0.
             cx2 = cxs[2]
@@ -160,11 +157,33 @@ class Hamiltonian(Hamiltonian_):
         for ix in range(3):
             vxs[ix] = amplitude_factory.psi[ix].get_grad_from_plq(
                           plqs[ix],cxs[ix],backend=self.backend))
-        return ex,Hvx,cxs,vxs 
-    def compute_local_energy_hessian(config,amplitude_factory):
-        return
+        return ex,np.concatenate(Hvxs),cxs,vxs 
+    def compute_local_energy_hessian_from_plq(config,amplitude_factory):
+        self.backend = 'torch'
+        ar.set_backend(torch.zeros(1))
+
+        ex,Hvx = 0.,0.
+        cxs,vxs = [dict()] * 3,[dict()] * 3
+        for batch_idx in self.batched_pairs:
+            ex_,Hvx_,cxs_,vxs_ = self.batch_hessian_from_plq(batch_idx,config,amplitude_factory)  
+            ex += ex_
+            Hvx += Hvx_
+            for ix in range(3):
+                cxs[ix].update(cxs_[ix])
+                vxs[ix].update(vxs_[ix])
+
+        eu = self.compute_local_energy_eigen(config)
+        ex += eu
+
+        vx = np.concatenate([amplitude_factory.psi[ix].dict2vec(vx[ix]) for ix in range(3)])
+
+        cx,err = self.contraction_error(cxs)
+
+        Hvx = Hvx/cx + eu*vx
+        ar.set_backend(np.zeros(1))
+        return cx,ex,vx,Hvx,err 
     def compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=True):
-        exs = [None] * 3
+        exs,cxs,plqs,configs = [None] * 3
         cxs = [None] * 3
         plqs = [None] * 3
         configs = parse_config(config)
