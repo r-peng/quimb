@@ -115,6 +115,7 @@ from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
         exs,cxs,plqs,wfns = [None] * 3,[None] * 3,[None] * 3,[None] * 3
+        configs = parse_config(config)
         for ix in range(3):
             peps = amplitude_factory.psi[ix].psi.copy()
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
@@ -140,6 +141,7 @@ class Hamiltonian(Hamiltonian_):
                 for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
                     Hvx[i,j] = _2numpy(tsr_grad(peps[i,j].data))
                 Hvxs[ix] = amplitude_factory.psi[ix].dict2vec(Hvx)  
+            Hvx = np.concatenate(Hvxs)
 
             ex = 0.
             cx2 = cxs[2]
@@ -157,7 +159,7 @@ class Hamiltonian(Hamiltonian_):
         for ix in range(3):
             vxs[ix] = amplitude_factory.psi[ix].get_grad_from_plq(
                           plqs[ix],cxs[ix],backend=self.backend))
-        return ex,np.concatenate(Hvxs),cxs,vxs 
+        return ex,Hvx,cxs,vxs 
     def compute_local_energy_hessian_from_plq(config,amplitude_factory):
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
@@ -183,9 +185,7 @@ class Hamiltonian(Hamiltonian_):
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err 
     def compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=True):
-        exs,cxs,plqs,configs = [None] * 3
-        cxs = [None] * 3
-        plqs = [None] * 3
+        exs,cxs,plqs = [None] * 3,[None] * 3,[None] * 3
         configs = parse_config(config)
         for ix in range(3):
             exs[ix],cxs[ix],plqs[ix] = self.ham[ix].pair_energies_from_plq(
@@ -216,7 +216,18 @@ class Hamiltonian(Hamiltonian_):
             cx *= cx_
             err = max(err,err_)
         return cx,err
+
     def compute_local_energy_hessian_deterministic(config,amplitude_factory):
+        self.backend = 'torch'
+        ar.set_backend(torch.zeros(1))
+
+        cxs,vxs = [None] * 3,[None] * 3 
+        configs = parse_config(config)
+        for ix in range(3):
+            cxs[ix],vxs[ix] = self.ham[ix].amplitude_gradient_deterministic(
+                                  configs[ix],amplitude_factory.psi[ix])
+        vx = np.concatenate(vxs)
+
         return 
     def compute_local_energy_gradient_deterministic(config,amplitude_factory,compute_v=True):
         return 

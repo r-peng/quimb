@@ -322,7 +322,6 @@ class TNVMC: # stochastic sampling
             f.create_dataset('c',data=np.array(c))
             f.create_dataset('config',data=np.array(configs))
             f.close()
-            exit()
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p
@@ -385,6 +384,9 @@ class TNVMC: # stochastic sampling
             self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
     def extract_gradient(self):
         vmean = np.zeros(self.nparam,dtype=self.dtype)
+        if RANK==1:
+            print(self.vsum.shape,self.vsum.dtype)
+            print(vmean.shape,vmean.dtype)
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
         evmean = np.zeros(self.nparam,dtype=self.dtype)
         COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
@@ -861,7 +863,10 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             E,Eerr = self.E,self.Eerr
         self.free_quantities()
+        debug = self.debug
+        self.debug = False
         self.sample(samplesize=self.batchsize_small,compute_v=False,compute_Hv=False)
+        self.debug = debug
         self.extract_energy()
         if RANK>0:
             return True 
@@ -935,3 +940,41 @@ class TNVMC: # stochastic sampling
         f.create_dataset('e',data=np.array(e_new))
         f.create_dataset('c',data=np.array(c_new))
         f.close()
+    def load(self,tmpdir):
+        if RANK==0:
+            vmean = np.zeros(self.nparam,dtype=self.dtype)
+            evmean = np.zeros(self.nparam,dtype=self.dtype)
+            Hvmean = np.zeros(self.nparam,dtype=self.dtype)
+
+            self.e = [] 
+            for rank in range(1,SIZE):
+                print('rank=',rank)
+                e,vsum,evsum,Hvsum = COMM.recv(source=rank)
+                self.e.append(e)
+                vmean += vsum
+                evmean += evsum
+                Hvmean += Hvsum
+
+            self.e = np.concatenate(self.e)
+            self.f = np.ones_like(self.e)
+            self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
+            self.n = len(self.e)
+
+            vmean /= self.n
+            evmean /= self.n
+            self.g = evmean - self.E * vmean
+            self.vmean = vmean 
+
+            Hvmean /= self.n
+            self.Hvmean = Hvmean
+        else:
+            f = h5py.File(tmpdir+f'step{self.step}RANK{RANK}.hdf5','r')
+            self.Hv = f['Hv'][:]
+            self.v = f['v'][:]
+            e = f['e'][:]
+            f.close()
+            vsum = self.v.sum(axis=0)
+            evsum = np.dot(e,self.v)
+            Hvsum = self.Hv.sum(axis=0)
+            COMM.send([e,vsum,evsum,Hvsum],dest=0)
+        COMM.Barrier()
