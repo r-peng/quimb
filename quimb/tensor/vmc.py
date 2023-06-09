@@ -654,13 +654,13 @@ class TNVMC: # stochastic sampling
         if solve_full: 
             def R(x):
                 return self.S(x) + self.cond1 * x
-            self.deltas = self.solve_iterative(R,g,True)
+            self.deltas = self.solve_iterative(R,g,True,x0=g)
         else:
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
                 def R(x):
                     return self.S[ix](x) + self.cond1 * x
-                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True)
+                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
         if RANK==0:
             return self.update(self.rate1)
         else:
