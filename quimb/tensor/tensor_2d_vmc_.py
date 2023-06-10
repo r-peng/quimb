@@ -562,7 +562,7 @@ class Hamiltonian(ContractionEngine):
         data = self._2backend(self.data_map[self.key],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return Tensor(data=data,inds=inds,tags=tags) 
-    def pair_energy_from_plq(self,tn,config,site1,site2):
+    def _pair_energy_from_plq(self,tn,config,site1,site2):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -573,13 +573,11 @@ class Hamiltonian(ContractionEngine):
             tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
         tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
         try:
-            t0 = time.time()
             ex = tn.contract()
-            #print(time.time()-t0)
             return self.pair_coeff(site1,site2) * ex 
         except (ValueError,IndexError):
             return None 
-    def _pair_energies_from_plq(self,plq,paris):
+    def _pair_energies_from_plq(self,plq,pairs):
         ex = dict()
         cx = dict()
         for (site1,site2) in pairs:
@@ -587,7 +585,7 @@ class Hamiltonian(ContractionEngine):
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eij = self.pair_energy_from_plq(tn.copy(),config,site1,site2) 
+                eij = self._pair_energy_from_plq(tn.copy(),config,site1,site2) 
                 if eij is not None:
                     ex[site1,site2] = eij
 
@@ -614,40 +612,14 @@ class Hamiltonian(ContractionEngine):
         # compute energy numerator 
         ex,cx = self._pair_energies_from_plq(plq,pairs)
         return ex,cx,plq
-    def pair_energies_from_plq(self,config,amplitude_factory): 
-        self.backend = 'numpy'
-        peps = amplitude_factory.psi
-        cache_bot = amplitude_factory.cache_bot
-        cache_top = amplitude_factory.cache_top
-
-        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
-        self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
-
-        plq = dict()
-        for x_bsz,y_bsz in self.plq_sz:
-            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
-
-        ex,cx = self._pair_energies_from_plq(plq,self.pairs)
-        return ex,cx,plq
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config,peps)
-        # back-prop energy numerator
-        if len(ex)>0:
-            ex_num = sum(ex.values())
-            ex_num.backward()
-            Hvx = dict()
-            for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-                Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
-            Hvx = amplitude_factory.dict2vec(Hvx)  
-            ex = sum([self._2numpy(eij)/cx[site] for (site,_),eij in ex.items()])
-        else:
-            ex = 0.
-            Hvx = 0.
 
-        # compute plq grad
+        _,Hvx = self.parse_hessian(ex,peps,amplitude_factory)
+        ex = sum([self._2numpy(eij)/cx[site] for (site,_),eij in ex.items()])
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
     def compute_local_energy_hessian_from_plq(self,config,amplitude_factory): 
@@ -667,12 +639,26 @@ class Hamiltonian(ContractionEngine):
         ex += eu
 
         vx = amplitude_factory.dict2vec(vx)
-
         cx,err = self.contraction_error(cx)
 
         Hvx = Hvx/cx + eu*vx
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err 
+    def pair_energies_from_plq(self,config,amplitude_factory): 
+        self.backend = 'numpy'
+        peps = amplitude_factory.psi
+        cache_bot = amplitude_factory.cache_bot
+        cache_top = amplitude_factory.cache_top
+
+        x_bsz_min = min([x_bsz for x_bsz,_ in self.plq_sz])
+        self.get_all_benvs(peps,config,cache_bot,cache_top,x_bsz=x_bsz_min)
+
+        plq = dict()
+        for x_bsz,y_bsz in self.plq_sz:
+            plq.update(self.get_plq_from_benvs(config,x_bsz,y_bsz,peps,cache_bot,cache_top))
+
+        ex,cx = self._pair_energies_from_plq(plq,self.pairs)
+        return ex,cx,plq
     def compute_local_energy_gradient_from_plq(self,config,amplitude_factory,compute_v=True):
         ex,cx,plq = self.pair_energies_from_plq(config,amplitude_factory)
 
@@ -686,18 +672,35 @@ class Hamiltonian(ContractionEngine):
         vx = amplitude_factory.get_grad_from_plq(plq,cx,backend=self.backend)  
         cx,err = self.contraction_error(cx)
         return cx,ex,vx,None,err
-    def pair_energy_deterministic(self,config,peps,site1,site2,cache_bot,cache_top,sign_fn):
+    def amplitude_gradient_deterministic(self,config,amplitude_factory):
+        cache_top = dict()
+        cache_bot = dict()
+        peps = amplitude_factory.psi.copy()
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
+
+        env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
+        tn = env_bot.copy()
+        tn.add_tensor_network(env_top,virtual=False)
+        cx = tn.contract() 
+
+        cx.backward()
+        vx = dict()
+        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+            vx[i,j] = self.tsr_grad(peps[i,j].data)  
+        vx = {site:self._2numpy(vij) for site,vij in vx.items()}
+        vx = amplitude_factory.dict2vec(vx)  
+        cx = self._2numpy(cx)
+        return cx,vx/cx
+    def _pair_energy_deterministic(self,config,site1,site2,peps,top,bot,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
             return None 
-        assert site1[0] <= site2[0]
-        imin = min(self.rix1+1,site1[0]) 
-        imax = max(self.rix2-1,site2[0]) 
-        top = None if imax==peps.Lx-1 else cache_top[config[(imax+1)*peps.Ly:]]
-        bot = None if imin==0 else cache_bot[config[:imin*peps.Ly]]
         ex = [] 
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
+        cache_top = dict()
+        cache_bot = dict()
         for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
             config_new = list(config)
             config_new[ix1] = i1_new
@@ -728,115 +731,64 @@ class Hamiltonian(ContractionEngine):
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-    def batch_hessian_deterministic(self,config,amplitude_factory,imin_,imax_):
+    def batch_pair_energies_deterministic(self,config,peps,sign_fn,batch_imin,batch_imax):
         cache_top = dict()
         cache_bot = dict()
+        
+        imin = min(self.rix1+1,batch_imin) 
+        imax = max(self.rix2-1,batch_imax) 
+        self.get_all_bot_envs(peps,config,cache_bot,imax=imin-1)
+        self.get_all_top_envs(peps,config,cache_top,imin=imax+1)
+        top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
+        bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
+
+        ex = dict() 
+        for site1,site2 in self.batched_pairs[batch_imin,batch_imax]:
+            eij = self._pair_energy_deterministic(config,site1,site2,peps,top,bot,sign_fn)
+            if eij is not None:
+                ex[site1,site2] = eij
+        return ex
+    def batch_hessian_deterministic(self,config,amplitude_factory,batch_imin,batch_imax):
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        
-        #t0 = time.time()
-        imin = min(self.rix1+1,imin_) 
-        imax = max(self.rix2-1,imax_) 
-        self.get_all_bot_envs(peps,config,cache_bot,imax=imin+1)
-        self.get_all_top_envs(peps,config,cache_top,imin=imax-1)
-        #print(f'benv,time={time.time()-t0}')
-        sign_fn = amplitude_factory.config_sign
+        ex = self.batch_pair_energies_deterministic(self,config,peps,amplitude_factory.config_sign,
+                                                    batch_imin,batch_imax)
 
-        #t0 = time.time()
-        ex = []
-        for site1,site2 in self.batched_pairs[imin_,imax_]:
-            ex_ = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn)
-            if ex_ is not None:
-                ex.append(ex_)
-        if len(ex)==0:
-            return 0.,0.
-        ex = sum(ex) 
-        #print(f'ex,time={time.time()-t0}')
-
-        #t0 = time.time()
-        ex.backward()
-        Hvx = dict()
-        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-            Hvx[i,j] = self.tsr_grad(peps[i,j].data)  
-        Hvx = {site:self._2numpy(Hvij) for site,Hvij in Hvx.items()}
-        Hvx = amplitude_factory.dict2vec(Hvx)  
-        ex = self._2numpy(ex) 
-        #print(f'Hvx,time={time.time()-t0}')
-        return ex,Hvx
-    def pair_hessian_deterministic(self,config,amplitude_factory,site1,site2):
+        ex_num,Hvx = self.parse_hessian(ex,peps,amplitude_factory)
+        return self._2numpy(ex_num),Hvx
+    def pair_energy_deterministic(self,config,peps,sign_fn,site1,site2):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
-            return 0.,0. 
+            return None 
 
         cache_top = dict()
         cache_bot = dict()
+        imin = min(site1[0],site2[0])
+        imax = max(site1[0],site2[0])
+        imin = min(self.rix1+1,imin) 
+        imax = max(self.rix2-1,imax) 
+        self.get_all_bot_envs(peps,config,cache_bot,imax=imin-1)
+        self.get_all_top_envs(peps,config,cache_top,imin=imax+1)
+        top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
+        bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
+        return self._pair_energy_deterministic(config,site1,site2,peps,top,bot,sign_fn)
+    def pair_hessian_deterministic(self,config,amplitude_factory,site1,site2):
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-
-        coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
-        ex = 0.
-        Hvx = 0.
-        for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
-            config_new = list(config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
-            sign_new = amplitude_factory.config_sign(config_new)
-
-            #t0 = time.time()
-            env_bot,env_top = self.get_all_benvs(peps,config_new,cache_bot,cache_top)
-            tn = env_bot.copy()
-            tn.add_tensor_network(env_top,virtual=False)
-            cx = tn.contract() 
-            #print(f'ex,time={time.time()-t0}')
-
-            #t0 = time.time()
-            cx.backward()
-            vx = dict()
-            for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-                vx[i,j] = self.tsr_grad(peps[i,j].data)  
-            vx = {site:self._2numpy(vij) for site,vij in vx.items()}
-            vx = amplitude_factory.dict2vec(vx)  
-            cx = self._2numpy(cx) 
-            #print(f'Hvx,time={time.time()-t0}')
-
-            ex += coeff * sign_new * cx 
-            Hvx += coeff * sign_new * vx
-        return ex * coeff_comm, Hvx * coeff_comm
-    def amplitude_gradient_deterministic(self,config,amplitude_factory):
-        cache_top = dict()
-        cache_bot = dict()
-        peps = amplitude_factory.psi.copy()
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        #t0 = time.time()
-        env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
-        tn = env_bot.copy()
-        tn.add_tensor_network(env_top,virtual=False)
-        cx = tn.contract() 
-        #print(f'cx,time={time.time()-t0}')
-
-        #t0 = time.time()
-        cx.backward()
-        vx = dict()
-        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-            vx[i,j] = self.tsr_grad(peps[i,j].data)  
-        vx = {site:self._2numpy(vij) for site,vij in vx.items()}
-        vx = amplitude_factory.dict2vec(vx)  
-        cx = self._2numpy(cx)
-        #print(f'vx,time={time.time()-t0}')
-        return cx,vx/cx
+        ex = self.pair_energy_deterministic(config,peps,amplitude_factory.config_sign,site1,site2)
+        if ex is None:
+            return 0.,0.
+        ex_num,Hvx = self.parse_hessian({(site1,site2):ex},peps,amplitude_factory)
+        return self._2numpy(ex_num),Hvx
     def compute_local_energy_hessian_deterministic(self,config,amplitude_factory):
-        #print(config)
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
         cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
 
-        #t0 = time.time()
         ex = 0. 
         Hvx = 0.
         for key in self.batched_pairs:
@@ -851,15 +803,13 @@ class Hamiltonian(ContractionEngine):
                 ex_,Hvx_ = self.pair_hessian_deterministic(self,config,amplitude_factory,site1,site2)
                 ex += ex_
                 Hvx += Hvx_
-        #print(f'e,time={time.time()-t0}')
          
         eu = self.compute_local_energy_eigen(config)
         ex = ex/cx + eu
         Hvx = Hvx/cx + eu*vx
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,0. 
-    def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
-        # compute energy
+    def pair_energies_determiinistic(self,config,amplitude_factory):
         self.backend = 'numpy'
         peps = amplitude_factory.psi
         cache_bot = amplitude_factory.cache_bot
@@ -868,27 +818,34 @@ class Hamiltonian(ContractionEngine):
         env_bot,env_top = self.get_all_benvs(peps,config,cache_bot,cache_top)
 
         sign_fn = amplitude_factory.config_sign
-        ex = 0. 
+        ex = dict() 
         for (site1,site2) in self.pairs:
-            ex_ = self.pair_energy_deterministic(config,peps,site1,site2,cache_bot,cache_top,sign_fn)
-            if ex_ is not None:
-                ex += ex_
-        eu = self.compute_local_energy_eigen(config)
-        if not compute_v:
-            tn = env_bot.copy()
-            tn.add_tensor_network(env_top,virtual=False)
-            cx = tn.contract() 
+            imin = min(site1[0],site2[0])
+            imax = max(site1[0],site2[0])
+            imin = min(self.rix1+1,imin) 
+            imax = max(self.rix2-1,imax) 
+            top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
+            bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
 
-            ex = ex/cx + eu
+            eij = self._pair_energy_deterministic(config,site1,site2,peps,top,bot,sign_fn)
+            if eij is not None:
+                ex[site1,site2] = eij
+        tn = env_bot.copy()
+        tn.add_tensor_network(env_top,virtual=False)
+        cx = tn.contract() 
+        return ex,cx
+    def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
+        ex,cx = self.pair_energies_deterministic(config,amplitude_factory)
+        ex = sum(ex.values()) / ex
+        eu = self.compute_local_energy_eigen(config)
+        ex += eu
+        if not compute_v:
             return cx,ex,None,None,0.
 
-        # compute_amplitude_gradient 
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
-        cx,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
+        _,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
         ar.set_backend(np.zeros(1))
-
-        ex = ex/cx + eu
         return cx,ex,vx,None,0.
     def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
         if self.deterministic:
@@ -901,6 +858,15 @@ class Hamiltonian(ContractionEngine):
                 return self.compute_local_energy_hessian_from_plq(config,amplitude_factory)
             else:
                 return self.compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=compute_v)
+    def parse_hessian(self,ex,peps,amplitude_factory):
+        if len(ex)==0:
+            return 0.,0.
+        ex_num = sum(ex.values())
+        ex_num.backward()
+        Hvx = dict()
+        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+            Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
+        return ex_num,amplitude_factory.dict2vec(Hvx)  
     def contraction_error(self,cx):
         nsite = self.Lx * self.Ly
         sqmean = sum(cij**2 for cij in cx.values()) / nsite

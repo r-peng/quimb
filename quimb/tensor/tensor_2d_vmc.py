@@ -871,7 +871,7 @@ class Hamiltonian(ContractionEngine):
             Hvx += Hvx_
         if self.pbc:
             for site1,site2 in self.batched_pairs['pbc']:
-                ex_,Hvx_ = self.pair_hessian_deterministic(self,config,amplitude_factory,site1,site2)
+                ex_,Hvx_ = self.pair_hessian_deterministic(config,amplitude_factory,site1,site2)
                 ex += ex_
                 Hvx += Hvx_
         #print(f'e,time={time.time()-t0}')
@@ -1751,9 +1751,9 @@ class ExchangeSampler2(ContractionEngine):
         self.amplitude_factory.cache_top = cache_top_new
     def update_pair_deterministic(self,i,j,x_bsz,y_bsz,peps,cache_bot,cache_top):
         if (x_bsz,y_bsz)==(1,2):
-            site1,site2 = (i,j),(i,j+1)
+            site1,site2 = (i,j),(i,(j+1)%self.Ly)
         elif (x_bsz,y_bsz)==(2,1):
-            site1,site2 = (i,j),(i+1,j)
+            site1,site2 = (i,j),((i+1)%self.Lx,j)
         else:
             raise NotImplementedError
 
@@ -1761,8 +1761,8 @@ class ExchangeSampler2(ContractionEngine):
         i1,i2 = self.config[ix1],self.config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
             return 
-        imin = min(self.rix1+1,site1[0]) 
-        imax = max(self.rix2-1,site2[0]) 
+        imin = min(self.rix1+1,site1[0],site2[0]) 
+        imax = max(self.rix2-1,site1[0],site2[0]) 
         top = None if imax==peps.Lx-1 else cache_top[self.config[(imax+1)*peps.Ly:]]
         bot = None if imin==0 else cache_bot[self.config[:imin*peps.Ly]]
         i1_new,i2_new = self.new_pair(i1,i2)
