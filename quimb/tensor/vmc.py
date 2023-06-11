@@ -384,9 +384,6 @@ class TNVMC: # stochastic sampling
             self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
     def extract_gradient(self):
         vmean = np.zeros(self.nparam,dtype=self.dtype)
-        if RANK==1:
-            print(self.vsum.shape,self.vsum.dtype)
-            print(vmean.shape,vmean.dtype)
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
         evmean = np.zeros(self.nparam,dtype=self.dtype)
         COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)

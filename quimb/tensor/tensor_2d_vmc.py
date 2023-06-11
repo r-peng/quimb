@@ -991,7 +991,7 @@ class Hamiltonian(ContractionEngine):
             return
         ls = self.batched_pairs.get('pbc',[]) 
         for j in range(self.Ly):
-            where = (0,j),(i,j)
+            where = (0,j),(self.Lx-1,j)
             ls.append(where)
         self.batched_pairs['pbc'] = ls
     def batch_diag(self):
