@@ -453,11 +453,12 @@ class ContractionEngine:
         # gradient
         vx = dict()
         for ((i0,j0),(x_bsz,y_bsz)),tn in plq.items():
+            where = (i0,j0),(i0+x_bsz-1,j0+y_bsz-1)
             for i in range(i0,i0+x_bsz):
                 for j in range(j0,j0+y_bsz):
                     if (i,j) in vx:
                         continue
-                    vx[i,j] = self._2numpy(self.site_grad(tn.copy(),i,j)/cx[i,j],backend=backend)
+                    vx[i,j] = self._2numpy(self.site_grad(tn.copy(),i,j)/cx[where],backend=backend)
         return vx
 class AmplitudeFactory(ContractionEngine):
     def __init__(self,psi,blks=None,phys_dim=2):
@@ -635,23 +636,17 @@ class Hamiltonian(ContractionEngine):
     def _pair_energies_from_plq(self,plq,pairs,config):
         ex = dict()
         cx = dict()
-        for (site1,site2) in pairs:
-            key = self.pair_key(site1,site2)
+        for where in pairs:
+            key = self.pair_key(*where)
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eij = self._pair_energy_from_plq(tn.copy(),config,site1,site2) 
+                eij = self._pair_energy_from_plq(tn.copy(),config,*where) 
                 if eij is not None:
-                    ex[site1,site2] = eij
+                    ex[where] = eij
 
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = self._2numpy(tn.copy().contract())
-                cx[site1] = cij 
-                cx[site2] = cij 
+                cij = self._2numpy(tn.copy().contract())
+                cx[where] = cij 
         return ex,cx
     def batch_pair_energies_from_plq(self,batch_idx,config,psi):
         cache_bot,cache_top = dict(),dict()
@@ -674,7 +669,7 @@ class Hamiltonian(ContractionEngine):
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config,peps)
 
         _,Hvx = self.parse_hessian(ex,peps,amplitude_factory)
-        ex = sum([self._2numpy(eij)/cx[site] for (site,_),eij in ex.items()])
+        ex = sum([self._2numpy(eij)/cx[where] for where,eij in ex.items()])
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
     def compute_local_energy_hessian_from_plq(self,config,amplitude_factory): 
@@ -713,7 +708,7 @@ class Hamiltonian(ContractionEngine):
     def compute_local_energy_gradient_from_plq(self,config,amplitude_factory,compute_v=True):
         ex,cx,plq = self.pair_energies_from_plq(config,amplitude_factory)
 
-        ex = sum([eij/cx[site1] for (site1,_),eij in ex.items()])
+        ex = sum([eij/cx[where] for where,eij in ex.items()])
         eu = self.compute_local_energy_eigen(config)
         ex += eu
 
@@ -917,12 +912,9 @@ class Hamiltonian(ContractionEngine):
             Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
         return self._2numpy(ex_num),amplitude_factory.dict2vec(Hvx)  
     def contraction_error(self,cx):
-        nsite = self.Lx * self.Ly
-        sqmean = sum(cij**2 for cij in cx.values()) / nsite
-        mean = sum(cij for cij in cx.values()) / nsite
-        err = sqmean - mean**2
-        return mean,np.fabs(err/mean)
-
+        cx = np.array(list(cx.values()))
+        max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
+        return mean_,np.fabs((max_-min_)/mean_)
     def pairs_nn(self,d=1):
         ls = [] 
         for i in range(self.Lx):
@@ -1243,10 +1235,10 @@ class Mz(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-class ExchangeSampler1(ContractionEngine):
+class ExchangeSampler1:
     def __init__(self,Lx,Ly,seed=None,burn_in=0):
-        super().init_contraction(Lx,Ly)
-        self.nsite = self.Lx * self.Ly
+        self.Lx, self.Ly = Lx,Ly
+        self.nsite = Lx * Ly
 
         self.rng = np.random.default_rng(seed)
         self.exact = False
@@ -1254,6 +1246,10 @@ class ExchangeSampler1(ContractionEngine):
         self.burn_in = burn_in 
         self.amplitude_factory = None
         self.backend = 'numpy'
+    def flatten(self,i,j):
+        return flatten(i,j,self.Ly)
+    def flat2site(self,i,j):
+        return flat2site(i,j,self.Lx,self.Ly)
     def preprocess(self):
         self._burn_in()
     def _burn_in(self,config=None,burn_in=None):
@@ -1271,7 +1267,6 @@ class ExchangeSampler1(ContractionEngine):
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
-        #print(f'RANK={RANK},burn in time={time.time()-t0}')
     def new_pair(self,i1,i2):
         return i2,i1
     def get_pairs(self,i,j):
@@ -1290,21 +1285,16 @@ class ExchangeSampler1(ContractionEngine):
         for key in order:
             bonds.append(bonds_map[key])
         return bonds
-    def update_plq_test(self,ix1,ix2,i1_new,i2_new,py):
-        config = self.config.copy()
-        config[ix1] = i1_new
-        config[ix2] = i2_new
-        peps = self.amplitude_factory.psi.copy()
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                peps.add_tensor(self.get_bra_tsr(peps,config[self.flatten(i,j)],i,j))
-        try:
-            py_ = peps.contract()**2
-        except (ValueError,IndexError):
-            py_ = 0.
-        print(i,j,site1,site2,ix1,ix2,i1_new,i2_new,self.config,py,py_)
-        if np.fabs(py-py_)>PRECISION:
-            raise ValueError
+    def _new_pair(self,site1,site2):
+        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+        i1,i2 = self.config[ix1],self.config[ix2]
+        if not self.amplitude_factory.pair_valid(i1,i2): # continue
+            return (None,) * 2
+        i1_new,i2_new = self.new_pair(i1,i2)
+        config_new = list(self.config)
+        config_new[ix1] = i1_new
+        config_new[ix2] = i2_new
+        return (i1_new,i2_new),tuple(config_new)
     def update_plq(self,i,j,cols,tn,saved_rows):
         if cols[0] is None:
             return tn,saved_rows
@@ -1315,15 +1305,12 @@ class ExchangeSampler1(ContractionEngine):
             tn_plq.add_tensor_network(col,virtual=False)
         tn_plq.view_like_(tn)
         pairs = self.get_pairs(i,j) 
-        for site1,site2 in pairs:
-            ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-            i1,i2 = self.config[ix1],self.config[ix2]
-            if not self.pair_valid(i1,i2): # continue
-                #print(i,j,site1,site2,ix1,ix2,'pass')
+        for sites in pairs:
+            config_sites,config_new = self._new_pair(*sites)
+            if config_sites is None:
                 continue
-            i1_new,i2_new = self.new_pair(i1,i2)
-            tn_pair = self.replace_sites(tn_plq.copy(),(site1,site2),(i1_new,i2_new)) 
-            py = self.safe_contract(tn_pair)
+            tn_pair = self.amplitude_factory.replace_sites(tn_plq.copy(),sites,config_sites) 
+            py = self.amplitude_factory.safe_contract(tn_pair)
             if py is None:
                 continue
             py = py**2
@@ -1332,16 +1319,13 @@ class ExchangeSampler1(ContractionEngine):
             except ZeroDivisionError:
                 acceptance = 1. if py > self.px else 0.
             if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-                #print('acc')
                 self.px = py
-                self.config[ix1] = i1_new
-                self.config[ix2] = i2_new
-                tn_plq = self.replace_sites(tn_plq,(site1,site2),(i1_new,i2_new))
-                tn = self.replace_sites(tn,(site1,site2),(i1_new,i2_new))
-                saved_rows = self.replace_sites(saved_rows,(site1,site2),(i1_new,i2_new))
+                self.config = config_new 
+                tn_plq = self.amplitude_factory.replace_sites(tn_plq,sites,config_sites)
+                tn = self.amplitude_factory.replace_sites(tn,sites,config_sites)
+                saved_rows = self.amplitude_factory.replace_sites(saved_rows,sites,config_sites)
         return tn,saved_rows
     def sweep_col_forward(self,i,rows):
-        self.config = list(self.config)
         tn = rows[0].copy()
         for row in rows[1:]:
             tn.add_tensor_network(row,virtual=False)
@@ -1350,7 +1334,7 @@ class ExchangeSampler1(ContractionEngine):
             tn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
         except (NotImplementedError,AttributeError):
             pass
-        renvs = self.get_all_renvs(tn.copy(),jmin=2)
+        renvs = self.amplitude_factory.get_all_renvs(tn.copy(),jmin=2)
         first_col = tn.col_tag(0)
         for j in range(self.Ly-1): # 0,...,Ly-2
             tags = first_col,tn.col_tag(j),tn.col_tag(j+1)
@@ -1361,10 +1345,8 @@ class ExchangeSampler1(ContractionEngine):
             # update new lenv
             if j<self.Ly-2:
                 tn ^= first_col,tn.col_tag(j) 
-        self.config = tuple(self.config)
         return saved_rows
     def sweep_col_backward(self,i,rows):
-        self.config = list(self.config)
         tn = rows[0].copy()
         for row in rows[1:]:
             tn.add_tensor_network(row,virtual=False)
@@ -1373,7 +1355,7 @@ class ExchangeSampler1(ContractionEngine):
             tn.reorder('col',layer_tags=('KET','BRA'),inplace=True)
         except (NotImplementedError,AttributeError):
             pass
-        lenvs = self.get_all_lenvs(tn.copy(),jmax=self.Ly-3)
+        lenvs = self.amplitude_factory.get_all_lenvs(tn.copy(),jmax=self.Ly-3)
         last_col = tn.col_tag(self.Ly-1)
         for j in range(self.Ly-1,0,-1): # Ly-1,...,1
             cols = []
@@ -1385,7 +1367,6 @@ class ExchangeSampler1(ContractionEngine):
             # update new renv
             if j>1:
                 tn ^= tn.col_tag(j),last_col
-        self.config = tuple(self.config)
         return saved_rows
     def sweep_row_forward(self):
         self.amplitude_factory.cache_bot = dict()
@@ -1398,20 +1379,20 @@ class ExchangeSampler1(ContractionEngine):
                     self.sweep_col_backward
 
         env_bot = None 
-        row1 = self.get_mid_env(0,self.config,psi=psi)
+        row1 = amplitude_factory.get_mid_env(0,self.config)
         for i in range(self.Lx-1):
             rows = []
             if i>0:
                 rows.append(env_bot)
-            row2 = self.get_mid_env(i+1,self.config,psi=psi)
+            row2 = amplitude_factory.get_mid_env(i+1,self.config)
             rows += [row1,row2]
             if i<self.Lx-2:
                 rows.append(cache_top[self.config[(i+2)*self.Ly:]]) 
             saved_rows = sweep_col(i,rows)
-            row1_new = saved_rows.select(peps.row_tag(i),virtual=False)
-            row2_new = saved_rows.select(peps.row_tag(i+1),virtual=False)
+            row1_new = saved_rows.select(psi.row_tag(i),virtual=False)
+            row2_new = saved_rows.select(psi.row_tag(i+1),virtual=False)
             # update new env_h
-            env_bot = self.get_bot_env(i,row1_new,env_bot,tuple(self.config),cache=cache_bot)
+            env_bot = amplitude_factory.get_bot_env(i,row1_new,env_bot,tuple(self.config))
             row1 = row2_new
     def sweep_row_backward(self):
         self.amplitude_factory.cache_top = dict()
@@ -1424,12 +1405,12 @@ class ExchangeSampler1(ContractionEngine):
                     self.sweep_col_backward
 
         env_top = None 
-        row1 = self.get_mid_env(self.Lx-1,self.config,psi=psi)
+        row1 = self.amplitude_factory.get_mid_env(self.Lx-1,self.config)
         for i in range(self.Lx-1,0,-1):
             rows = []
             if i>1:
                 rows.append(cache_bot[self.config[:(i-1)*self.Ly]])
-            row2 = self.get_mid_env(i-1,self.config,psi=psi)
+            row2 = self.amplitude_factory.get_mid_env(i-1,self.config)
             rows += [row2,row1]
             if i<self.Lx-1:
                 rows.append(env_top) 
@@ -1437,12 +1418,11 @@ class ExchangeSampler1(ContractionEngine):
             row1_new = saved_rows.select(peps.row_tag(i),virtual=False)
             row2_new = saved_rows.select(peps.row_tag(i-1),virtual=False)
             # update new env_h
-            env_top = self.get_top_env(i,row1_new,env_top,tuple(self.config),cache=cache_top)
+            env_top = self.amplitude_factory.get_top_env(i,row1_new,env_top,tuple(self.config))
             row1 = row2_new
     def sample(self):
-        #self.sweep_col_dir = -1 # randomly choses the col sweep direction
         self.sweep_col_dir = self.rng.choice([-1,1]) # randomly choses the col sweep direction
-        if self.deterministic:
+        if self.amplitude_factory.deterministic:
             self._sample_deterministic()
         else:
             self._sample()
@@ -1460,11 +1440,12 @@ class ExchangeSampler1(ContractionEngine):
         sweep_row = range(0,imax+1) if self.sweep_row_dir==1 else range(imax,-1,-1)
         sweep_col = range(0,jmax+1) if self.sweep_col_dir==1 else range(jmax,-1,-1)
 
-        peps = self.amplitude_factory.psi
-        cache_bot = self.amplitude_factory.cache_bot
-        cache_top = self.amplitude_factory.cache_top
         for i,j in itertools.product(sweep_row,sweep_col):
-            self.update_pair_deterministic(i,j,peps,cache_bot,cache_top)
+            self.update_pair_deterministic(i,j)
+        self.update_cache(self.amplitude_factory)
+    def update_cache(self,amplitude_factory):
+        cache_bot = amplitude_factory.cache_bot
+        cache_top = amplitude_factory.cache_top
 
         cache_bot_new = dict()
         for i in range(self.rix1+1):
@@ -1474,42 +1455,39 @@ class ExchangeSampler1(ContractionEngine):
         for i in range(self.rix2,self.Lx):
             key = self.config[i*self.Ly:]
             cache_top_new[key] = cache_top[key]
-        self.amplitude_factory.cache_bot = cache_bot_new
-        self.amplitude_factory.cache_top = cache_top_new
-    def update_pair_deterministic(self,i,j,psi,cache_bot,cache_top):
+
+        amplitude_factory.cache_bot = cache_bot_new
+        amplitude_factory.cache_top = cache_top_new
+    def update_pair_deterministic(self,i,j):
+        cache_bot = self.amplitude_factory.cache_bot
+        cache_top = self.amplitude_factory.cache_top
         pairs = self.get_pairs(i,j)
-        for site1,site2 in pairs:
-            ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
-            i1,i2 = self.config[ix1],self.config[ix2]
-            if not self.pair_valid(i1,i2): # term vanishes 
-                continue 
+        for sites in pairs:
+            config_sites,config_new = self._new_pair(*sites)
+            if config_sites is None:
+                continue
             imin = min(self.rix1+1,site1[0]) 
             imax = max(self.rix2-1,site2[0]) 
             top = None if imax==peps.Lx-1 else cache_top[self.config[(imax+1)*peps.Ly:]]
             bot = None if imin==0 else cache_bot[self.config[:imin*peps.Ly]]
-            i1_new,i2_new = self.new_pair(i1,i2)
-            config_new = list(self.config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
 
             bot_term = None if bot is None else bot.copy()
             for i in range(imin,self.rix1+1):
-                row = self.get_mid_env(i,config_new,psi=psi)
-                bot_term = self.get_bot_env(i,row,bot_term,config_new,cache=cache_bot)
+                row = self.amplitude_factory.get_mid_env(i,config_new)
+                bot_term = self.amplitude_factory.get_bot_env(i,row,bot_term,config_new)
             if imin > 0 and bot_term is None:
                 continue
 
             top_term = None if top is None else top.copy()
             for i in range(imax,self.rix2-1,-1):
-                row = self.get_mid_env(i,config_new,psi=psi)
-                top_term = self.get_top_env(i,row,top_term,config_new,cache=cache_top)
+                row = self.amplitude_factory.get_mid_env(i,config_new)
+                top_term = self.amplitude_factory.get_top_env(i,row,top_term,config_new)
             if imax < peps.Lx-1 and top_term is None:
                 continue
 
             tn = bot_term.copy()
             tn.add_tensor_network(top_term,virtual=False)
-            py = self.safe_contract(tn)
+            py = self.amplitude_factory.safe_contract(tn)
             if py is None:
                 continue
             py = py ** 2 
@@ -1518,13 +1496,12 @@ class ExchangeSampler1(ContractionEngine):
             except ZeroDivisionError:
                 acceptance = 1. if py > self.px else 0.
             if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-                #print('acc')
                 self.px = py
                 self.config = tuple(config_new) 
-class ExchangeSampler2(ContractionEngine):
+class ExchangeSampler2:
     def __init__(self,Lx,Ly,seed=None,burn_in=0):
-        super().init_contraction(Lx,Ly)
-        self.nsite = self.Lx * self.Ly
+        self.Lx,self.Ly = Lx,Ly
+        self.nsite = Lx * Ly
 
         self.rng = np.random.default_rng(seed)
         self.exact = False
@@ -1532,6 +1509,10 @@ class ExchangeSampler2(ContractionEngine):
         self.burn_in = burn_in 
         self.amplitude_factory = None
         self.backend = 'numpy'
+    def flatten(self,i,j):
+        return flatten(i,j,self.Ly)
+    def flat2site(self,i,j):
+        return flat2site(i,j,self.Lx,self.Ly)
     def preprocess(self):
         self._burn_in()
     def _burn_in(self,config=None,burn_in=None):
@@ -1548,7 +1529,6 @@ class ExchangeSampler2(ContractionEngine):
             self.config,self.omega = self.sample()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
-        #print(f'RANK={RANK},burn in time={time.time()-t0}')
     def new_pair(self,i1,i2):
         return i2,i1
     def _new_pair(self,i,j,x_bsz,y_bsz):
@@ -1560,34 +1540,31 @@ class ExchangeSampler2(ContractionEngine):
             raise NotImplementedError
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = self.config[ix1],self.config[ix2]
-        if not self.pair_valid(i1,i2): # continue
+        if not self.amplitude_factory.pair_valid(i1,i2): # continue
             return (None,) * 3
         i1_new,i2_new = self.new_pair(i1,i2)
         config_new = list(self.config)
         config_new[ix1] = i1_new
         config_new[ix2] = i2_new
         return (site1,site2),(i1_new,i2_new),tuple(config_new)
-    def _prob_from_plq(self,cols,tn,sites,config):
-        if cols[0] is None:
-            return None 
-        tn_plq = cols[0].copy()
-        for col in cols[1:]:
-            if col is None:
-                return None 
-            tn_plq.add_tensor_network(col,virtual=False)
-        tn_plq.view_like_(tn)
-        tn_plq = self.replace_sites(tn_plq,sites,config) 
-        py = self.safe_contract(tn_plq)
-        if py is None:
-            return None
-        return py ** 2
     def update_pair(self,i,j,x_bsz,y_bsz,cols,tn):
         sites,config_sites,config_new = self._new_pair(i,j,x_bsz,y_bsz)
         if config_sites is None:
             return tn
-        py = self._prob_from_plq(cols,tn,sites,config_sites)
+
+        if cols[0] is None:
+            return tn 
+        tn_plq = cols[0].copy()
+        for col in cols[1:]:
+            if col is None:
+                return tn 
+            tn_plq.add_tensor_network(col,virtual=False)
+        tn_plq.view_like_(tn)
+        tn_plq = self.amplitude_factory.replace_sites(tn_plq,sites,config) 
+        py = self.safe_contract(tn_plq)
         if py is None:
-            return tn
+            return tn 
+        py = py ** 2
 
         try:
             acceptance = py / self.px
@@ -1596,7 +1573,7 @@ class ExchangeSampler2(ContractionEngine):
         if self.rng.uniform() < acceptance: # accept, update px & config & env_m
             self.px = py
             self.config = config_new
-            tn = self.replace_sites(tn,sites,config_sites)
+            tn = self.amplitude_factory.replace_sites(tn,sites,config_sites)
         return tn
     def _get_cols_forward(self,first_col,j,y_bsz,tn,renvs):
         tags = [first_col] + [tn.col_tag(j+ix) for ix in range(y_bsz)]
@@ -1605,7 +1582,7 @@ class ExchangeSampler2(ContractionEngine):
             cols.append(renvs[j+y_bsz])
         return cols
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
-        renvs = self.get_all_renvs(tn.copy(),jmin=y_bsz)
+        renvs = self.amplitude_factory.get_all_renvs(tn.copy(),jmin=y_bsz)
         first_col = tn.col_tag(0)
         for j in range(self.Ly - y_bsz + 1): 
             cols = self._get_cols_forward(first_col,j,y_bsz,tn,renvs)
@@ -1619,7 +1596,7 @@ class ExchangeSampler2(ContractionEngine):
         cols.append(tn.select(tags,which='any',virtual=False))
         return cols
     def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
-        lenvs = self.get_all_lenvs(tn.copy(),jmax=self.Ly-1-y_bsz)
+        lenvs = self.amplitude_factory.get_all_lenvs(tn.copy(),jmax=self.Ly-1-y_bsz)
         last_col = tn.col_tag(self.Ly-1)
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
             cols = self._get_cols_backward(last_col,j,y_bsz,tn,lenvs)
@@ -1660,7 +1637,7 @@ class ExchangeSampler2(ContractionEngine):
                 env_prev = None if inew==self.Lx-1 else cache_top[self.config[(inew+1)*self.Ly:]] 
                 self.amplitude_factory.get_top_env(inew,row,env_prev,self.config)
     def sample(self):
-        if self.deterministic:
+        if self.amplitude_factory.deterministic:
             self._sample_deterministic()
         else:
             self._sample()
@@ -1704,7 +1681,6 @@ class ExchangeSampler2(ContractionEngine):
         amplitude_factory.cache_bot = cache_bot_new
         amplitude_factory.cache_top = cache_top_new
     def _prob_deterministic(self,config_old,config_new,amplitude_factory,site1,site2):
-        psi = amplitude_factory.psi
         cache_bot = amplitude_factory.cache_bot
         cache_top = amplitude_factory.cache_top
         imin = min(self.rix1+1,site1[0],site2[0]) 
@@ -1714,15 +1690,15 @@ class ExchangeSampler2(ContractionEngine):
         
         bot_term = None if bot is None else bot.copy()
         for i in range(imin,self.rix1+1):
-            row = self.get_mid_env(i,config_new,psi=psi)
-            bot_term = self.get_bot_env(i,row,bot_term,config_new,cache=cache_bot)
+            row = amplitude_factory.get_mid_env(i,config_new)
+            bot_term = amplitude_factory.get_bot_env(i,row,bot_term,config_new)
         if imin > 0 and bot_term is None:
             return None 
 
         top_term = None if top is None else top.copy()
         for i in range(imax,self.rix2-1,-1):
-            row = self.get_mid_env(i,config_new,psi=psi)
-            top_term = self.get_top_env(i,row,top_term,config_new,cache=cache_top)
+            row = amplitude_factory.get_mid_env(i,config_new)
+            top_term = amplitude_factory.get_top_env(i,row,top_term,config_new)
         if imax < peps.Lx-1 and top_term is None:
             return None
 
@@ -1808,8 +1784,6 @@ class DenseSampler:
             start = (batchsize+1)*(RANK-1)-L
             stop = start+batchsize+1
         self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
-        #print(RANK,start,stop,len(self.nonzeros),ntotal)
-        #exit()
     def get_all_configs(self):
         assert isinstance(self.nspin,tuple)
         sites = list(range(self.nsite))

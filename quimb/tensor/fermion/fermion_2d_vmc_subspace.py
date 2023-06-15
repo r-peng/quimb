@@ -62,6 +62,9 @@ class AmplitudeFactory:
                            for start,stop in self.psi[1].block_dict]
         self.block_dict += [(start+self.nparam[1],stop+self.nparam[1]) \
                            for start,stop in self.psi[2].block_dict]
+
+        self.deterministic = self.psi[0].deterministic
+        self.pair_valid = self.psi[0].pair_valid
     def get_x(self):
         return np.concatenate([amp_fac.get_x() for amp_fac in self.psi])
     def update(self,x,fname=None,root=0):
@@ -98,10 +101,13 @@ class Hamiltonian(Hamiltonian_):
         cx2 = cxs[2]
         np2 = self.ham[2]._2numpy
         for ix in range(2):
-            ex1,ex2,cx1 = exs[ix],exs[2][ix],cxs[ix]
+            ex2 = exs[2][ix]
+            ex1,cx1 = exs[ix],cxs[ix]
             np1 = self.ham[ix]._2numpy
-            for site1,site2 in ex1:
-                ex += np1(ex1[site1,site2]) * np2(ex2[site1,site2]) / (cx1[site1] * cx2[site1])
+            for where in ex1:
+                if where not in ex2:
+                    continue
+                ex += np1(ex1[where]) * np2(ex2[where]) / (cx1[where] * cx2[where])
         return ex
     def parse_hessian(self,ex,wfns,amplitude_factory):
         if len(ex)==0:
@@ -134,7 +140,7 @@ class Hamiltonian(Hamiltonian_):
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
                 peps[i,j].modify(data=self.ham[ix]._2backend(peps[i,j].data,True))
             wfns[ix] = peps
-            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].batch_pair_energies_from_plq(configs[ix],peps)
+            exs[ix],cxs[ix],plqs[ix] = self.ham[ix].batch_pair_energies_from_plq(batch_idx,configs[ix],peps)
         ex = self.parse_energy_numerator(exs)
         _,Hvx = self.parse_hessian(ex,wfns,amplitude_factory)
         ex = self.parse_energy(exs,cxs)
@@ -149,7 +155,7 @@ class Hamiltonian(Hamiltonian_):
 
         ex,Hvx = 0.,0.
         cxs,vxs = [dict()] * 3,[dict()] * 3
-        for batch_idx in self.batched_pairs:
+        for batch_idx in self.ham[0].batched_pairs:
             ex_,Hvx_,cxs_,vxs_ = self.batch_hessian_from_plq(batch_idx,config,amplitude_factory)  
             ex += ex_
             Hvx += Hvx_
@@ -173,7 +179,7 @@ class Hamiltonian(Hamiltonian_):
             exs[ix],cxs[ix],plqs[ix] = self.ham[ix].pair_energies_from_plq(
                                            configs[ix],amplitude_factory.psi[ix])
         ex = self.parse_energy(exs,cxs)
-        eu = self.compute_local_energy_eigen(configs[ix])
+        eu = self.compute_local_energy_eigen(configs[2])
         ex += eu
 
         if not compute_v:
@@ -243,7 +249,7 @@ class BosonHamiltonian(Hamiltonian_):
         data = self._2backend(self.data_map[self.key+spin],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return Tensor(data=data,inds=inds,tags=tags) 
-    def pair_energy_from_plq(self,tn,config,site1,site2,spin):
+    def pair_energy_from_plq(self,tn,config,spin,site1,site2):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -262,26 +268,20 @@ class BosonHamiltonian(Hamiltonian_):
         exa = dict()
         exb = dict()
         cx = dict()
-        for (site1,site2) in pairs:
-            key = self.pair_key(site1,site2)
+        for where in pairs:
+            key = self.pair_key(*where)
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eija = self.pair_energy_from_plq(tn.copy(),config,site1,site2,'a') 
+                eija = self.pair_energy_from_plq(tn.copy(),config,'a',*where) 
                 if eija is not None:
-                    exa[site1,site2] = eija
-                eijb = self.pair_energy_from_plq(tn.copy(),config,site1,site2,'b') 
+                    exa[where] = eija
+                eijb = self.pair_energy_from_plq(tn.copy(),config,'b',*where) 
                 if eijb is not None:
-                    exb[site1,site2] = eijb
+                    exb[where] = eijb
 
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = self._2numpy(tn.copy().contract())
-                cx[site1] = cij 
-                cx[site2] = cij 
+                cij = self._2numpy(tn.copy().contract())
+                cx[where] = cij 
         return (exa,exb),cx
 class HubbardBoson(BosonHamiltonian):
     def __init__(self,Lx,Ly,**kwargs):
@@ -370,34 +370,46 @@ class DensityMatrix(Hamiltonian):
 ####################################################################################
 from .fermion_2d_vmc_ import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ExchangeSampler_):
+    def new_pair(self,i1,i2):
+        return super().new_pair_full(i1,i2)
     def update_pair(self,i,j,x_bsz,y_bsz,cols,tn):
-        config_sites = [None] * 3
-        sites,config_sites[2],config_new = self._new_pair(i,j,x_bsz,y_bsz)
-        if config_sites[2] is None:
+        sites,config_sites,config_new = self._new_pair(i,j,x_bsz,y_bsz)
+        if config_sites is None:
             return tn
-        config_sites[0],config_sites[1] = config_to_ab(config_sites[2])
 
+        configs = [None,None,config_sites]
+        configs[0],configs[1] = config_to_ab(config_sites)
         py = 1.
         for ix in range(3):
-            py_ = self._prob_from_plq(cols[ix],tn[ix],sites,config_sites[ix])
-            if py_ is None:
-                return tn
-            py *= py_
-                
+            cols_ix,psi = cols[ix],self.amplitude_factory.psi[ix]
+            if cols_ix[0] is None:
+                return tn 
+            tn_plq = cols_ix[0].copy()
+            for col in cols_ix[1:]:
+                if col is None:
+                    return tn 
+                tn_plq.add_tensor_network(col,virtual=False)
+            tn_plq.view_like_(tn[ix])
+            tn_plq = psi.replace_sites(tn_plq,sites,configs[ix]) 
+            py_ix = psi.safe_contract(tn_plq)
+            if py_ix is None:
+                return tn 
+            py *= py_ix ** 2
+
         try:
             acceptance = py / self.px
         except ZeroDivisionError:
             acceptance = 1. if py > self.px else 0.
         if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-            #print('acc')
             self.px = py
             self.config = config_new
             for ix in range(3):
-                tn[ix] = self.replace_sites(tn[ix],sites,configs[ix])
+                psi = self.amplitude_factory.psi[ix]
+                tn[ix] = psi.replace_sites(tn[ix],sites,configs[ix])
         return tn
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
         self.config = list(self.config)
-        renvs = [self.get_all_renvs(tn[ix].copy(),jmin=y_bsz) for ix in range(3)]
+        renvs = [self.amplitude_factory.psi[ix].get_all_renvs(tn[ix].copy(),jmin=y_bsz) for ix in range(3)]
 
         first_col = [tn[ix].col_tag(0) for ix in range(3)]
         for j in range(self.Ly - y_bsz + 1): 
@@ -408,7 +420,7 @@ class ExchangeSampler(ExchangeSampler_):
         self.config = tuple(self.config)
     def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
         self.config = list(self.config)
-        lenvs = [self.get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz) for ix in range(3)]
+        lenvs = [self.amplitude_factory.psi[ix].get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz) for ix in range(3)]
 
         last_col = [tn[ix].col_tag(self.Ly-1) for ix in range(3)]
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1

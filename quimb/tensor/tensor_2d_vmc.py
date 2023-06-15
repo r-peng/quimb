@@ -398,11 +398,13 @@ class ContractionEngine:
         # gradient
         vx = dict()
         for ((i0,j0),(x_bsz,y_bsz)),tn in plq.items():
+            site1 = i0,j0
+            site2 = i0 + x_bsz - 1, j0 + y_bsz - 1
             for i in range(i0,i0+x_bsz):
                 for j in range(j0,j0+y_bsz):
                     if (i,j) in vx:
                         continue
-                    vx[i,j] = self._2numpy(self.site_grad(tn.copy(),i,j)/cx[i,j],backend=backend)
+                    vx[i,j] = self._2numpy(self.site_grad(tn.copy(),i,j)/cx[site1,site2],backend=backend)
         return vx
 class AmplitudeFactory(ContractionEngine):
     def __init__(self,psi,blks=None):
@@ -610,14 +612,8 @@ class Hamiltonian(ContractionEngine):
                 if eij is not None:
                     ex[site1,site2] = eij
 
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = self._2numpy(tn.copy().contract())
-                cx[site1] = cij 
-                cx[site2] = cij 
+                cij = self._2numpy(tn.copy().contract())
+                cx[site1,site2] = cij 
         #print(f'e,time={time.time()-t0}')
 
         # back-prop energy numerator
@@ -630,7 +626,7 @@ class Hamiltonian(ContractionEngine):
                 Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
             #print(f'H,time={time.time()-t0}')
             Hvx = amplitude_factory.dict2vec(Hvx)  
-            ex = sum([self._2numpy(eij)/cx[site] for (site,_),eij in ex.items()])
+            ex = sum([self._2numpy(eij)/cx[sites] for sites,eij in ex.items()])
         else:
             ex = 0.
             Hvx = 0.
@@ -685,16 +681,10 @@ class Hamiltonian(ContractionEngine):
                 if eij is not None:
                     ex[site1,site2] = eij
 
-                if site1 in cx:
-                    cij = cx[site1]
-                elif site2 in cx:
-                    cij = cx[site2]
-                else:
-                    cij = tn.copy().contract()
-                cx[site1] = cij 
-                cx[site2] = cij 
+                cij = tn.copy().contract()
+                cx[site1,site2] = cij 
 
-        ex = sum([eij/cx[site1] for (site1,_),eij in ex.items()])
+        ex = sum([eij/cx[sites] for sites,eij in ex.items()])
         eu = self.compute_local_energy_eigen(config)
         ex += eu
 
@@ -920,11 +910,9 @@ class Hamiltonian(ContractionEngine):
             else:
                 return self.compute_local_energy_gradient(config,amplitude_factory,compute_v=compute_v)
     def contraction_error(self,cx):
-        nsite = self.Lx * self.Ly
-        sqmean = sum(cij**2 for cij in cx.values()) / nsite
-        mean = sum(cij for cij in cx.values()) / nsite
-        err = sqmean - mean**2
-        return mean,np.fabs(err/mean)
+        cx = np.array(list(cx.values()))
+        max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
+        return mean_,np.fabs((max_-min_)/mean_)
     def nn_pairs(self):
         ls = [] 
         for i in range(self.Lx):

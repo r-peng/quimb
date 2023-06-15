@@ -245,9 +245,8 @@ def config2pn(config,start,stop,subspace):
     else:
         return config[start:stop]
 class ContractionEngine(ContractionEngine_): 
-    def init_contraction(self,Lx,Ly,subspace='full'):
+    def init_contraction(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly
-        self.subspace = subspace
         self.pbc = pbc
         self.deterministic = deterministic
         if self.deterministic:
@@ -347,10 +346,11 @@ def get_parity_cum(fpeps):
 from ..tensor_2d_vmc_ import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def __init__(self,psi,blks=None,subspace='full',flat=True):
-        super().init_contraction(psi.Lx,psi.Ly,subspace=subspace)
+        super().init_contraction(psi.Lx,psi.Ly)
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
         self.parity_cum = get_parity_cum(psi)
+        self.subspace = subspace
         self.flat = flat
 
         if blks is None:
@@ -406,8 +406,9 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 from ..tensor_2d_vmc_ import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
     def __init__(self,Lx,Ly,nbatch=1,subspace='full'):
-        super().init_contraction(Lx,Ly,subspace=subspace)
+        super().init_contraction(Lx,Ly)
         self.nbatch = nbatch
+        self.subspace = subspace
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[f'{self.key}_{self.subspace}'],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
@@ -539,21 +540,9 @@ class DensityMatrix(Hamiltonian):
 # sampler 
 ####################################################################################
 from ..tensor_2d_vmc_ import ExchangeSampler2 as ExchangeSampler_
-class ExchangeSampler(ContractionEngine,ExchangeSampler_):
-    def __init__(self,Lx,Ly,seed=None,burn_in=0,subspace='full'):
-        super().init_contraction(Lx,Ly)
-        self.nsite = self.Lx * self.Ly
-
-        self.rng = np.random.default_rng(seed)
-        self.exact = False
-        self.dense = False
-        self.burn_in = burn_in 
-        self.amplitude_factory = None
-        self.backend = 'numpy'
-
-        self.subspace = subspace
+class ExchangeSampler(ExchangeSampler_):
     def new_pair(self,i1,i2):
-        if self.subspace=='full':
+        if self.amplitude_factory.subspace=='full':
             return self.new_pair_full(i1,i2)
         return i2,i1
     def new_pair_full(self,i1,i2):
