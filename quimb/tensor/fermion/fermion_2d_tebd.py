@@ -17,7 +17,7 @@ from . import block_tools
 from .fermion_core import _get_gauge_location
 from .fermion_arbgeom_tebd import LocalHamGen
 
-def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
+def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None, flat=True, subspace='full'):
     """Create a LocalHam2D object for 2D Hubbard Model
 
     Parameters
@@ -47,14 +47,14 @@ def Hubbard2D(t, u, Lx, Ly, mu=0., symmetry=None):
         if i+1 != Lx:
             where = ((i,j), (i+1,j))
             count_b = count_neighbour(i+1,j)
-            uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+            uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry, flat=flat, subspace=subspace)
             ham[where] = uop
         if j+1 != Ly:
             where = ((i,j), (i,j+1))
             count_b = count_neighbour(i,j+1)
-            uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry)
+            uop = Hubbard(t,u, mu, (1./count_ij, 1./count_b), symmetry=symmetry, flat=flat, subspace=subspace)
             ham[where] = uop
-    return LocalHam2D(Lx, Ly, ham)
+    return LocalHam2D(Lx, Ly, ham, subspace=subspace)
 
 class LocalHam2D(LocalHamGen):
     """A 2D Fermion Hamiltonian represented as local terms. Different from
@@ -91,7 +91,7 @@ class LocalHam2D(LocalHamGen):
 
     """
 
-    def __init__(self, Lx, Ly, H2, H1=None):
+    def __init__(self, Lx, Ly, H2, H1=None, subspace='full'):
         self.Lx = int(Lx)
         self.Ly = int(Ly)
 
@@ -112,7 +112,7 @@ class LocalHam2D(LocalHamGen):
                 if (coo_a, coo_b) not in H2 and (coo_b, coo_a) not in H2:
                     H2[coo_a, coo_b] = default_H2
 
-        super().__init__(H2=H2, H1=H1)
+        super().__init__(H2=H2, H1=H1, subspace=subspace)
     
     @property
     def nsites(self):

@@ -7,17 +7,12 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-SYMMETRY = 'u11' # sampler symmetry
-# set tensor symmetry
-import sys
-this = sys.modules[__name__]
 # set backend
 import autoray as ar
 import torch
-#torch.autograd.set_detect_anomaly(True)
 torch.autograd.set_detect_anomaly(False)
 
-from ..torch_utils import SVD,QR,set_max_bond
+from ..torch_utils import SVD,QR
 ar.register_function('torch','linalg.svd',SVD.apply)
 ar.register_function('torch','linalg.qr',QR.apply)
 
@@ -25,7 +20,14 @@ import pyblock3.algebra.ad
 pyblock3.algebra.ad.ENABLE_AUTORAY = True
 from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
-from ..tensor_2d_vmc import AmplitudeFactory as BosonAmplitudeFactory
+
+def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
+    from ..tensor_2d_vmc_ import set_options as set_options1
+    set_options1(pbc=pbc,deterministic=deterministic,**compress_opts)
+    from .fermion_2d_vmc_ import set_options as set_options2
+    set_options2(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic,**compress_opts)
+
+from ..tensor_2d_vmc_ import AmplitudeFactory as BosonAmplitudeFactory
 from .fermion_2d_vmc_ import AmplitudeFactory as FermionAmplitudeFactory
 def config_to_ab(config):
     config_a = [None] * len(config)
@@ -42,17 +44,17 @@ def config_from_ab(config_a,config_b):
 def parse_config(config):
     if len(config)==2:
         config_a,config_b = config
-        config_full = self.config_from_ab(config_a,config_b)
+        config_full = config_from_ab(config_a,config_b)
     else:
         config_full = config
-        config_a,config_b = self.config_to_ab(config)
+        config_a,config_b = config_to_ab(config)
     return config_a,config_b,config_full
 class AmplitudeFactory:
-    def __init__(self,psi_a,psi_b,psi_boson):
+    def __init__(self,psi_a,psi_b,psi_boson,blks=None,flat=True):
         self.psi = [None] * 3
-        self.psi[0] = FermionAmplitudeFactory(psi_a,subspace='a')
-        self.psi[1] = FermionAmplitudeFactory(psi_b,subspace='b')
-        self.psi[2] = BosonAmplitudeFactory(psi_boson)
+        self.psi[0] = FermionAmplitudeFactory(psi_a,blks=blks,subspace='a',flat=flat)
+        self.psi[1] = FermionAmplitudeFactory(psi_b,blks=blks,subspace='b',flat=flat)
+        self.psi[2] = BosonAmplitudeFactory(psi_boson,blks=blks,phys_dim=4)
 
         self.nparam = [len(amp_fac.get_x()) for amp_fac in self.psi] 
         self.block_dict = self.psi[0].block_dict.copy()
@@ -60,31 +62,6 @@ class AmplitudeFactory:
                            for start,stop in self.psi[1].block_dict]
         self.block_dict += [(start+self.nparam[1],stop+self.nparam[1]) \
                            for start,stop in self.psi[2].block_dict]
-
-    def config_sign(self,config=None):
-        raise NotImplementedError
-    def get_constructors(self,peps=None):
-        raise NotImplementedError
-    def get_block_dict(self):
-        raise NotImplementedError
-    def tensor2vec(self,tsr,ix=None):
-        raise NotImplementedError
-    def dict2vecs(self,dict_=None):
-        raise NotImplementedError
-    def dict2vec(self,dict_=None):
-        raise NotImplementedError
-    def psi2vecs(self,psi=None):
-        raise NotImplementedError
-    def psi2vec(self,psi=None):
-        raise NotImplementedError
-    def split_vec(self,x=None):
-        raise NotImplementedError
-    def vec2tensor(self,x=None,ix=None):
-        raise NotImplementedError
-    def vec2dict(self,x=None): 
-        raise NotImplementedError
-    def vec2psi(self,x=None,inplace=None): 
-        raise NotImplementedError
     def get_x(self):
         return np.concatenate([amp_fac.get_x() for amp_fac in self.psi])
     def update(self,x,fname=None,root=0):
@@ -96,22 +73,18 @@ class AmplitudeFactory:
 
         fname_ = fname + '_boson' if fname is not None else fname
         self.psi[2].update(x[self.nparam[0]+self.nparam[1]:],fname=fname_,root=root)
-    def set_psi(self,psi=None):
-        raise NotImplementedError
     def unsigned_amplitude(self,config):
-        config_a,config_b,config_full = parse_config(config)
-        c0 = self.psi[0].unsigned_amplitude(config_a) 
-        c1 = self.psi[1].unsigned_amplitude(config_b) 
-        c2 = self.psi[2].unsigned_amplitude(config_full) 
-        return c0 * c1 * c2
-    def amplitude(self,config=None):
-        raise NotImplementedError
-    def get_grad_from_plq(self,plq=None,cx=None,backend=None):
-        raise NotImplementedError
+        configs = parse_config(config)
+        cx = 1. 
+        for ix in range(3):
+            cx *= self.psi[ix].unsigned_amplitude(configs[ix])
+        return cx
+    def prob(self,config):
+        return self.unsigned_amplitude(config) ** 2
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
+from ..tensor_2d_vmc_ import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def parse_energy_numerator(self,exs):
         ex = []
@@ -144,7 +117,7 @@ class Hamiltonian(Hamiltonian_):
             for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
                 Hvx[i,j] = _2numpy(tsr_grad(peps[i,j].data))
             Hvxs[ix] = amplitude_factory.psi[ix].dict2vec(Hvx)  
-        return ex_num,np.concatenate(Hvxs)
+        return amplitude_factory._2numpy(ex_num),np.concatenate(Hvxs)
     def contraction_error(self,cxs):
         cx = 1.
         err = 0.
@@ -170,7 +143,7 @@ class Hamiltonian(Hamiltonian_):
         for ix in range(3):
             vxs[ix] = self.ham[ix].get_grad_dict_from_plq(plqs[ix],cxs[ix],backend=self.backend)
         return ex,Hvx,cxs,vxs 
-    def compute_local_energy_hessian_from_plq(config,amplitude_factory):
+    def compute_local_energy_hessian_from_plq(self,config,amplitude_factory):
         self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
@@ -193,22 +166,21 @@ class Hamiltonian(Hamiltonian_):
         Hvx = Hvx/cx + eu*vx
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,Hvx,err 
-    def compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=True):
+    def compute_local_energy_gradient_from_plq(self,config,amplitude_factory,compute_v=True):
         exs,cxs,plqs = [None] * 3,[None] * 3,[None] * 3
         configs = parse_config(config)
         for ix in range(3):
             exs[ix],cxs[ix],plqs[ix] = self.ham[ix].pair_energies_from_plq(
                                            configs[ix],amplitude_factory.psi[ix])
         ex = self.parse_energy(exs,cxs)
-        eu = self.compute_local_energy_eigen(config_full)
+        eu = self.compute_local_energy_eigen(configs[ix])
         ex += eu
 
         if not compute_v:
             cx,err = self.contraction_error(cxs)
             return cx,ex,None,None,err 
 
-        vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(
-                 plqs[ix],cxs[ix],backend=self.backend) for ix in range(3)])
+        vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(plqs[ix],cxs[ix]) for ix in range(3)])
         cx,err = self.contraction_error(cxs)
         return cx,ex,vx,None,err
     def compute_local_amplitude_gradient_deterministic(self,config,amplitude_factory):
@@ -229,9 +201,8 @@ class Hamiltonian(Hamiltonian_):
             wfns[ix] = peps
             exs[ix] = self.ham[ix].batch_pair_energies_deterministic(configs[ix],peps,psi.config_sign,
                                                                      imin,imax)
-        ex = self.parse_energy_numrator(exs)
-        ex,Hvx = self.parse_hessian(ex,wfns,amplitude_factory)
-        return self._2numpy(ex_num),Hvx
+        ex = self.parse_energy_numerator(exs)
+        return self.parse_hessian(ex,wfns,amplitude_factory)
     def pair_hessian_deterministic(self,config,amplitude_factory,site1,site2):
         exs,wfns = [None] * 3,[None] * 3
         configs = parse_config(config)
@@ -246,10 +217,9 @@ class Hamiltonian(Hamiltonian_):
             if ex is None:
                 return 0.,0.
             exs[ix] = {(site1,site2):ex} 
-        ex = self.parse_energy_numrator(exs)
-        ex,Hvx = self.parse_hessian(ex,wfns,amplitude_factory)
-        return self._2numpy(ex_num),Hvx
-    def compute_local_energy_gradient_deterministic(config,amplitude_factory,compute_v=True):
+        ex = self.parse_energy_numerator(exs)
+        return self.parse_hessian(ex,wfns,amplitude_factory)
+    def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
         configs = parse_config(config)
         ex,cx = [None] * 3,np.zeros(3)
         for ix in range(3):
@@ -267,6 +237,7 @@ class Hamiltonian(Hamiltonian_):
         _,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
         ar.set_backend(np.zeros(1))
         return cx,ex,vx,None,0.
+from ..tensor_core import Tensor
 class BosonHamiltonian(Hamiltonian_):
     def pair_tensor(self,bixs,kixs,spin,tags=None):
         data = self._2backend(self.data_map[self.key+spin],False)
@@ -283,13 +254,11 @@ class BosonHamiltonian(Hamiltonian_):
             tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
         tn.add_tensor(self.pair_tensor(bixs,kixs,spin),virtual=True)
         try:
-            t0 = time.time()
             ex = tn.contract()
-            #print(time.time()-t0)
             return self.pair_coeff(site1,site2) * ex 
         except (ValueError,IndexError):
             return None 
-    def _pair_energies_from_plq(self,plq,pairs):
+    def _pair_energies_from_plq(self,plq,pairs,config):
         exa = dict()
         exb = dict()
         cx = dict()
@@ -313,7 +282,6 @@ class BosonHamiltonian(Hamiltonian_):
                     cij = self._2numpy(tn.copy().contract())
                 cx[site1] = cij 
                 cx[site2] = cij 
-        #print(f'e,time={time.time()-t0}')
         return (exa,exb),cx
 class HubbardBoson(BosonHamiltonian):
     def __init__(self,Lx,Ly,**kwargs):
@@ -340,27 +308,13 @@ class HubbardBoson(BosonHamiltonian):
         self.data_map[self.key+'a'] = h1a 
         self.data_map[self.key+'b'] = h1b 
 
-        self.pairs = self.nn_pairs()
+        self.pairs = self.pairs_nn()
         if self.deterministic:
             self.batch_deterministic()
         else:
-            self.batch_nn_plq()
-    def batch_deterministic(self):
-        self.batched_pairs = dict()
-        self.batch_nnh() 
-        self.batch_nnv() 
-    def pair_key(self,site1,site2):
-        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
-        dx = site2[0]-site1[0]
-        dy = site2[1]-site1[1]
-        return site1,(dx+1,dy+1)
+            self.batch_plq_nn()
     def pair_coeff(self,site1,site2):
         return 1. 
-    def pair_valid(self,i1,i2):
-        if i1==i2:
-            return False
-        else:
-            return True
     def pair_terms(self,i1,i2):
         pn_map = {0:0,1:1,2:1,3:2}
         n1,n2 = pn_map[i1],pn_map[i2]
@@ -374,23 +328,17 @@ class HubbardBoson(BosonHamiltonian):
 from .fermion_2d_vmc_ import Hubbard as HubbardFermion
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
-        self.ham = [None] * 4
+        self.Lx,self.Ly = Lx,Ly
+        self.t,self.u = t,u
+        self.ham = [None] * 3 
         self.ham[0] = HubbardFermion(t,u,Lx,Ly,subspace='a',**kwargs)
         self.ham[1] = HubbardFermion(t,u,Lx,Ly,subspace='b',**kwargs)
-        self.ham[2] = HubbardBoson(Lx,Ly,subspace='a'**kwargs)
-        self.ham[3] = HubbardBoson(Lx,Ly,subspace='b'**kwargs)
-    def pair_key(self,site1,site2):
-        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
-        dx = site2[0]-site1[0]
-        dy = site2[1]-site1[1]
-        return site1,(dx+1,dy+1)
+        self.ham[2] = HubbardBoson(Lx,Ly,**kwargs)
+
+        self.pbc = self.ham[0].pbc
+        self.deterministic = self.ham[0].deterministic
     def pair_coeff(self,site1,site2):
         return -self.t
-    def pair_valid(self,i1,i2):
-        if i1==i2:
-            return False
-        else:
-            return True
     def compute_local_energy_eigen(self,config):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
@@ -420,86 +368,116 @@ class DensityMatrix(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
-class ExchangeSampler(ContractionEngine,ExchangeSampler_):
-    def __init__(self,Lx,Ly,seed=None,burn_in=0,thresh=1e-14):
-        super().init_contraction(Lx,Ly)
-        self.nsite = self.Lx * self.Ly
+from .fermion_2d_vmc_ import ExchangeSampler as ExchangeSampler_
+class ExchangeSampler(ExchangeSampler_):
+    def update_pair(self,i,j,x_bsz,y_bsz,cols,tn):
+        config_sites = [None] * 3
+        sites,config_sites[2],config_new = self._new_pair(i,j,x_bsz,y_bsz)
+        if config_sites[2] is None:
+            return tn
+        config_sites[0],config_sites[1] = config_to_ab(config_sites[2])
 
-        self.rng = np.random.default_rng(seed)
-        self.exact = False
-        self.dense = False
-        self.burn_in = burn_in 
-        self.amplitude_factory = None
-        self.alternate = False # True if autodiff else False
-        self.backend = 'numpy'
-        self.thresh = thresh
-    def new_pair(self,i1,i2):
-        if SYMMETRY=='u11':
-            return self.new_pair_u11(i1,i2)
-        else:
-            raise NotImplementedError
-    def new_pair_u11(self,i1,i2):
-        n = abs(pn_map[i1]-pn_map[i2])
-        if n==1:
-            i1_new,i2_new = i2,i1
-        else:
-            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
-            i1_new,i2_new = self.rng.choice(choices)
-        return i1_new,i2_new 
-    def new_pair_u1(self,i1,i2):
-        return
-from ..tensor_2d_vmc import DenseSampler as DenseSampler_
-class DenseSampler(DenseSampler_):
-    def __init__(self,Lx,Ly,nelec,**kwargs):
-        self.nelec = nelec
-        super().__init__(Lx,Ly,None,**kwargs)
-    def get_all_configs(self):
-        if SYMMETRY=='u1':
-            return self.get_all_configs_u1()
-        elif SYMMETRY=='u11':
-            return self.get_all_configs_u11()
-        else:
-            raise NotImplementedError
-    def get_all_configs_u11(self):
-        assert isinstance(self.nelec,tuple)
-        sites = list(range(self.nsite))
-        ls = [None] * 2
-        for spin in (0,1):
-            occs = list(itertools.combinations(sites,self.nelec[spin]))
-            configs = [None] * len(occs) 
-            for i,occ in enumerate(occs):
-                config = [0] * self.nsite 
-                for ix in occ:
-                    config[ix] = 1
-                configs[i] = tuple(config)
-            ls[spin] = configs
+        py = 1.
+        for ix in range(3):
+            py_ = self._prob_from_plq(cols[ix],tn[ix],sites,config_sites[ix])
+            if py_ is None:
+                return tn
+            py *= py_
+                
+        try:
+            acceptance = py / self.px
+        except ZeroDivisionError:
+            acceptance = 1. if py > self.px else 0.
+        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
+            #print('acc')
+            self.px = py
+            self.config = config_new
+            for ix in range(3):
+                tn[ix] = self.replace_sites(tn[ix],sites,configs[ix])
+        return tn
+    def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
+        self.config = list(self.config)
+        renvs = [self.get_all_renvs(tn[ix].copy(),jmin=y_bsz) for ix in range(3)]
 
-        na,nb = len(ls[0]),len(ls[1])
-        configs = [None] * (na*nb)
-        for ixa,configa in enumerate(ls[0]):
-            for ixb,configb in enumerate(ls[1]):
-                config = [config_map[configa[i],configb[i]] \
-                          for i in range(self.nsite)]
-                ix = ixa * nb + ixb
-                configs[ix] = tuple(config)
-        return configs
-    def get_all_configs_u1(self):
-        if isinstance(self.nelec,tuple):
-            self.nelec = sum(self.nelec)
-        sites = list(range(self.nsite*2))
-        occs = list(itertools.combinations(sites,self.nelec))
-        configs = [None] * len(occs) 
-        for i,occ in enumerate(occs):
-            config = [0] * (self.nsite*2) 
-            for ix in occ:
-                config[ix] = 1
-            configs[i] = tuple(config)
+        first_col = [tn[ix].col_tag(0) for ix in range(3)]
+        for j in range(self.Ly - y_bsz + 1): 
+            cols = [self._get_cols_forward(first_col[ix],j,y_bsz,tn[ix],renvs[ix]) for ix in range(3)]
+            tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
+            for ix in range(3):
+                tn[ix] ^= first_col[ix],tn[ix].col_tag(j) 
+        self.config = tuple(self.config)
+    def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
+        self.config = list(self.config)
+        lenvs = [self.get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz) for ix in range(3)]
 
-        for ix in range(len(configs)):
-            config = configs[ix]
-            configa,configb = config[:self.nsite],config[self.nsite:]
-            config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
-            configs[ix] = tuple(config)
-        return configs
+        last_col = [tn[ix].col_tag(self.Ly-1) for ix in range(3)]
+        for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
+            cols = [self._get_cols_backward(last_col[ix],j,y_bsz,tn[ix],lenvs[ix]) for ix in range(3)] 
+            tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
+            for ix in range(3):
+                tn[ix] ^= tn[ix].col_tag(j+y_bsz-1),last_col[ix]
+        self.config = tuple(self.config)
+    def sweep_row_forward(self,x_bsz,y_bsz):
+        config = parse_config(self.config)
+        for ix in range(3): 
+            psi = self.amplitude_factory.psi[ix]
+            psi.cache_bot = dict()
+            psi.get_all_top_envs(config[ix],imin=x_bsz)
 
+        cdir = self.rng.choice([-1,1]) 
+        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+
+        imax = self.Lx-x_bsz
+        for i in range(imax+1):
+            tn = [None] * 3
+            for ix in range(3):
+                psi = self.amplitude_factory.psi[ix]
+                tn[ix] = psi.build_3row_tn(config[ix],i,x_bsz)
+            sweep_col(i,tn,x_bsz,y_bsz)
+            config = parse_config(self.config)
+
+            for ix in range(3):
+                psi = self.amplitude_factory.psi[ix]
+                for inew in range(i,i+x_bsz):
+                    row = psi.get_mid_env(inew,config[ix])
+                    env_prev = None if inew==0 else psi.cache_bot[config[ix][:inew*self.Ly]] 
+                    psi.get_bot_env(inew,row,env_prev,config[ix])
+    def sweep_row_backward(self,x_bsz,y_bsz):
+        config = parse_config(self.config)
+        for ix in range(3):
+            psi = self.amplitude_factory.psi[ix]
+            psi.cache_top = dict()
+            psi.get_all_bot_envs(config[ix],imax=self.Lx-1-x_bsz)
+
+        cdir = self.rng.choice([-1,1]) 
+        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+
+        imax = self.Lx-x_bsz
+        for i in range(imax,-1,-1):
+            tn = [None] * 3
+            for ix in range(3):
+                psi = self.amplitude_factory.psi[ix]
+                tn[ix] = psi.build_3row_tn(config[ix],i,x_bsz)
+            sweep_col(i,tn,x_bsz,y_bsz)
+            config = parse_config(self.config)
+
+            for ix in range(3):
+                psi = self.amplitude_factory.psi[ix]
+                for inew in range(i+x_bsz-1,i-1,-1):
+                    row = psi.get_mid_env(inew,config[ix])
+                    env_prev = None if inew==self.Lx-1 else psi.cache_top[config[ix][(inew+1)*self.Ly:]] 
+                    psi.get_top_env(inew,row,env_prev,config[ix])
+    def update_cache(self,amplitude_factory):
+        for ix in range(3):
+            super().update_cache(self,amplitude_factory.psi[ix])
+    def _prob_deterministic(self,config_old,config_new,amplitude_factory,site1,site2):
+        config_old_ = parse_config(config_old)
+        config_new_ = parse_config(config_new)
+        py = 1.
+        for ix in range(3):
+            py_ = self._prob_deterministic(config_old_[ix],config_new_[ix],amplitude_factory.psi[ix],
+                                           site1,site2)
+            if py_ is None:
+                return None
+            py *= py_
+        return py

@@ -18,10 +18,6 @@ epsilon = 1e-12
 fix_sign = True 
 #fix_sign = False 
 
-this = sys.modules[__name__]
-def set_max_bond(max_bond):
-    this.max_bond = max_bond
-
 def safe_inverse(x):
     return x/(x.pow(2) + epsilon)
 def make_zeros(A):
@@ -50,10 +46,6 @@ def SVDforward(A):
 
     if is_one(S): # A is isometry
         raise ValueError
-    #if max_bond is not None:
-    #    U = U[:,:max_bond]
-    #    S = S[:max_bond]
-    #    Vh = Vh[:max_bond,:]
 
     if fix_sign:
         # make SVD result sign-consistent across multiple runs
