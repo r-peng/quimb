@@ -409,7 +409,7 @@ class Hamiltonian(ContractionEngine,Hamiltonian_):
         super().init_contraction(Lx,Ly)
         self.nbatch = nbatch
         self.subspace = subspace
-    def pair_tensor(self,bixs,kixs,tags=None):
+    def pair_tensor(self,bixs,kixs,spin=None,tags=None):
         data = self._2backend(self.data_map[f'{self.key}_{self.subspace}'],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
@@ -429,7 +429,7 @@ class Hubbard(Hamiltonian):
     def compute_local_energy_eigen(self,config):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
-    def pair_terms(self,i1,i2):
+    def pair_terms(self,i1,i2,spin=None):
         if self.subspace=='full':
             return self.pair_terms_full(i1,i2)
         else:

@@ -615,24 +615,24 @@ class Hamiltonian(ContractionEngine):
     def __init__(self,Lx,Ly,nbatch=1,phys_dim=2):
         super().init_contraction(Lx,Ly,phys_dim=phys_dim)
         self.nbatch = nbatch
-    def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
+    def pair_tensor(self,bixs,kixs,spin='',tags=None):
+        data = self._2backend(self.data_map[self.key+spin],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return Tensor(data=data,inds=inds,tags=tags) 
-    def _pair_energy_from_plq(self,tn,config,site1,site2):
-        ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
+    def _pair_energy_from_plq(self,tn,config,where,spin=''):
+        ix1,ix2 = self.flatten(*where[0]),self.flatten(*where[1])
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
             return None 
-        kixs = [tn.site_ind(*site) for site in [site1,site2]]
+        kixs = [tn.site_ind(*site) for site in where]
         bixs = [kix+'*' for kix in kixs]
-        for site,kix,bix in zip([site1,site2],kixs,bixs):
+        for site,kix,bix in zip(where,kixs,bixs):
             tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
-        tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
+        tn.add_tensor(self.pair_tensor(bixs,kixs,spin=spin),virtual=True)
         ex = self.safe_contract(tn)
         if ex is None:
             return None
-        return self.pair_coeff(site1,site2) * ex 
+        return self.pair_coeff(*where) * ex 
     def _pair_energies_from_plq(self,plq,pairs,config):
         ex = dict()
         cx = dict()
@@ -641,7 +641,7 @@ class Hamiltonian(ContractionEngine):
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eij = self._pair_energy_from_plq(tn.copy(),config,*where) 
+                eij = self._pair_energy_from_plq(tn.copy(),config,where) 
                 if eij is not None:
                     ex[where] = eij
 
@@ -663,6 +663,7 @@ class Hamiltonian(ContractionEngine):
         ex,cx = self._pair_energies_from_plq(plq,pairs,config)
         return ex,cx,plq
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
+        self.backend = 'torch'
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
@@ -673,7 +674,6 @@ class Hamiltonian(ContractionEngine):
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
     def compute_local_energy_hessian_from_plq(self,config,amplitude_factory): 
-        self.backend = 'torch'
         ar.set_backend(torch.zeros(1))
 
         ex,Hvx = 0.,0.
@@ -719,11 +719,12 @@ class Hamiltonian(ContractionEngine):
         cx,err = self.contraction_error(cx)
         return cx,ex,vx,None,err
     def amplitude_gradient_deterministic(self,config,amplitude_factory):
+        self.backend = 'torch'
         cache_top = dict()
         cache_bot = dict()
         psi = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            psi[i,j].modify(data=self._2backend(peps[i,j].data,True))
+            psi[i,j].modify(data=self._2backend(psi[i,j].data,True))
 
         env_bot,env_top = self.get_all_benvs(config,psi=psi,cache_bot=cache_bot,cache_top=cache_top)
         tn = env_bot.copy()
@@ -738,7 +739,7 @@ class Hamiltonian(ContractionEngine):
         vx = amplitude_factory.dict2vec(vx)  
         cx = self._2numpy(cx)
         return cx,vx/cx
-    def _pair_energy_deterministic(self,config,site1,site2,psi,top,bot,sign_fn):
+    def _pair_energy_deterministic(self,config,site1,site2,psi,top,bot,sign_fn,spin=None):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -749,7 +750,7 @@ class Hamiltonian(ContractionEngine):
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
         cache_top = dict()
         cache_bot = dict()
-        for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
+        for i1_new,i2_new,coeff in self.pair_terms(i1,i2,spin=spin):
             config_new = list(config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
@@ -1044,7 +1045,7 @@ class Heisenberg(Hamiltonian):
                     if self.pbc:
                         ez += s1 * (-1)**config[self.flatten(0,j)]
         return eh * .5 * self.h + ez * .25 * self.Jz
-    def pair_terms(self,i1,i2):
+    def pair_terms(self,i1,i2,spin=None):
         return [(1-i1,1-i2,.25*(self.Jx+self.Jy))]
 class J1J2(Hamiltonian):
     def __init__(self,J1,J2,Lx,Ly,**kwargs):
@@ -1193,7 +1194,7 @@ class J1J2(Hamiltonian):
                         ix1,ix2 = self.flatten(i,(j+1)%self.Ly), self.flatten((i+1)%self.Lx,j)
                         e2 += (-1)**(config[ix1]+config[ix2])
         return .25 * (e1 *self.J1 + e2 * self.J2) 
-    def pair_terms(self,i1,i2):
+    def pair_terms(self,i1,i2,spin=None):
         return [(1-i1,1-i2,.5)]
 class SpinDensity(Hamiltonian):
     def __init__(self,Lx,Ly):
@@ -1442,47 +1443,49 @@ class ExchangeSampler1:
 
         for i,j in itertools.product(sweep_row,sweep_col):
             self.update_pair_deterministic(i,j)
-        self.update_cache(self.amplitude_factory)
-    def update_cache(self,amplitude_factory):
-        cache_bot = amplitude_factory.cache_bot
-        cache_top = amplitude_factory.cache_top
+        self.update_cache()
+    def update_cache(self):
+        cache_bot = self.amplitude_factory.cache_bot
+        cache_top = self.amplitude_factory.cache_top
+        rix1,rix2 = self.amplitude_factory.rix1,self.amplitude_factory.rix2
 
         cache_bot_new = dict()
-        for i in range(self.rix1+1):
+        for i in range(rix1+1):
             key = self.config[:(i+1)*self.Ly]
             cache_bot_new[key] = cache_bot[key]
         cache_top_new = dict()
-        for i in range(self.rix2,self.Lx):
+        for i in range(rix2,self.Lx):
             key = self.config[i*self.Ly:]
             cache_top_new[key] = cache_top[key]
 
-        amplitude_factory.cache_bot = cache_bot_new
-        amplitude_factory.cache_top = cache_top_new
+        self.amplitude_factory.cache_bot = cache_bot_new
+        self.amplitude_factory.cache_top = cache_top_new
     def update_pair_deterministic(self,i,j):
         cache_bot = self.amplitude_factory.cache_bot
         cache_top = self.amplitude_factory.cache_top
+        rix1,rix2 = self.amplitude_factory.rix1,self.amplitude_factory.rix2
         pairs = self.get_pairs(i,j)
         for sites in pairs:
             config_sites,config_new = self._new_pair(*sites)
             if config_sites is None:
                 continue
-            imin = min(self.rix1+1,site1[0]) 
-            imax = max(self.rix2-1,site2[0]) 
-            top = None if imax==peps.Lx-1 else cache_top[self.config[(imax+1)*peps.Ly:]]
-            bot = None if imin==0 else cache_bot[self.config[:imin*peps.Ly]]
+            imin = min(rix1+1,site1[0]) 
+            imax = max(rix2-1,site2[0]) 
+            top = None if imax==self.Lx-1 else cache_top[self.config[(imax+1)*self.Ly:]]
+            bot = None if imin==0 else cache_bot[self.config[:imin*self.Ly]]
 
             bot_term = None if bot is None else bot.copy()
-            for i in range(imin,self.rix1+1):
+            for i in range(imin,rix1+1):
                 row = self.amplitude_factory.get_mid_env(i,config_new)
                 bot_term = self.amplitude_factory.get_bot_env(i,row,bot_term,config_new)
             if imin > 0 and bot_term is None:
                 continue
 
             top_term = None if top is None else top.copy()
-            for i in range(imax,self.rix2-1,-1):
+            for i in range(imax,rix2-1,-1):
                 row = self.amplitude_factory.get_mid_env(i,config_new)
                 top_term = self.amplitude_factory.get_top_env(i,row,top_term,config_new)
-            if imax < peps.Lx-1 and top_term is None:
+            if imax < self.Lx-1 and top_term is None:
                 continue
 
             tn = bot_term.copy()
@@ -1656,26 +1659,27 @@ class ExchangeSampler2:
             self.sweep_row_backward(2,1)
     def _sample_deterministic(self):
         for x_bsz,y_bsz in [(1,2),(2,1)]:
-            imax = self.Lx-1 if self.pbc else self.Lx-x_bsz
-            jmax = self.Ly-1 if self.pbc else self.Ly-y_bsz
+            imax = self.Lx-1 if self.amplitude_factory.pbc else self.Lx-x_bsz
+            jmax = self.Ly-1 if self.amplitude_factory.pbc else self.Ly-y_bsz
             rdir = self.rng.choice([-1,1]) 
             cdir = self.rng.choice([-1,1]) 
             sweep_row = range(0,imax+1) if rdir==1 else range(imax,-1,-1)
             sweep_col = range(0,jmax+1) if cdir==1 else range(jmax,-1,-1)
             for i,j in itertools.product(sweep_row,sweep_col):
                 self.update_pair_deterministic(i,j,x_bsz,y_bsz)
-        self.update_cache(self.amplitude_factory)
-    def update_cache(self,amplitude_factory):
+        self.update_cache(self.amplitude_factory,self.config)
+    def update_cache(self,amplitude_factory,config):
         cache_bot = amplitude_factory.cache_bot
         cache_top = amplitude_factory.cache_top
+        rix1,rix2 = amplitude_factory.rix1,amplitude_factory.rix2
 
         cache_bot_new = dict()
-        for i in range(self.rix1+1):
-            key = self.config[:(i+1)*self.Ly]
+        for i in range(rix1+1):
+            key = config[:(i+1)*self.Ly]
             cache_bot_new[key] = cache_bot[key]
         cache_top_new = dict()
-        for i in range(self.rix2,self.Lx):
-            key = self.config[i*self.Ly:]
+        for i in range(rix2,self.Lx):
+            key = config[i*self.Ly:]
             cache_top_new[key] = cache_top[key]
 
         amplitude_factory.cache_bot = cache_bot_new
@@ -1683,28 +1687,29 @@ class ExchangeSampler2:
     def _prob_deterministic(self,config_old,config_new,amplitude_factory,site1,site2):
         cache_bot = amplitude_factory.cache_bot
         cache_top = amplitude_factory.cache_top
-        imin = min(self.rix1+1,site1[0],site2[0]) 
-        imax = max(self.rix2-1,site1[0],site2[0]) 
+        rix1,rix2 = amplitude_factory.rix1,amplitude_factory.rix2
+        imin = min(rix1+1,site1[0],site2[0]) 
+        imax = max(rix2-1,site1[0],site2[0]) 
         top = None if imax==self.Lx-1 else cache_top[config_old[(imax+1)*self.Ly:]]
         bot = None if imin==0 else cache_bot[config_old[:imin*self.Ly]]
         
         bot_term = None if bot is None else bot.copy()
-        for i in range(imin,self.rix1+1):
+        for i in range(imin,rix1+1):
             row = amplitude_factory.get_mid_env(i,config_new)
             bot_term = amplitude_factory.get_bot_env(i,row,bot_term,config_new)
         if imin > 0 and bot_term is None:
             return None 
 
         top_term = None if top is None else top.copy()
-        for i in range(imax,self.rix2-1,-1):
+        for i in range(imax,rix2-1,-1):
             row = amplitude_factory.get_mid_env(i,config_new)
             top_term = amplitude_factory.get_top_env(i,row,top_term,config_new)
-        if imax < peps.Lx-1 and top_term is None:
+        if imax < self.Lx-1 and top_term is None:
             return None
 
         tn = bot_term.copy()
         tn.add_tensor_network(top_term,virtual=False)
-        py = self.safe_contract(tn)
+        py = amplitude_factory.safe_contract(tn)
         if py is None:
             return None
         return py ** 2
