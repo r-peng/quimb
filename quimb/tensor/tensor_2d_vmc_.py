@@ -615,11 +615,11 @@ class Hamiltonian(ContractionEngine):
     def __init__(self,Lx,Ly,nbatch=1,phys_dim=2):
         super().init_contraction(Lx,Ly,phys_dim=phys_dim)
         self.nbatch = nbatch
-    def pair_tensor(self,bixs,kixs,spin='',tags=None):
-        data = self._2backend(self.data_map[self.key+spin],False)
+    def pair_tensor(self,bixs,kixs,tags=None):
+        data = self._2backend(self.data_map[self.key],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return Tensor(data=data,inds=inds,tags=tags) 
-    def _pair_energy_from_plq(self,tn,config,where,spin=''):
+    def _pair_energy_from_plq(self,tn,config,where):
         ix1,ix2 = self.flatten(*where[0]),self.flatten(*where[1])
         i1,i2 = config[ix1],config[ix2] 
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -628,7 +628,7 @@ class Hamiltonian(ContractionEngine):
         bixs = [kix+'*' for kix in kixs]
         for site,kix,bix in zip(where,kixs,bixs):
             tn[tn.site_tag(*site),'BRA'].reindex_({kix:bix})
-        tn.add_tensor(self.pair_tensor(bixs,kixs,spin=spin),virtual=True)
+        tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
         ex = self.safe_contract(tn)
         if ex is None:
             return None
@@ -717,6 +717,7 @@ class Hamiltonian(ContractionEngine):
             return cx,ex,None,None,err 
         vx = amplitude_factory.get_grad_from_plq(plq,cx)  
         cx,err = self.contraction_error(cx)
+        #print(ex,cx,err)
         return cx,ex,vx,None,err
     def amplitude_gradient_deterministic(self,config,amplitude_factory):
         self.backend = 'torch'
@@ -726,6 +727,8 @@ class Hamiltonian(ContractionEngine):
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             psi[i,j].modify(data=self._2backend(psi[i,j].data,True))
 
+        #self.deterministic = True
+        #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
         env_bot,env_top = self.get_all_benvs(config,psi=psi,cache_bot=cache_bot,cache_top=cache_top)
         tn = env_bot.copy()
         tn.add_tensor_network(env_top,virtual=False)
@@ -793,7 +796,7 @@ class Hamiltonian(ContractionEngine):
 
         ex = dict() 
         for site1,site2 in self.batched_pairs[batch_imin,batch_imax]:
-            eij = self._pair_energy_deterministic(config,site1,site2,peps,top,bot,sign_fn)
+            eij = self._pair_energy_deterministic(config,site1,site2,psi,top,bot,sign_fn)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
@@ -1555,16 +1558,8 @@ class ExchangeSampler2:
         if config_sites is None:
             return tn
 
-        if cols[0] is None:
-            return tn 
-        tn_plq = cols[0].copy()
-        for col in cols[1:]:
-            if col is None:
-                return tn 
-            tn_plq.add_tensor_network(col,virtual=False)
-        tn_plq.view_like_(tn)
-        tn_plq = self.amplitude_factory.replace_sites(tn_plq,sites,config) 
-        py = self.safe_contract(tn_plq)
+        cols = self.amplitude_factory.replace_sites(cols,sites,config_sites) 
+        py = self.amplitude_factory.safe_contract(cols)
         if py is None:
             return tn 
         py = py ** 2
@@ -1579,12 +1574,21 @@ class ExchangeSampler2:
             tn = self.amplitude_factory.replace_sites(tn,sites,config_sites)
         return tn
     def _get_cols_forward(self,first_col,j,y_bsz,tn,renvs):
-        tags = [first_col] + [tn.col_tag(j+ix) for ix in range(y_bsz)]
-        cols = [tn.select(tags,which='any',virtual=False)]
+        tags = [tn.col_tag(j+ix) for ix in range(y_bsz)]
+        cols = tn.select(tags,which='any',virtual=False)
+        if j>0:
+            other = cols
+            cols = tn.select(first_col,virtual=False)
+            cols.add_tensor_network(other,virtual=False)
         if j<self.Ly - y_bsz:
-            cols.append(renvs[j+y_bsz])
+            cols.add_tensor_network(renvs[j+y_bsz],virtual=False)
+        cols.view_like_(tn)
         return cols
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
+        try:
+            tn.reorder('col',inplace=True)
+        except (NotImplementedError,AttributeError):
+            pass
         renvs = self.amplitude_factory.get_all_renvs(tn.copy(),jmin=y_bsz)
         first_col = tn.col_tag(0)
         for j in range(self.Ly - y_bsz + 1): 
@@ -1592,13 +1596,21 @@ class ExchangeSampler2:
             tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
             tn ^= first_col,tn.col_tag(j) 
     def _get_cols_backward(self,last_col,j,y_bsz,tn,lenvs):
-        cols = []
-        if j>0: 
-            cols.append(lenvs[j-1])
-        tags = [tn.col_tag(j+ix) for ix in range(y_bsz)] + [last_col]
-        cols.append(tn.select(tags,which='any',virtual=False))
+        tags = [tn.col_tag(j+ix) for ix in range(y_bsz)] 
+        cols = tn.select(tags,which='any',virtual=False)
+        if j>0:
+            other = cols
+            cols = lenvs[j-1]
+            cols.add_tensor_network(other,virtual=False)
+        if j<self.Ly - y_bsz:
+            cols.add_tensor_network(tn.select(last_col,virtual=False),virtual=False)
+        cols.view_like_(tn)
         return cols
     def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
+        try:
+            tn.reorder('col',inplace=True)
+        except (NotImplementedError,AttributeError):
+            pass
         lenvs = self.amplitude_factory.get_all_lenvs(tn.copy(),jmax=self.Ly-1-y_bsz)
         last_col = tn.col_tag(self.Ly-1)
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1

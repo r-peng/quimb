@@ -1604,6 +1604,10 @@ class ExchangeSampler2(ContractionEngine):
         tn_plq = self.replace_sites(tn_plq,(site1,site2),(i1_new,i2_new)) 
         try:
             py = tn_plq.contract()**2
+            #py_ = tn.copy().contract() ** 2 
+            #err = abs((py_-py)/py_)
+            #print(ix1,ix2,py_,py,err)
+            #assert err < 1e-4
         except (ValueError,IndexError):
             return
         #self.update_plq_test(ix1,ix2,i1_new,i2_new,py)
@@ -1619,8 +1623,12 @@ class ExchangeSampler2(ContractionEngine):
             tn = self.replace_sites(tn,(site1,site2),(i1_new,i2_new))
         return tn
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
-        self.config = list(self.config)
+        try:
+            tn.reorder('col',inplace=True)
+        except (NotImplementedError,AttributeError):
+            pass
         renvs = self.get_all_renvs(tn.copy(),jmin=y_bsz)
+        self.config = list(self.config)
 
         first_col = tn.col_tag(0)
         jmax = self.Ly - y_bsz  
@@ -1633,8 +1641,12 @@ class ExchangeSampler2(ContractionEngine):
             tn ^= first_col,tn.col_tag(j) 
         self.config = tuple(self.config)
     def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
-        self.config = list(self.config)
+        try:
+            tn.reorder('col',inplace=True)
+        except (NotImplementedError,AttributeError):
+            pass
         lenvs = self.get_all_lenvs(tn.copy(),jmax=self.Ly-1-y_bsz)
+        self.config = list(self.config)
 
         last_col = tn.col_tag(self.Ly-1)
         jmax = self.Ly - y_bsz  

@@ -25,7 +25,7 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     from ..tensor_2d_vmc_ import set_options as set_options1
     set_options1(pbc=pbc,deterministic=deterministic,**compress_opts)
     from .fermion_2d_vmc_ import set_options as set_options2
-    set_options2(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic,**compress_opts)
+    return set_options2(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic,**compress_opts)
 
 from ..tensor_2d_vmc_ import AmplitudeFactory as BosonAmplitudeFactory
 from .fermion_2d_vmc_ import AmplitudeFactory as FermionAmplitudeFactory
@@ -79,10 +79,10 @@ class AmplitudeFactory:
         self.psi[2].update(x[self.nparam[0]+self.nparam[1]:],fname=fname_,root=root)
     def unsigned_amplitude(self,config):
         configs = parse_config(config)
-        cx = 1. 
+        cx = np.ones(3) 
         for ix in range(3):
-            cx *= self.psi[ix].unsigned_amplitude(configs[ix])
-        return cx
+            cx[ix] = self.psi[ix].unsigned_amplitude(configs[ix])
+        return np.prod(cx)
     def prob(self,config):
         return self.unsigned_amplitude(config) ** 2
 ####################################################################################
@@ -126,13 +126,11 @@ class Hamiltonian(Hamiltonian_):
             Hvxs[ix] = amplitude_factory.psi[ix].dict2vec(Hvx)  
         return _2numpy(ex_num),np.concatenate(Hvxs)
     def contraction_error(self,cxs):
-        cx = 1.
-        err = 0.
+        cx,err = np.zeros(3),np.zeros(3)
         for ix in range(3): 
-            cx_,err_ = self.ham[ix].contraction_error(cxs[ix])
-            cx *= cx_
-            err = max(err,err_)
-        return cx,err
+            cx[ix],err[ix] = self.ham[ix].contraction_error(cxs[ix])
+        #print(cx)
+        return np.prod(cx),np.amax(err)
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
         exs,cxs,plqs,wfns = [None] * 3,[None] * 3,[None] * 3,[None] * 3
         configs = parse_config(config)
@@ -189,18 +187,19 @@ class Hamiltonian(Hamiltonian_):
 
         vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(plq[ix],cx[ix]) for ix in range(3)])
         cx,err = self.contraction_error(cx)
+
+        #print(ex,cx,config)
         return cx,ex,vx,None,err
-    def amplitude_gradient_deterministic(self,config,amplitude_factory):
+    def amplitude_gradient_deterministic(self,configs,amplitude_factory):
         cx,vx = np.zeros(3),[None] * 3 
-        configs = parse_config(config)
         for ix in range(3):
             cx[ix],vx[ix] = self.ham[ix].amplitude_gradient_deterministic(
                                   configs[ix],amplitude_factory.psi[ix])
         return np.prod(cx),np.concatenate(vx)
-    def batch_hessian_deterministic(self,config,amplitude_factory,imin,imax):
+    def batch_hessian_deterministic(self,configs,amplitude_factory,imin,imax):
         exs,wfns = [None] * 3,[None] * 3
-        configs = parse_config(config)
         for ix in range(3):
+            self.ham[ix].backend = 'torch'
             psi = amplitude_factory.psi[ix]
             peps = psi.psi.copy()
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
@@ -210,10 +209,10 @@ class Hamiltonian(Hamiltonian_):
                                                                      imin,imax)
         ex = self.parse_energy_numerator(exs)
         return self.parse_hessian(ex,wfns,amplitude_factory)
-    def pair_hessian_deterministic(self,config,amplitude_factory,site1,site2):
+    def pair_hessian_deterministic(self,configs,amplitude_factory,site1,site2):
         exs,wfns = [None] * 3,[None] * 3
-        configs = parse_config(config)
         for ix in range(3):
+            self.ham[ix].backend = 'torch'
             psi = amplitude_factory.psi[ix]
             peps = psi.psi.copy()
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
@@ -226,25 +225,87 @@ class Hamiltonian(Hamiltonian_):
             exs[ix] = {(site1,site2):ex} 
         ex = self.parse_energy_numerator(exs)
         return self.parse_hessian(ex,wfns,amplitude_factory)
+    def compute_local_energy_hessian_deterministic(self,config,amplitude_factory):
+        ar.set_backend(torch.zeros(1))
+
+        configs = parse_config(config)
+        cx,vx = self.amplitude_gradient_deterministic(configs,amplitude_factory)
+        sign = [amplitude_factory.psi[ix].config_sign(configs[ix]) for ix in range(2)]
+        sign = np.prod(np.array(sign))
+
+        ex = 0. 
+        Hvx = 0.
+        for key in self.ham[0].batched_pairs:
+            if key=='pbc':
+                continue
+            imin,imax = key
+            ex_,Hvx_ = self.batch_hessian_deterministic(configs,amplitude_factory,imin,imax) 
+            ex += ex_
+            Hvx += Hvx_
+        if self.pbc:
+            for site1,site2 in self.ham[0].batched_pairs['pbc']:
+                ex_,Hvx_ = self.pair_hessian_deterministic(configs,amplitude_factory,site1,site2)
+                ex += ex_
+                Hvx += Hvx_
+         
+        eu = self.compute_local_energy_eigen(config)
+        ex = ex/cx*sign + eu
+        Hvx = Hvx/cx*sign + eu*vx
+        ar.set_backend(np.zeros(1))
+        return cx,ex,vx,Hvx,0. 
     def compute_local_energy_gradient_deterministic(self,config,amplitude_factory,compute_v=True):
         configs = parse_config(config)
-        ex,cx = [None] * 3,np.zeros(3)
+        ex,cx,sign = [None] * 3,np.zeros(3),np.zeros(3)
         for ix in range(3):
-            ex[ix],cx[ix] = self.ham[ix].pair_energies_deterministic(
-                                  configs[ix],amplitude_factory.psi[ix]) 
+            config,psi = configs[ix],amplitude_factory.psi[ix]
+            ex[ix],cx[ix] = self.ham[ix].pair_energies_deterministic(config,psi)
+            sign[ix] = psi.config_sign(config) 
         cx = np.prod(cx) 
-        ex = sum(self.parse_energy_numerator(ex)) / cx
+        sign = np.prod(sign)
+        ex = sum(self.parse_energy_numerator(ex)) / cx * sign
         eu = self.compute_local_energy_eigen(config)
         ex += eu
         if not compute_v:
             return cx,ex,None,None,0.
 
         ar.set_backend(torch.zeros(1))
-        _,vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
+        _,vx = self.amplitude_gradient_deterministic(configs,amplitude_factory)
         ar.set_backend(np.zeros(1))
-        print(cx)
         return cx,ex,vx,None,0.
 class BosonHamiltonian(Hamiltonian_):
+    def pair_terms(self,i1,i2,spin):
+        if spin=='a':
+            map_ = {(0,1):(1,0),(1,0):(0,1),
+                    (2,3):(3,2),(3,2):(2,3),
+                    (0,3):(1,2),(3,0):(2,1),
+                    (1,2):(0,3),(2,1):(3,0)}
+        elif spin=='b':
+            map_ = {(0,2):(2,0),(2,0):(0,2),
+                    (1,3):(3,1),(3,1):(1,3),
+                    (0,3):(2,1),(3,0):(1,2),
+                    (1,2):(3,0),(2,1):(0,3)}
+        else:
+            raise ValueError
+        return map_.get((i1,i2),(None,)*2)
+    def _pair_energy_from_plq(self,tn,config,where):
+        ix1,ix2 = self.flatten(*where[0]),self.flatten(*where[1])
+        i1,i2 = config[ix1],config[ix2] 
+        if not self.pair_valid(i1,i2): # term vanishes 
+            return None 
+        cx = [None] * 2
+        for ix,spin in zip((0,1),('a','b')):
+            i1_new,i2_new = self.pair_terms(i1,i2,spin)
+            if i1_new is None:
+                continue
+            config_new = list(config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = tuple(config_new)
+            tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
+            cx_new = self.safe_contract(tn_new)
+            if cx_new is not None:
+                cx[ix] = cx_new 
+        return cx 
     def _pair_energies_from_plq(self,plq,pairs,config):
         exa = dict()
         exb = dict()
@@ -254,16 +315,37 @@ class BosonHamiltonian(Hamiltonian_):
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eija = self._pair_energy_from_plq(tn.copy(),config,where,spin='a') 
-                if eija is not None:
-                    exa[where] = eija
-                eijb = self._pair_energy_from_plq(tn.copy(),config,where,spin='b') 
-                if eijb is not None:
-                    exb[where] = eijb
-
                 cij = self._2numpy(tn.copy().contract())
                 cx[where] = cij 
+
+                eij = self._pair_energy_from_plq(tn,config,where) 
+                if eij is None:
+                    continue
+                if eij[0] is not None:
+                    exa[where] = eij[0]
+                if eij[1] is not None:
+                    exb[where] = eij[1]
         return (exa,exb),cx
+    def batch_pair_energies_deterministic(self,config,psi,sign_fn,batch_imin,batch_imax):
+        cache_top = dict()
+        cache_bot = dict()
+        
+        imin = min(self.rix1+1,batch_imin) 
+        imax = max(self.rix2-1,batch_imax) 
+        self.get_all_bot_envs(config,psi=psi,cache=cache_bot,imax=imin-1)
+        self.get_all_top_envs(config,psi=psi,cache=cache_top,imin=imax+1)
+        top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
+        bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
+
+        exa,exb = dict(),dict()
+        for site1,site2 in self.batched_pairs[batch_imin,batch_imax]:
+            eija = self._pair_energy_deterministic(config,site1,site2,psi,top,bot,sign_fn,spin='a')
+            if eija is not None:
+                exa[site1,site2] = eija
+            eijb = self._pair_energy_deterministic(config,site1,site2,psi,top,bot,sign_fn,spin='b')
+            if eijb is not None:
+                exb[site1,site2] = eijb
+        return exa,exb
     def pair_energies_deterministic(self,config,amplitude_factory):
         self.backend = 'numpy'
         psi = amplitude_factory.psi
@@ -293,51 +375,11 @@ class BosonHamiltonian(Hamiltonian_):
 class HubbardBoson(BosonHamiltonian):
     def __init__(self,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,phys_dim=4)
-
-        # alpha
-        h1a = np.zeros((4,)*4)
-        for ki in [1,3]:
-            for kj in [0,2]:
-                bi = {1:0,3:2}[ki]
-                bj = {0:1,2:3}[kj]
-                h1a[bi,ki,bj,kj] = 1.
-                h1a[bj,kj,bi,ki] = 1.
-
-        # beta
-        h1b = np.zeros((4,)*4)
-        for ki in [2,3]:
-            for kj in [0,1]:
-                bi = {2:0,3:1}[ki]
-                bj = {0:2,1:3}[kj]
-                h1b[bi,ki,bj,kj] = 1.
-                h1b[bj,kj,bi,ki] = 1.
-        self.key = 'h1'
-        self.data_map[self.key+'a'] = h1a 
-        self.data_map[self.key+'b'] = h1b 
-
         self.pairs = self.pairs_nn()
         if self.deterministic:
             self.batch_deterministic()
         else:
             self.batch_plq_nn()
-    def pair_coeff(self,site1,site2):
-        return 1. 
-    def pair_terms(self,i1,i2,spin):
-        if spin=='a':
-            map_ = {(0,1):(1,0),(1,0):(0,1),
-                    (2,3):(3,2),(3,2):(2,3),
-                    (0,3):(1,2),(3,0):(2,1),
-                    (1,2):(0,3),(2,1):(3,0)}
-        elif spin=='b':
-            map_ = {(0,2):(2,0),(2,0):(0,2),
-                    (1,3):(3,1),(3,1):(1,3),
-                    (0,3):(2,1),(3,0):(1,2),
-                    (1,2):(3,0),(2,1):(0,3)}
-        else:
-            raise ValueError
-        if (i1,i2) not in map_:
-            return []
-        return [map_[i1,i2] + (1,)]
 from .fermion_2d_vmc_ import Hubbard as HubbardFermion
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
@@ -394,17 +436,9 @@ class ExchangeSampler(ExchangeSampler_):
         configs[0],configs[1] = config_to_ab(config_sites)
         py = 1.
         for ix in range(3):
-            cols_ix,psi = cols[ix],self.amplitude_factory.psi[ix]
-            if cols_ix[0] is None:
-                return tn 
-            tn_plq = cols_ix[0].copy()
-            for col in cols_ix[1:]:
-                if col is None:
-                    return tn 
-                tn_plq.add_tensor_network(col,virtual=False)
-            tn_plq.view_like_(tn[ix])
-            tn_plq = psi.replace_sites(tn_plq,sites,configs[ix]) 
-            py_ix = psi.safe_contract(tn_plq)
+            psi = self.amplitude_factory.psi[ix]
+            cols_ix = psi.replace_sites(cols[ix],sites,configs[ix]) 
+            py_ix = psi.safe_contract(cols_ix)
             if py_ix is None:
                 return tn 
             py *= py_ix ** 2
@@ -421,8 +455,13 @@ class ExchangeSampler(ExchangeSampler_):
                 tn[ix] = psi.replace_sites(tn[ix],sites,configs[ix])
         return tn
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
-        self.config = list(self.config)
-        renvs = [self.amplitude_factory.psi[ix].get_all_renvs(tn[ix].copy(),jmin=y_bsz) for ix in range(3)]
+        renvs = [None] * 3
+        for ix in range(3):
+            try:
+                tn[ix].reorder('col',inplace=True)
+            except (NotImplementedError,AttributeError):
+                pass
+            renvs[ix] = self.amplitude_factory.psi[ix].get_all_renvs(tn[ix].copy(),jmin=y_bsz)
 
         first_col = [tn[ix].col_tag(0) for ix in range(3)]
         for j in range(self.Ly - y_bsz + 1): 
@@ -430,10 +469,14 @@ class ExchangeSampler(ExchangeSampler_):
             tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
             for ix in range(3):
                 tn[ix] ^= first_col[ix],tn[ix].col_tag(j) 
-        self.config = tuple(self.config)
     def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
-        self.config = list(self.config)
-        lenvs = [self.amplitude_factory.psi[ix].get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz) for ix in range(3)]
+        lenvs = [None] * 3
+        for ix in range(3):
+            try:
+                tn[ix].reorder('col',inplace=True)
+            except (NotImplementedError,AttributeError):
+                pass
+            lenvs[ix] = self.amplitude_factory.psi[ix].get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz)
 
         last_col = [tn[ix].col_tag(self.Ly-1) for ix in range(3)]
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
@@ -441,7 +484,6 @@ class ExchangeSampler(ExchangeSampler_):
             tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
             for ix in range(3):
                 tn[ix] ^= tn[ix].col_tag(j+y_bsz-1),last_col[ix]
-        self.config = tuple(self.config)
     def sweep_row_forward(self,x_bsz,y_bsz):
         config = parse_config(self.config)
         for ix in range(3): 
@@ -449,7 +491,8 @@ class ExchangeSampler(ExchangeSampler_):
             psi.cache_bot = dict()
             psi.get_all_top_envs(config[ix],imin=x_bsz)
 
-        cdir = self.rng.choice([-1,1]) 
+        #cdir = self.rng.choice([-1,1]) 
+        cdir = 1
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz
@@ -474,7 +517,8 @@ class ExchangeSampler(ExchangeSampler_):
             psi.cache_top = dict()
             psi.get_all_bot_envs(config[ix],imax=self.Lx-1-x_bsz)
 
-        cdir = self.rng.choice([-1,1]) 
+        #cdir = self.rng.choice([-1,1]) 
+        cdir = 1
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz

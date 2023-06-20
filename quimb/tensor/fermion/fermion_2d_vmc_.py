@@ -409,7 +409,7 @@ class Hamiltonian(ContractionEngine,Hamiltonian_):
         super().init_contraction(Lx,Ly)
         self.nbatch = nbatch
         self.subspace = subspace
-    def pair_tensor(self,bixs,kixs,spin=None,tags=None):
+    def pair_tensor(self,bixs,kixs,tags=None):
         data = self._2backend(self.data_map[f'{self.key}_{self.subspace}'],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
@@ -447,15 +447,22 @@ class Hubbard(Hamiltonian):
             return [(0,3,sign),(3,0,sign)]
 class FDKineticO2(Hubbard):
     def __init__(self,N,L,**kwargs):
-        self.eps = L/(N+1.)
+        self.eps = L/(N+1e-15) if pbc else L/(N+1.)
+
         t = 1./(2*self.eps**2)
+        self.l = 2./self.eps**2
         super().__init__(t,0.,N,N,**kwargs)
     def compute_local_energy_eigen(self,config):
-        return 2./self.eps**2 * sum(self.config2pn(config,0,len(config)))
+        return self.l * sum(self.config2pn(config,0,len(config)))
 class FDKineticO4(Hamiltonian):
     def __init__(self,N,L,**kwargs):
         super().__init__(N,N,**kwargs)
-        self.eps = L/(N+1.)
+        self.eps = L/(N+1e-15) if pbc else L/(N+1.)
+        self.t1 = 16./(24.*self.eps**2)
+        self.t2 = 1./(24.*self.eps**2)
+        self.li = 60./(24.*self.eps**2) 
+        self.lb = 59./(24.*self.eps**2) 
+        self.lc = 58./(24.*self.eps**2) 
     
         self.pairs = self.pairs_nn() + self.pairs_nn(d=2)
         if self.deterministic:
@@ -483,13 +490,15 @@ class FDKineticO4(Hamiltonian):
         dx = site2[0]-site1[0]
         dy = site2[1]-site1[1]
         if dx+dy == 1:
-            return -16./(24.*self.eps**2)
-        elif dx+dy==3:
-            return 1./(24.*self.eps**2)
+            return -self.t1
+        elif dx+dy == 2:
+            return self.t2
         else:
             raise ValueError(f'site1={site1},site2={site2}')
     def compute_local_energy_eigen(self,config):
         pn = self.config2pn(config,0,len(config))
+        if self.pbc:
+            return self.li * sum(pn)
         # interior
         ei = sum([pn[self.flatten(i,j)] for i in range(1,self.Lx-1) for j in range(1,self.Ly-1)])
         # border
@@ -498,8 +507,7 @@ class FDKineticO4(Hamiltonian):
         # corner
         ec = pn[self.flatten(0,0)] + pn[self.flatten(0,self.Ly-1)] \
            + pn[self.flatten(self.Ly-1,0)] + pn[self.flatten(self.Lx-1,self.Ly-1)]
-        denom = 24.*self.eps**2
-        return (60. * ei + 59. * eb + 58 * ec)/denom
+        return self.li * ei + self.lb * eb + self.lc * ec
 def coulomb(config,Lx,Ly,eps,subspace):
     pn = config2pn(config,0,len(config),subspace)
     e = 0.
