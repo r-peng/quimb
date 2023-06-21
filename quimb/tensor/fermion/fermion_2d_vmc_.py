@@ -429,7 +429,7 @@ class Hubbard(Hamiltonian):
     def compute_local_energy_eigen(self,config):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
-    def pair_terms(self,i1,i2,spin=None):
+    def pair_terms(self,i1,i2):
         if self.subspace=='full':
             return self.pair_terms_full(i1,i2)
         else:

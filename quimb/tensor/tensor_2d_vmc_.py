@@ -389,7 +389,7 @@ class ContractionEngine:
         for (i,j),ci in zip(sites,cis): 
             bra = tn[tn.site_tag(i,j),'BRA']
             bra_target = self.get_bra_tsr(ci,i,j,tn=tn)
-            bra.modify(data=bra_target.data.copy(),inds=bra_target.inds)
+            bra.modify(data=bra_target.data,inds=bra_target.inds)
         return tn
     def site_grad(self,tn_plq,i,j):
         tid = tuple(tn_plq._get_tids_from_tags((tn_plq.site_tag(i,j),'KET'),which='all'))[0]
@@ -742,7 +742,7 @@ class Hamiltonian(ContractionEngine):
         vx = amplitude_factory.dict2vec(vx)  
         cx = self._2numpy(cx)
         return cx,vx/cx
-    def _pair_energy_deterministic(self,config,site1,site2,psi,top,bot,sign_fn,spin=None):
+    def _pair_energy_deterministic(self,config,site1,site2,psi,top,bot,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -753,7 +753,7 @@ class Hamiltonian(ContractionEngine):
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * self.pair_coeff(site1,site2)
         cache_top = dict()
         cache_bot = dict()
-        for i1_new,i2_new,coeff in self.pair_terms(i1,i2,spin=spin):
+        for i1_new,i2_new,coeff in self.pair_terms(i1,i2):
             config_new = list(config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
@@ -783,7 +783,7 @@ class Hamiltonian(ContractionEngine):
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-    def batch_pair_energies_deterministic(self,config,psi,sign_fn,batch_imin,batch_imax):
+    def batch_pair_energies_deterministic(self,config,psi,batch_imin,batch_imax,sign_fn):
         cache_top = dict()
         cache_bot = dict()
         
@@ -804,10 +804,10 @@ class Hamiltonian(ContractionEngine):
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        ex = self.batch_pair_energies_deterministic(config,peps,amplitude_factory.config_sign,
-                                                    batch_imin,batch_imax)
+        sign_fn = amplitude_factory.config_sign
+        ex = self.batch_pair_energies_deterministic(config,peps,batch_imin,batch_imax,sign_fn)
         return self.parse_hessian(ex,peps,amplitude_factory)
-    def pair_energy_deterministic(self,config,psi,sign_fn,site1,site2):
+    def pair_energy_deterministic(self,config,psi,site1,site2,sign_fn):
         ix1,ix2 = self.flatten(*site1),self.flatten(*site2)
         i1,i2 = config[ix1],config[ix2]
         if not self.pair_valid(i1,i2): # term vanishes 
@@ -828,7 +828,8 @@ class Hamiltonian(ContractionEngine):
         peps = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        ex = self.pair_energy_deterministic(config,peps,amplitude_factory.config_sign,site1,site2)
+        sign_fn = amplitude_factory.config_sign
+        ex = self.pair_energy_deterministic(config,peps,site1,site2,sign_fn)
         if ex is None:
             return 0.,0.
         return self.parse_hessian({(site1,site2):ex},peps,amplitude_factory)
@@ -1048,7 +1049,7 @@ class Heisenberg(Hamiltonian):
                     if self.pbc:
                         ez += s1 * (-1)**config[self.flatten(0,j)]
         return eh * .5 * self.h + ez * .25 * self.Jz
-    def pair_terms(self,i1,i2,spin=None):
+    def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.25*(self.Jx+self.Jy))]
 class J1J2(Hamiltonian):
     def __init__(self,J1,J2,Lx,Ly,**kwargs):
@@ -1197,7 +1198,7 @@ class J1J2(Hamiltonian):
                         ix1,ix2 = self.flatten(i,(j+1)%self.Ly), self.flatten((i+1)%self.Lx,j)
                         e2 += (-1)**(config[ix1]+config[ix2])
         return .25 * (e1 *self.J1 + e2 * self.J2) 
-    def pair_terms(self,i1,i2,spin=None):
+    def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
 class SpinDensity(Hamiltonian):
     def __init__(self,Lx,Ly):

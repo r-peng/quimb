@@ -661,6 +661,8 @@ class TNVMC: # stochastic sampling
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         E = self.E if RANK==0 else 0
+        if RANK==0:
+            print('pure_newton=',self.pure_newton)
         if solve_full: 
             def A(x):
                 if self.terminate[0]==1:
