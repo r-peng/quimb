@@ -5,7 +5,7 @@ from .block_interface import to_exponential, Hubbard
 
 class LocalHamGen(LocalHamGen):
 
-    def __init__(self, H2, H1=None, subspace='full'):
+    def __init__(self, H2, H1=None, spinless=False):
         # caches for not repeating operations / duplicating tensors
         self._op_cache = collections.defaultdict(dict)
 
@@ -39,7 +39,7 @@ class LocalHamGen(LocalHamGen):
                 H1s.setdefault(site, default_H1)
 
         self.terms.update(H1s)
-        self.subspace = subspace
+        self.spinless = spinless
 
     def _flip_cached(self, x):
         cache = self._op_cache["flip"]
@@ -52,7 +52,7 @@ class LocalHamGen(LocalHamGen):
         cache = self._op_cache['expm']
         key = (id(x), y)
         if key not in cache:
-            out = to_exponential(x, y, subspace=self.subspace)
+            out = to_exponential(x, y, spinless=self.spinless)
             cache[key] = out
         return cache[key]
 

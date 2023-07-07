@@ -27,7 +27,7 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     from .fermion_2d_vmc_ import set_options as set_options2
     return set_options2(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic,**compress_opts)
 from ..tensor_2d import PEPS
-def get_gutzwiller(Lx,Ly,bdim=1,eps=None,g=1.):
+def get_gutzwiller(Lx,Ly,bdim=1,eps=0.,g=1.,normalize=True):
     arrays = []
     for i in range(Lx):
         row = []
@@ -40,9 +40,10 @@ def get_gutzwiller(Lx,Ly,bdim=1,eps=None,g=1.):
             shape = tuple(shape) + (4,)
 
             data = np.ones(shape)
-            if eps is not None:
-                data += eps * np.random.rand(*shape)
+            data += eps * np.random.rand(*shape)
             data[...,3] = g * np.random.rand()
+            if normalize:
+                data /= np.linalg.norm(data)
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
@@ -70,11 +71,11 @@ def parse_config(config):
         config_a,config_b = config_to_ab(config)
     return config_a,config_b,config_full
 class AmplitudeFactory:
-    def __init__(self,psi_a,psi_b,psi_boson,blks=None,flat=True):
+    def __init__(self,psi,blks=None,flat=True):
         self.psi = [None] * 3
-        self.psi[0] = FermionAmplitudeFactory(psi_a,blks=blks,subspace='a',flat=flat)
-        self.psi[1] = FermionAmplitudeFactory(psi_b,blks=blks,subspace='b',flat=flat)
-        self.psi[2] = BosonAmplitudeFactory(psi_boson,blks=blks,phys_dim=4)
+        self.psi[0] = FermionAmplitudeFactory(psi[0],blks=blks,spinless=True,flat=flat)
+        self.psi[1] = FermionAmplitudeFactory(psi[1],blks=blks,spinless=True,flat=flat)
+        self.psi[2] = BosonAmplitudeFactory(psi[2],blks=blks,phys_dim=4)
 
         self.nparam = [len(amp_fac.get_x()) for amp_fac in self.psi] 
         self.block_dict = self.psi[0].block_dict.copy()
@@ -89,14 +90,10 @@ class AmplitudeFactory:
     def get_x(self):
         return np.concatenate([amp_fac.get_x() for amp_fac in self.psi])
     def update(self,x,fname=None,root=0):
-        fname_ = fname + '_a' if fname is not None else fname
-        self.psi[0].update(x[:self.nparam[0]],fname=fname_,root=root)
-
-        fname_ = fname + '_b' if fname is not None else fname
-        self.psi[1].update(x[self.nparam[0]:self.nparam[0]+self.nparam[1]],fname=fname_,root=root)
-
-        fname_ = fname + '_boson' if fname is not None else fname
-        self.psi[2].update(x[self.nparam[0]+self.nparam[1]:],fname=fname_,root=root)
+        x = np.split(x,[self.nparam[0],self.nparam[0]+self.nparam[1]])
+        for ix in range(3):
+            fname_ = None if fname is None else fname+f'_{ix}' 
+            self.psi[ix].update(x[ix],fname=fname_,root=root)
     def unsigned_amplitude(self,config):
         configs = parse_config(config)
         cx = np.ones(3) 
@@ -221,9 +218,13 @@ class Hamiltonian(Hamiltonian_):
         for ix in range(3):
             ex[ix],cx[ix],plq[ix] = self.ham[ix].pair_energies_from_plq(
                                            configs[ix],amplitude_factory.psi[ix])
+            #print(ix)
+            #print(ex[ix])
+            #print(cx[ix])
         ex = np.sum(self.parse_energy_from_plq(ex,cx))
         eu = self.compute_local_energy_eigen(config)
         ex += eu
+        #print(config,eu)
 
         if not compute_v:
             cx,err = self.contraction_error(cx)
@@ -469,8 +470,8 @@ class Hubbard(Hamiltonian):
         self.Lx,self.Ly = Lx,Ly
         self.t,self.u = t,u
         self.ham = [None] * 3 
-        self.ham[0] = HubbardFermion(t,u,Lx,Ly,subspace='a',**kwargs)
-        self.ham[1] = HubbardFermion(t,u,Lx,Ly,subspace='b',**kwargs)
+        self.ham[0] = HubbardFermion(t,0.,Lx,Ly,spinless=True,**kwargs)
+        self.ham[1] = HubbardFermion(t,0.,Lx,Ly,spinless=True,**kwargs)
         self.ham[2] = HubbardBoson(Lx,Ly,**kwargs)
 
         self.pbc = self.ham[0].pbc
@@ -491,18 +492,21 @@ class Hubbard(Hamiltonian):
         if ndiff==0:
             sign = i1-i2
             return [(0,3,sign),(3,0,sign)]
-class DensityMatrix(Hamiltonian):
-    def __init__(self,Lx,Ly):
+class U(Hamiltonian):
+    def __init__(self,Lx,Ly,u):
         self.Lx,self.Ly = Lx,Ly 
         self.pairs = [] 
-        self.data = np.zeros((Lx,Ly))
+        self.data = np.zeros(1)
         self.n = 0.
+        self.u = u
     def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
         self.n += 1.
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                self.data[i,j] += pn_map[config[self.flatten(i,j)]]
+        config = np.array(config,dtype=int)
+        self.data[0] += self.u*len(config[config==3])
+        #print(config,len(config[config==3]))
         return 0.,0.,None,None,0. 
+    def _print(self,fname,data):
+        print(data)
 ####################################################################################
 # sampler 
 ####################################################################################

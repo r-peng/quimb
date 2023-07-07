@@ -22,7 +22,7 @@ def set_options(pbc=False,deterministic=False,**compress_opts):
     this.compress_opts = compress_opts
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
-def flat2site(ix,Lx,Ly): # ix in row order
+def flat2site(ix,Ly): # ix in row order
     return ix//Ly,ix%Ly
 import pickle,uuid
 #####################################################################################
@@ -45,7 +45,7 @@ def scale_wfn(psi,scale):
         tsr.modify(data=tsr.data*scale)
     return psi
 from .tensor_2d import PEPS
-def get_product_state(Lx,Ly,config=None,bdim=1,eps=None,pdim=2):
+def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):
     arrays = []
     for i in range(Lx):
         row = []
@@ -64,11 +64,31 @@ def get_product_state(Lx,Ly,config=None,bdim=1,eps=None,pdim=2):
                 ix = flatten(i,j,Ly)
                 ix = config[ix]
                 data[(0,)*(len(shape)-1)+(ix,)] = 1.
-            if eps is not None:
-                data += eps * np.random.rand(*shape)
+            data += eps * np.random.rand(*shape)
+            if normalize:
+                data /= np.linalg.norm(data)
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
+def expand_peps(peps,Dnew,eps=0.):
+    tn = peps.copy()
+    for i,j in itertools.product(range(tn.Lx),range(tn.Ly)):
+        T = tn[i,j]
+        data = T.data
+        shape = data.shape
+        ndim = len(shape)
+
+        shape_new = (Dnew,)*(ndim-1) + (data.shape[-1],)
+        data_new = eps * np.random.rand(*shape_new)
+        slices = tuple([slice(D) for D in shape])
+        data_new[slices] = data
+
+        T.modify(data=data_new)
+        #print(data)
+        #print(data_new)
+        #exit()
+    return tn
+
 from .tensor_core import Tensor,TensorNetwork,rand_uuid,group_inds
 def peps2pbc(peps):
     vbonds = [rand_uuid() for j in range(peps.Ly)]
@@ -162,7 +182,7 @@ class ContractionEngine:
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
-        return flat2site(ix,self.Lx,self.Ly)
+        return flat2site(ix,self.Ly)
     def pair_valid(self,i1,i2):
         if i1==i2:
             return False
@@ -1254,7 +1274,7 @@ class ExchangeSampler1:
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,i,j):
-        return flat2site(i,j,self.Lx,self.Ly)
+        return flat2site(i,j,self.Ly)
     def preprocess(self):
         self._burn_in()
     def _burn_in(self,config=None,burn_in=None):
@@ -1519,7 +1539,7 @@ class ExchangeSampler2:
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,i,j):
-        return flat2site(i,j,self.Lx,self.Ly)
+        return flat2site(i,j,self.Ly)
     def preprocess(self):
         self._burn_in()
     def _burn_in(self,config=None,burn_in=None):

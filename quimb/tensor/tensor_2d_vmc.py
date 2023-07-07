@@ -22,7 +22,7 @@ def set_options(pbc=False,deterministic=False,**compress_opts):
     this.compress_opts = compress_opts
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
-def flat2site(ix,Lx,Ly): # ix in row order
+def flat2site(ix,Ly): # ix in row order
     return ix//Ly,ix%Ly
 import pickle,uuid
 #####################################################################################
@@ -137,7 +137,7 @@ class ContractionEngine:
     def flatten(self,i,j):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
-        return flat2site(ix,self.Lx,self.Ly)
+        return flat2site(ix,self.Ly)
     def intermediate_sign(self,config=None,ix1=None,ix2=None):
         return 1.
     def _2backend(self,data,requires_grad):

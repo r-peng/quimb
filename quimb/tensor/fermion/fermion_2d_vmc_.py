@@ -31,32 +31,33 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     this.compress_opts = compress_opts
 
     this.data_map = dict()
-    for subspace in ['a','b']:
-        cre = creation(spin=subspace,symmetry=symmetry,flat=flat,subspace=subspace)
-        vac = vaccum(n=1,symmetry=symmetry,flat=flat,subspace=subspace)
-        occ = np.tensordot(cre,vac,axes=([1],[0])) 
-        this.data_map[f'cre_{subspace}_{subspace}'] = cre
-        this.data_map[f'ann_{subspace}_{subspace}'] = cre.dagger 
-        this.data_map[f'occ_{subspace}_{subspace}'] = occ 
-        this.data_map['vac_'+subspace] = vac 
-        this.data_map['h1_'+subspace] = H1(symmetry=symmetry,flat=flat,subspace=subspace).transpose((0,2,1,3))
+    # spinless
+    cre = creation(spin='a',symmetry=symmetry,flat=flat,spinless=True)
+    vac = vaccum(n=1,symmetry=symmetry,flat=flat,spinless=True)
+    occ = np.tensordot(cre,vac,axes=([1],[0])) 
+    this.data_map['cre'] = cre
+    this.data_map['ann'] = cre.dagger 
+    this.data_map['occ'] = occ 
+    this.data_map['vac',True] = vac 
+    this.data_map['h1',True] = H1(symmetry=symmetry,flat=flat,spinless=True).transpose((0,2,1,3))
 
-    cre_a = creation(spin='a',symmetry=symmetry,flat=flat,subspace='full')
-    cre_b = creation(spin='b',symmetry=symmetry,flat=flat,subspace='full')
-    this.data_map['cre_a_full'] = cre_a
-    this.data_map['cre_b_full'] = cre_b
-    this.data_map['ann_a_full'] = cre_a.dagger
-    this.data_map['ann_b_full'] = cre_b.dagger
+    # spin-1/2
+    cre_a = creation(spin='a',symmetry=symmetry,flat=flat,spinless=False)
+    cre_b = creation(spin='b',symmetry=symmetry,flat=flat,spinless=False)
+    this.data_map['cre_a'] = cre_a
+    this.data_map['cre_b'] = cre_b
+    this.data_map['ann_a'] = cre_a.dagger
+    this.data_map['ann_b'] = cre_b.dagger
 
-    vac = vaccum(n=1,symmetry=symmetry,flat=flat,subspace='full')
+    vac = vaccum(n=1,symmetry=symmetry,flat=flat,spinless=False)
     occ_a = np.tensordot(cre_a,vac,axes=([1],[0])) 
     occ_b = np.tensordot(cre_b,vac,axes=([1],[0])) 
     occ_db = np.tensordot(cre_a,occ_b,axes=([1],[0]))
-    this.data_map['vac_full'] = vac
-    this.data_map['occ_a_full'] = occ_a
-    this.data_map['occ_b_full'] = occ_b
-    this.data_map['occ_db_full'] = occ_db
-    this.data_map['h1_full'] = H1(symmetry=symmetry,flat=flat,subspace='full').transpose((0,2,1,3))
+    this.data_map['vac',False] = vac
+    this.data_map['occ_a'] = occ_a
+    this.data_map['occ_b'] = occ_b
+    this.data_map['occ_db'] = occ_db
+    this.data_map['h1',False] = H1(symmetry=symmetry,flat=flat,spinless=False).transpose((0,2,1,3))
     return this.data_map
 pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
@@ -172,78 +173,74 @@ def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
 ####################################################################################
 # initialization fxns
 ####################################################################################
-def get_vaccum(Lx,Ly,symmetry='u1',flat=True,subspace='full'):
+pattern_map = {'u':'+','r':'+','d':'-','l':'-','p':'+'}
+def get_patterns(Lx,Ly,shape='urdlp'):
+    patterns = dict()
+    for i,j in itertools.product(range(Lx),range(Ly)):
+        arr_order = shape
+        if i==Lx-1:
+            arr_order = arr_order.replace('u','')
+        if j==Ly-1:
+            arr_order = arr_order.replace('r','')
+        if i==0:
+            arr_order = arr_order.replace('d','')
+        if j==0:
+            arr_order = arr_order.replace('l','')
+        patterns[i,j] = ''.join([pattern_map[c] for c in arr_order])
+    return patterns
+def get_vaccum(Lx,Ly,shape='urdlp',symmetry='u1',flat=True,spinless=False):
     from pyblock3.algebra.fermion_ops import bonded_vaccum
     from ..tensor_2d import PEPS
     from .fermion_2d import FPEPS
-    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1)
+    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1,shape=shape)
+    patterns = get_patterns(Lx,Ly,shape=shape)
     ftn = FermionTensorNetwork([])
-    ind_to_pattern_map = dict()
-    inv_pattern = {"+":"-", "-":"+"}
-    def get_pattern(inds):
-        """
-        make sure patterns match in input tensors, eg,
-        --->A--->B--->
-         i    j    k
-        pattern for A_ij = +-
-        pattern for B_jk = +-
-        the pattern of j index must be reversed in two operands
-        """
-        pattern = ""
-        for ix in inds[:-1]:
-            if ix in ind_to_pattern_map:
-                ipattern = inv_pattern[ind_to_pattern_map[ix]]
-            else:
-                nmin = pattern.count("-")
-                ipattern = "-" if nmin*2<len(pattern) else "+"
-                ind_to_pattern_map[ix] = ipattern
-            pattern += ipattern
-        pattern += "+" # assuming last index is the physical index
-        return pattern
     for ix, iy in itertools.product(range(tn.Lx), range(tn.Ly)):
         T = tn[ix, iy]
-        pattern = get_pattern(T.inds)
         #put vaccum at site (ix, iy) and apply a^{\dagger}
-        data = bonded_vaccum((1,)*(T.ndim-1), pattern=pattern,
-                             symmetry=symmetry,flat=flat,subspace=subspace)
+        data = bonded_vaccum((1,)*(T.ndim-1), pattern=patterns[ix,iy],
+                             symmetry=symmetry,flat=flat,spinless=spinless)
         new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)
     return ftn
-def create_particle(fpeps,site,spin,subspace='full'):
-    cre = data_map[f'cre_{spin}_{subspace}'].copy()
+def create_particle(fpeps,site,spin,spinless=False):
+    if spinless:
+        cre = data_map['cre'].copy()
+    else:
+        cre = data_map[f'cre_{spin}'].copy()
     T = fpeps[fpeps.site_tag(*site)]
     trans_order = list(range(1,T.ndim))+[0] 
     data = np.tensordot(cre, T.data, axes=((1,), (-1,))).transpose(trans_order)
     T.modify(data=data)
     return fpeps
-def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,subspace='full'):
-    fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,subspace=subspace)
-    if subspace=='full':
+def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,spinless=False):
+    fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,spinless=spinless)
+    if spinless: 
         for ix,ci in enumerate(config):
-            site = flat2site(ix,Lx,Ly)
+            site = flat2site(ix,Ly)
             if ci==1:
-                fpeps = create_particle(fpeps,site,'a',subspace=subspace)
+                fpeps = create_particle(fpeps,site,None,spinless=spinless)
+    else:
+        for ix,ci in enumerate(config):
+            site = flat2site(ix,Ly)
+            if ci==1:
+                fpeps = create_particle(fpeps,site,'a',spinless=spinless)
             if ci==2:
-                fpeps = create_particle(fpeps,site,'b',subspace=subspace)
+                fpeps = create_particle(fpeps,site,'b',spinless=spinless)
             if ci==3:
-                fpeps = create_particle(fpeps,site,'b',subspace=subspace)
-                fpeps = create_particle(fpeps,site,'a',subspace=subspace)
-    else: 
-        for ix,ci in enumerate(config):
-            site = flat2site(ix,Lx,Ly)
-            if ci==1:
-                fpeps = create_particle(fpeps,site,subspace,subspace=subspace)
+                fpeps = create_particle(fpeps,site,'b',spinless=spinless)
+                fpeps = create_particle(fpeps,site,'a',spinless=spinless)
     return fpeps
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
 from ..tensor_2d_vmc_ import ContractionEngine as ContractionEngine_
-def config2pn(config,start,stop,subspace):
-    if subspace=='full':
-        return [pn_map[ci] for ci in config[start:stop]]
-    else:
+def config2pn(config,start,stop,spinless):
+    if spinless:
         return config[start:stop]
+    else:
+        return [pn_map[ci] for ci in config[start:stop]]
 class ContractionEngine(ContractionEngine_): 
     def init_contraction(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly
@@ -260,7 +257,7 @@ class ContractionEngine(ContractionEngine_):
         else:
             return SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
     def config2pn(self,config,start,stop):
-        return config2pn(config,start,stop,self.subspace)
+        return config2pn(config,start,stop,self.spinless)
     def intermediate_sign(self,config,ix1,ix2):
         return (-1)**(sum(self.config2pn(config,ix1+1,ix2)) % 2)
     def _2numpy(self,data,backend=None):
@@ -277,10 +274,10 @@ class ContractionEngine(ContractionEngine_):
         tn = self.psi if tn is None else tn 
         inds = tn.site_ind(i,j)+append,
         tags = tn.site_tag(i,j),tn.row_tag(i),tn.col_tag(j),'BRA' 
-        if self.subspace=='full':
-            key = {0:'vac_full',1:'occ_a_full',2:'occ_b_full',3:'occ_db_full'}[ci] 
+        if self.spinless:
+            key = {0:('vac',True),1:'occ'}[ci]
         else:
-            key = {0:f'vac_{self.subspace}',1:f'occ_{self.subspace}_{self.subspace}'}[ci]
+            key = {0:('vac',False),1:'occ_a',2:'occ_b',3:'occ_db'}[ci] 
         data = self._2backend(data_map[key].dagger,False)
         return FermionTensor(data=data,inds=inds,tags=tags)
     def tensor_compress_bond(self,T1,T2,absorb='right'):
@@ -345,12 +342,12 @@ def get_parity_cum(fpeps):
     return np.cumsum(np.array(parity[::-1]))
 from ..tensor_2d_vmc_ import AmplitudeFactory as AmplitudeFactory_
 class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
-    def __init__(self,psi,blks=None,subspace='full',flat=True):
+    def __init__(self,psi,blks=None,spinless=False,flat=True):
         super().init_contraction(psi.Lx,psi.Ly)
         psi.reorder(direction='row',inplace=True)
         psi.add_tag('KET')
         self.parity_cum = get_parity_cum(psi)
-        self.subspace = subspace
+        self.spinless = spinless
         self.flat = flat
 
         if blks is None:
@@ -405,12 +402,12 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
 ####################################################################################
 from ..tensor_2d_vmc_ import Hamiltonian as Hamiltonian_
 class Hamiltonian(ContractionEngine,Hamiltonian_):
-    def __init__(self,Lx,Ly,nbatch=1,subspace='full'):
+    def __init__(self,Lx,Ly,nbatch=1,spinless=False):
         super().init_contraction(Lx,Ly)
         self.nbatch = nbatch
-        self.subspace = subspace
+        self.spinless = spinless
     def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[f'{self.key}_{self.subspace}'],False)
+        data = self._2backend(self.data_map[self.key,self.spinless],False)
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
 class Hubbard(Hamiltonian):
@@ -430,10 +427,10 @@ class Hubbard(Hamiltonian):
         config = np.array(config,dtype=int)
         return self.u*len(config[config==3])
     def pair_terms(self,i1,i2):
-        if self.subspace=='full':
-            return self.pair_terms_full(i1,i2)
-        else:
+        if self.spinless:
             return [(i2,i1,1)]
+        else:
+            return self.pair_terms_full(i1,i2)
     def pair_terms_full(self,i1,i2):
         n1,n2 = pn_map[i1],pn_map[i2]
         nsum,ndiff = n1+n2,abs(n1-n2)
@@ -449,11 +446,27 @@ class FDKineticO2(Hubbard):
     def __init__(self,N,L,**kwargs):
         self.eps = L/(N+1e-15) if pbc else L/(N+1.)
 
-        t = 1./(2*self.eps**2)
-        self.l = 2./self.eps**2
+        t = .5 / self.eps**2
+        self.l = 2. / self.eps**2
         super().__init__(t,0.,N,N,**kwargs)
     def compute_local_energy_eigen(self,config):
         return self.l * sum(self.config2pn(config,0,len(config)))
+    def get_h(self):
+        nsite = self.Lx * self.Ly
+        h = np.zeros((nsite,)*2)
+        for i in range(self.Lx):
+            for j in range(self.Ly):
+                ix1 = self.flatten(i,j)
+                h[ix1,ix1] = self.l
+                if i+1<self.Lx or self.pbc:
+                    ix2 = self.flatten((i+1)%self.Lx,j) 
+                    h[ix1,ix2] = -self.t
+                    h[ix2,ix1] = -self.t
+                if j+1<self.Ly or self.pbc:
+                    ix2 = self.flatten(i,(j+1)%self.Ly) 
+                    h[ix1,ix2] = -self.t
+                    h[ix2,ix1] = -self.t
+        return h
 class FDKineticO4(Hamiltonian):
     def __init__(self,N,L,**kwargs):
         super().__init__(N,N,**kwargs)
@@ -508,8 +521,40 @@ class FDKineticO4(Hamiltonian):
         ec = pn[self.flatten(0,0)] + pn[self.flatten(0,self.Ly-1)] \
            + pn[self.flatten(self.Ly-1,0)] + pn[self.flatten(self.Lx-1,self.Ly-1)]
         return self.li * ei + self.lb * eb + self.lc * ec
-def coulomb(config,Lx,Ly,eps,subspace):
-    pn = config2pn(config,0,len(config),subspace)
+    def get_h(self):
+        nsite = self.Lx * self.Ly
+        h = np.zeros((nsite,)*2)
+        for i in range(self.Lx):
+             for j in range(self.Ly):
+                 ix1 = self.flatten(i,j)
+                 if i+1<self.Lx or self.pbc:
+                     ix2 = self.flatten((i+1)%self.Lx,j) 
+                     h[ix1,ix2] = -self.t1
+                     h[ix2,ix1] = -self.t1
+                 if j+1<self.Ly or self.pbc:
+                     ix2 = self.flatten(i,(j+1)%self.Ly) 
+                     h[ix1,ix2] = -self.t1
+                     h[ix2,ix1] = -self.t1
+                 if i+2<self.Lx or self.pbc:
+                     ix2 = self.flatten((i+2)%self.Lx,j) 
+                     h[ix1,ix2] = self.t2
+                     h[ix2,ix1] = self.t2
+                 if j+2<self.Ly or self.pbc:
+                     ix2 = self.flatten(i,(j+2)%self.Ly) 
+                     h[ix1,ix2] = self.t2
+                     h[ix2,ix1] = self.t2
+                 if self.pbc:
+                     h[ix1,ix1] = self.li
+                 else:
+                     if i in (0,self.Lx-1) and j in (0,self.Ly-1):
+                         h[ix1,ix1] = self.lc
+                     elif i in (0,self.Lx-1) or j in (0,self.Ly-1):
+                         h[ix1,ix1] = self.lb
+                     else:
+                         h[ix1,ix1] = self.li
+        return h
+def coulomb(config,Lx,Ly,eps,spinless):
+    pn = config2pn(config,0,len(config),spinless)
     e = 0.
     for ix1 in range(len(config)):
         n1 = pn[ix1]
@@ -527,32 +572,36 @@ def coulomb(config,Lx,Ly,eps,subspace):
 class UEGO2(FDKineticO2):
     def compute_local_energy_eigen(self,config):
         ke = super().compute_local_energy_eigen(config)
-        v = coulomb(config,self.Lx,self.Ly,self.eps,self.subspace)
+        v = coulomb(config,self.Lx,self.Ly,self.eps,self.spinless)
 class UEGO4(FDKineticO4):
     def compute_local_energy_eigen(self,config):
         ke = super().compute_local_energy_eigen(config)
-        v = coulomb(config,self.Lx,self.Ly,self.eps,self.subspace)
+        v = coulomb(config,self.Lx,self.Ly,self.eps,self.spinless)
 class DensityMatrix(Hamiltonian):
-    def __init__(self,Lx,Ly):
+    def __init__(self,Lx,Ly,spinless=False):
         self.Lx,self.Ly = Lx,Ly 
         self.pairs = [] 
         self.data = np.zeros((Lx,Ly))
         self.n = 0.
+        self.spinless = spinless
     def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
         self.n += 1.
+        pn = self.config2pn(config,0,len(config)) 
         for i in range(self.Lx):
             for j in range(self.Ly):
-                self.data[i,j] += pn_map[config[self.flatten(i,j)]]
+                self.data[i,j] += pn[self.flatten(i,j)]
         return 0.,0.,None,None,0. 
+    def _print(self,fname,data):
+        print(data)
 ####################################################################################
 # sampler 
 ####################################################################################
 from ..tensor_2d_vmc_ import ExchangeSampler2 as ExchangeSampler_
 class ExchangeSampler(ExchangeSampler_):
     def new_pair(self,i1,i2):
-        if self.amplitude_factory.subspace=='full':
-            return self.new_pair_full(i1,i2)
-        return i2,i1
+        if self.amplitude_factory.spinless:
+            return i2,i1
+        return self.new_pair_full(i1,i2)
     def new_pair_full(self,i1,i2):
         n = abs(pn_map[i1]-pn_map[i2])
         if n==1:
