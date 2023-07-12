@@ -370,11 +370,11 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
         return (-1)**(np.dot(parity[1:],parity_cum) % 2)
-    def get_constructors(self,fpeps):
+    def get_constructors(self,psi):
         from .block_interface import Constructor
-        constructors = [None] * (fpeps.Lx * fpeps.Ly)
-        for i,j in itertools.product(range(fpeps.Lx),range(fpeps.Ly)):
-            data = fpeps[fpeps.site_tag(i,j)].data
+        constructors = [None] * (self.Lx * self.Ly)
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            data = psi[i,j].data
             bond_infos = [data.get_bond_info(ax,flip=False) \
                           for ax in range(data.ndim)]
             cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=self.flat)

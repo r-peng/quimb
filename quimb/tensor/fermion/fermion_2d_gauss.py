@@ -1,5 +1,5 @@
 import numpy as np
-import itertools,torch
+import itertools,torch,h5py
 import scipy.optimize
 from pyblock3.algebra.fermion_ops import max_entangled_state,gauss
 from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
@@ -129,6 +129,7 @@ class SpinlessGaussianFPEPS1: # for quadratic Hamiltonian only
         self.config = None
         self.nit = 0
         self.terminate = False
+        self.fname = None
     def get_site_map(self,blks):
         self.site_order = []
         for blk in blks:
@@ -308,6 +309,10 @@ class SpinlessGaussianFPEPS1: # for quadratic Hamiltonian only
         dE = self.exact-self.E
         print(f'niter={self.nit},E={self.E},dE={dE},xnorm={np.linalg.norm(self.x)},gnorm={np.linalg.norm(self.g)}') 
         self.nit += 1
+        if self.fname is not None:
+            f = h5py.File(self.fname+'.hdf5','w')
+            f.create_dataset('x',data=self.x)
+            f.close()
         if np.fabs(dE) < self.thresh:
             self.terminate = True
     def run(self,x0=None,method='bfgs',maxiter=100):

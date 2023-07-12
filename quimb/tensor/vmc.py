@@ -124,7 +124,7 @@ class TNVMC: # stochastic sampling
     ):
         # parse ham
         self.ham = ham
-        self.nsite = ham.Lx * ham.Ly
+        self.nsite = ham.nsite
 
         # parse sampler
         self.sampler = sampler

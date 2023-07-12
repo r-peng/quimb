@@ -168,6 +168,7 @@ def get_gate2(j,to_bk=False):
 class ContractionEngine:
     def init_contraction(self,Lx,Ly,phys_dim=2):
         self.Lx,self.Ly = Lx,Ly
+        self.nsite = Lx * Ly
         self.pbc = pbc
         self.deterministic = deterministic
         if self.deterministic:
@@ -508,8 +509,8 @@ class AmplitudeFactory(ContractionEngine):
     def config_sign(self,config=None):
         return 1.
     def get_constructors(self,peps):
-        constructors = [None] * (peps.Lx * peps.Ly)
-        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
+        constructors = [None] * (self.Lx * self.Ly)
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
             data = peps[peps.site_tag(i,j)].data
             #ix = flatten(i,j,peps.Ly)
             ix = self.site_map[i,j]
@@ -684,12 +685,12 @@ class Hamiltonian(ContractionEngine):
         return ex,cx,plq
     def batch_hessian_from_plq(self,batch_idx,config,amplitude_factory): # only used for Hessian
         self.backend = 'torch'
-        peps = amplitude_factory.psi.copy()
+        psi = amplitude_factory.psi.copy()
         for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            peps[i,j].modify(data=self._2backend(peps[i,j].data,True))
-        ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config,peps)
+            psi[i,j].modify(data=self._2backend(psi[i,j].data,True))
+        ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config,psi)
 
-        _,Hvx = self.parse_hessian(ex,peps,amplitude_factory)
+        _,Hvx = self.parse_hessian(ex,psi,amplitude_factory)
         ex = sum([self._2numpy(eij)/cx[where] for where,eij in ex.items()])
         vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
         return ex,Hvx,cx,vx
@@ -927,14 +928,14 @@ class Hamiltonian(ContractionEngine):
                 return self.compute_local_energy_hessian_from_plq(config,amplitude_factory)
             else:
                 return self.compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=compute_v)
-    def parse_hessian(self,ex,peps,amplitude_factory):
+    def parse_hessian(self,ex,psi,amplitude_factory):
         if len(ex)==0:
             return 0.,0.
         ex_num = sum(ex.values())
         ex_num.backward()
         Hvx = dict()
-        for i,j in itertools.product(range(peps.Lx),range(peps.Ly)):
-            Hvx[i,j] = self._2numpy(self.tsr_grad(peps[i,j].data))
+        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+            Hvx[i,j] = self._2numpy(self.tsr_grad(psi[i,j].data))
         return self._2numpy(ex_num),amplitude_factory.dict2vec(Hvx)  
     def contraction_error(self,cx):
         cx = np.array(list(cx.values()))

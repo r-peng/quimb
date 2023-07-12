@@ -141,11 +141,11 @@ class Hamiltonian(Hamiltonian_):
 
             for ix in (spin,2):
                 Hvx = dict()
-                peps = wfn[ix]
+                psi = wfn[ix]
                 _2numpy = self.ham[ix]._2numpy
                 tsr_grad = self.ham[ix].tsr_grad
                 for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-                    Hvx[i,j] = _2numpy(tsr_grad(peps[i,j].data))
+                    Hvx[i,j] = _2numpy(tsr_grad(psi[i,j].data))
                 Hvx = amplitude_factory.psi[ix].dict2vec(Hvx)  
                 if ix == 2:
                     Hvx_boson[spin,:] = Hvx
@@ -178,11 +178,11 @@ class Hamiltonian(Hamiltonian_):
         ex,cx,plq,wfn = [None] * 3,[None] * 3,[None] * 3,[None] * 3
         for ix in range(3):
             self.ham[ix].backend = 'torch'
-            peps = amplitude_factory.psi[ix].psi.copy()
+            psi = amplitude_factory.psi[ix].psi.copy()
             for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-                peps[i,j].modify(data=self.ham[ix]._2backend(peps[i,j].data,True))
-            wfn[ix] = peps
-            ex[ix],cx[ix],plq[ix] = self.ham[ix].batch_pair_energies_from_plq(batch_idx,configs[ix],peps)
+                psi[i,j].modify(data=self.ham[ix]._2backend(psi[i,j].data,True))
+            wfn[ix] = psi
+            ex[ix],cx[ix],plq[ix] = self.ham[ix].batch_pair_energies_from_plq(batch_idx,configs[ix],psi)
         vx = [self.ham[ix].get_grad_dict_from_plq(plq[ix],cx[ix],backend=self.ham[ix].backend) for ix in range(3)]
 
         ex_num = self.parse_energy_numerator(ex)
