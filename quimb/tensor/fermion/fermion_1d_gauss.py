@@ -46,7 +46,6 @@ class SpinlessGaussianFPEPS: # for quadratic Hamiltonian only
             self.nparam += (size + self.P)**2
         assert self.Mtot == start
         print('nparam=',self.nparam)
-        print(self.site_map)
         if self.fix_bond:
             return 
         self.bond_order = []
@@ -334,6 +333,7 @@ class SpinlessGaussianFPEPS: # for quadratic Hamiltonian only
 def compute_local_expectation(fpeps,terms):
     norm,_,bra = fpeps.make_norm(return_all=True)
     n = norm.contract()
+    print('norm=',n)
     e = 0.
     for where,data in terms.items():
         site_ix = [f'k{i}' for i in where]
@@ -348,21 +348,6 @@ def compute_local_expectation(fpeps,terms):
         ei.add_tensor(TG)
         e += ei.contract()/n
     return e
-#def get_gutzwiller(L,bdim=1,eps=0.,g=1.,normalize=True):
-#    arrays = []
-#    for i in range(L):
-#        shape = [bdim] * 2 
-#        if i==0 or i==L-1:
-#            shape.pop()
-#        shape = tuple(shape) + (4,)
-#
-#        data = np.ones(shape)
-#        data += eps * np.random.rand(*shape)
-#        data[...,3] = g * np.random.rand()
-#        if normalize:
-#            data /= np.linalg.norm(data)
-#        arrays.append(data)
-#    return PEPS([arrays])
 class RestrictedGaussianFPEPS(SpinlessGaussianFPEPS):
     def set_ham(self,h1,eri,exact,thresh=1e-5):
         assert h1.shape[0] == self.P * self.nsite # check size 

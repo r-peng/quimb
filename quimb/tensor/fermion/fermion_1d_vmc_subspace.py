@@ -27,26 +27,25 @@ def set_options(symmetry='u1',flat=True,pbc=False):
     from .fermion_1d_vmc import set_options as set_options2
     return set_options2(symmetry=symmetry,flat=flat,pbc=pbc)
 from ..tensor_1d import MatrixProductState 
-def get_gutzwiller(Lx,Ly,bdim=1,eps=0.,g=1.,normalize=True):
+def get_gutzwiller(L,coeffs,bdim=1,eps=0.,normalize=True,pbc=False):
+    if coeffs.shape==(4,):
+        coeffs = np.stack([coeffs] * L,axis=1)
     arrays = []
-    for i in range(Lx):
-        row = []
-        for j in range(Ly):
-            shape = [bdim] * 4 
-            if i==0 or i==Lx-1:
-                shape.pop()
-            if j==0 or j==Ly-1:
-                shape.pop()
-            shape = tuple(shape) + (4,)
+    for i in range(L):
+        shape = [bdim] * 2
+        if not pbc and (i==0 or i==L-1):
+            shape.pop()
+        shape = tuple(shape) + (4,)
 
-            data = np.ones(shape)
-            data += eps * np.random.rand(*shape)
-            data[...,3] = g * np.random.rand()
-            if normalize:
-                data /= np.linalg.norm(data)
-            row.append(data)
-        arrays.append(row)
-    return PEPS(arrays)
+        data = np.zeros(shape)
+        for ix in range(4):
+            data[(0,)*(len(shape)-1)+(ix,)] = coeffs[ix,i] 
+        data += eps * np.random.rand(*shape)
+        if normalize:
+            data /= np.linalg.norm(data)
+        arrays.append(data)
+        print(data)
+    return MatrixProductState(arrays)
 
 from ..tensor_1d_vmc import AmplitudeFactory as BosonAmplitudeFactory
 from .fermion_1d_vmc import AmplitudeFactory as FermionAmplitudeFactory
@@ -223,13 +222,13 @@ class Hamiltonian(Hamiltonian_):
         ex = np.sum(self.parse_energy_from_plq(ex,cx))
         eu = self.compute_local_energy_eigen(config)
         ex += eu
-        #print(config,eu)
 
         if not compute_v:
             cx,err = self.contraction_error(cx)
             return cx,ex,None,None,err 
 
-        vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(plq[ix],cx[ix]) for ix in range(3)])
+        #vx = np.concatenate([amplitude_factory.psi[ix].get_grad_from_plq(plq[ix],cx[ix]) for ix in range(3)])
+        vx = np.concatenate([self.ham[ix].amplitude_gradient_deterministic(configs[ix],amplitude_factory.psi[ix]) for ix in range(3)])
         cx,err = self.contraction_error(cx)
         return cx,ex,vx,None,err
 class BosonHamiltonian(Hamiltonian_):
@@ -286,6 +285,7 @@ class HubbardBoson(BosonHamiltonian):
     def __init__(self,L,**kwargs):
         super().__init__(L,phys_dim=4)
         self.pairs = self.pairs_nn()
+        self.plq_sz = 2,
 from .fermion_1d_vmc import Hubbard as HubbardFermion
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,L,**kwargs):
@@ -332,131 +332,71 @@ class Hubbard(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-#from .fermion_1d_vmc_ import ExchangeSampler as ExchangeSampler_
-#class ExchangeSampler(ExchangeSampler_):
-#    def new_pair(self,i1,i2):
-#        return super().new_pair_full(i1,i2)
-#    def update_pair(self,i,j,x_bsz,y_bsz,cols,tn):
-#        sites,config_sites,config_new = self._new_pair(i,j,x_bsz,y_bsz)
-#        if config_sites is None:
-#            return tn
-#
-#        configs = [None,None,config_sites]
-#        configs[0],configs[1] = config_to_ab(config_sites)
-#        py = 1.
-#        for ix in range(3):
-#            psi = self.amplitude_factory.psi[ix]
-#            cols_ix = psi.replace_sites(cols[ix],sites,configs[ix]) 
-#            py_ix = psi.safe_contract(cols_ix)
-#            if py_ix is None:
-#                return tn 
-#            py *= py_ix ** 2
-#
-#        try:
-#            acceptance = py / self.px
-#        except ZeroDivisionError:
-#            acceptance = 1. if py > self.px else 0.
-#        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-#            self.px = py
-#            self.config = config_new
-#            for ix in range(3):
-#                psi = self.amplitude_factory.psi[ix]
-#                tn[ix] = psi.replace_sites(tn[ix],sites,configs[ix])
-#        return tn
-#    def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
-#        renvs = [None] * 3
-#        for ix in range(3):
-#            try:
-#                tn[ix].reorder('col',inplace=True)
-#            except (NotImplementedError,AttributeError):
-#                pass
-#            renvs[ix] = self.amplitude_factory.psi[ix].get_all_renvs(tn[ix].copy(),jmin=y_bsz)
-#
-#        first_col = [tn[ix].col_tag(0) for ix in range(3)]
-#        for j in range(self.Ly - y_bsz + 1): 
-#            cols = [self._get_cols_forward(first_col[ix],j,y_bsz,tn[ix],renvs[ix]) for ix in range(3)]
-#            tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
-#            for ix in range(3):
-#                tn[ix] ^= first_col[ix],tn[ix].col_tag(j) 
-#    def sweep_col_backward(self,i,tn,x_bsz,y_bsz):
-#        lenvs = [None] * 3
-#        for ix in range(3):
-#            try:
-#                tn[ix].reorder('col',inplace=True)
-#            except (NotImplementedError,AttributeError):
-#                pass
-#            lenvs[ix] = self.amplitude_factory.psi[ix].get_all_lenvs(tn[ix].copy(),jmax=self.Ly-1-y_bsz)
-#
-#        last_col = [tn[ix].col_tag(self.Ly-1) for ix in range(3)]
-#        for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
-#            cols = [self._get_cols_backward(last_col[ix],j,y_bsz,tn[ix],lenvs[ix]) for ix in range(3)] 
-#            tn = self.update_pair(i,j,x_bsz,y_bsz,cols,tn) 
-#            for ix in range(3):
-#                tn[ix] ^= tn[ix].col_tag(j+y_bsz-1),last_col[ix]
-#    def sweep_row_forward(self,x_bsz,y_bsz):
-#        config = parse_config(self.config)
-#        for ix in range(3): 
-#            psi = self.amplitude_factory.psi[ix]
-#            psi.cache_bot = dict()
-#            psi.get_all_top_envs(config[ix],imin=x_bsz)
-#
-#        #cdir = self.rng.choice([-1,1]) 
-#        cdir = 1
-#        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-#
-#        imax = self.Lx-x_bsz
-#        for i in range(imax+1):
-#            tn = [None] * 3
-#            for ix in range(3):
-#                psi = self.amplitude_factory.psi[ix]
-#                tn[ix] = psi.build_3row_tn(config[ix],i,x_bsz)
-#            sweep_col(i,tn,x_bsz,y_bsz)
-#            config = parse_config(self.config)
-#
-#            for ix in range(3):
-#                psi = self.amplitude_factory.psi[ix]
-#                for inew in range(i,i+x_bsz):
-#                    row = psi.get_mid_env(inew,config[ix])
-#                    env_prev = None if inew==0 else psi.cache_bot[config[ix][:inew*self.Ly]] 
-#                    psi.get_bot_env(inew,row,env_prev,config[ix])
-#    def sweep_row_backward(self,x_bsz,y_bsz):
-#        config = parse_config(self.config)
-#        for ix in range(3):
-#            psi = self.amplitude_factory.psi[ix]
-#            psi.cache_top = dict()
-#            psi.get_all_bot_envs(config[ix],imax=self.Lx-1-x_bsz)
-#
-#        #cdir = self.rng.choice([-1,1]) 
-#        cdir = 1
-#        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-#
-#        imax = self.Lx-x_bsz
-#        for i in range(imax,-1,-1):
-#            tn = [None] * 3
-#            for ix in range(3):
-#                psi = self.amplitude_factory.psi[ix]
-#                tn[ix] = psi.build_3row_tn(config[ix],i,x_bsz)
-#            sweep_col(i,tn,x_bsz,y_bsz)
-#            config = parse_config(self.config)
-#
-#            for ix in range(3):
-#                psi = self.amplitude_factory.psi[ix]
-#                for inew in range(i+x_bsz-1,i-1,-1):
-#                    row = psi.get_mid_env(inew,config[ix])
-#                    env_prev = None if inew==self.Lx-1 else psi.cache_top[config[ix][(inew+1)*self.Ly:]] 
-#                    psi.get_top_env(inew,row,env_prev,config[ix])
-#    def update_cache(self,amplitude_factory,config):
-#        configs = parse_config(config)
-#        for ix in range(3):
-#            super().update_cache(amplitude_factory.psi[ix],configs[ix])
-#    def _prob_deterministic(self,config_old,config_new,amplitude_factory,site1,site2):
-#        config_old_ = parse_config(config_old)
-#        config_new_ = parse_config(config_new)
-#        py = 1.
-#        for ix in range(3):
-#            py_ = super()._prob_deterministic(config_old_[ix],config_new_[ix],amplitude_factory.psi[ix],
-#                                           site1,site2)
-#            if py_ is None:
-#                return None
-#            py *= py_
-#        return py
+from .fermion_1d_vmc import ExchangeSampler as ExchangeSampler_
+class ExchangeSampler(ExchangeSampler_):
+    def new_pair(self,i1,i2):
+        return super().new_pair_full(i1,i2)
+    def update_pair(self,i,bsz,cols,tn):
+        sites,config_sites,config_new = self._new_pair(i,bsz)
+        if config_sites is None:
+            return tn
+
+        configs = [None,None,config_sites]
+        configs[0],configs[1] = config_to_ab(config_sites)
+        py = 1.
+        for ix in range(3):
+            psi = self.amplitude_factory.psi[ix]
+            cols_ix = psi.replace_sites(cols[ix],sites,configs[ix]) 
+            py_ix = psi.safe_contract(cols_ix)
+            if py_ix is None:
+                return tn 
+            py *= py_ix ** 2
+
+        try:
+            acceptance = py / self.px
+        except ZeroDivisionError:
+            acceptance = 1. if py > self.px else 0.
+        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
+            self.px = py
+            self.config = config_new
+            for ix in range(3):
+                psi = self.amplitude_factory.psi[ix]
+                tn[ix] = psi.replace_sites(tn[ix],sites,configs[ix])
+        return tn
+    def sweep_col_forward(self,tn,bsz):
+        renvs = [None] * 3
+        for ix in range(3):
+            try:
+                tn[ix].reorder(inplace=True)
+            except (NotImplementedError,AttributeError):
+                pass
+            renvs[ix] = self.amplitude_factory.psi[ix].get_all_renvs(tn[ix].copy(),jmin=bsz)
+
+        first_col = [tn[ix].site_tag(0) for ix in range(3)]
+        for j in range(self.L - bsz + 1): 
+            cols = [self._get_cols_forward(first_col[ix],j,bsz,tn[ix],renvs[ix]) for ix in range(3)]
+            tn = self.update_pair(j,bsz,cols,tn) 
+            for ix in range(3):
+                tn[ix] ^= first_col[ix],tn[ix].site_tag(j) 
+    def sweep_col_backward(self,tn,bsz):
+        lenvs = [None] * 3
+        for ix in range(3):
+            try:
+                tn[ix].reorder(inplace=True)
+            except (NotImplementedError,AttributeError):
+                pass
+            lenvs[ix] = self.amplitude_factory.psi[ix].get_all_lenvs(tn[ix].copy(),jmax=self.L-1-bsz)
+
+        last_col = [tn[ix].site_tag(self.L-1) for ix in range(3)]
+        for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
+            cols = [self._get_cols_backward(last_col[ix],j,bsz,tn[ix],lenvs[ix]) for ix in range(3)] 
+            tn = self.update_pair(j,bsz,cols,tn) 
+            for ix in range(3):
+                tn[ix] ^= tn[ix].site_tag(j+bsz-1),last_col[ix]
+    def sample(self):
+        config = parse_config(self.config)
+        cdir = self.rng.choice([-1,1]) 
+        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+        tn = [self.amplitude_factory.psi[ix].get_mid_env(config[ix]) for ix in range(3)]
+        sweep_col(tn,2)
+        return self.config,self.px

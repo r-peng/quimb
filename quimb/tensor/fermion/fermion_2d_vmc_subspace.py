@@ -22,12 +22,15 @@ from pyblock3.algebra.ad import core
 core.ENABLE_FUSED_IMPLS = False
 
 def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
-    from ..tensor_2d_vmc_ import set_options as set_options1
+    from ..tensor_2d_vmc import set_options as set_options1
     set_options1(pbc=pbc,deterministic=deterministic,**compress_opts)
-    from .fermion_2d_vmc_ import set_options as set_options2
+    from .fermion_2d_vmc import set_options as set_options2
     return set_options2(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic,**compress_opts)
 from ..tensor_2d import PEPS
-def get_gutzwiller(Lx,Ly,bdim=1,eps=0.,g=1.,normalize=True):
+def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=True):
+    if isinstance(coeffs,np.ndarray):
+        assert len(coeffs)==4
+        coeffs = {(i,j):coeffs for i,j in itertools.product(range(Lx),range(Ly))}
     arrays = []
     for i in range(Lx):
         row = []
@@ -40,16 +43,17 @@ def get_gutzwiller(Lx,Ly,bdim=1,eps=0.,g=1.,normalize=True):
             shape = tuple(shape) + (4,)
 
             data = np.ones(shape)
+            for ix in range(4):
+                data[(0,)*(len(shape)-1)+(ix,)] = coeffs[i,j][ix] 
             data += eps * np.random.rand(*shape)
-            data[...,3] = g * np.random.rand()
             if normalize:
                 data /= np.linalg.norm(data)
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
 
-from ..tensor_2d_vmc_ import AmplitudeFactory as BosonAmplitudeFactory
-from .fermion_2d_vmc_ import AmplitudeFactory as FermionAmplitudeFactory
+from ..tensor_2d_vmc import AmplitudeFactory as BosonAmplitudeFactory
+from .fermion_2d_vmc import AmplitudeFactory as FermionAmplitudeFactory
 def config_to_ab(config):
     config_a = [None] * len(config)
     config_b = [None] * len(config)
@@ -105,7 +109,7 @@ class AmplitudeFactory:
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc_ import Hamiltonian as Hamiltonian_
+from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def parse_energy_from_plq(self,ex_num,cx):
         ex = np.zeros(2)
@@ -464,10 +468,11 @@ class HubbardBoson(BosonHamiltonian):
             self.batch_deterministic()
         else:
             self.batch_plq_nn()
-from .fermion_2d_vmc_ import Hubbard as HubbardFermion
+from .fermion_2d_vmc import Hubbard as HubbardFermion
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,**kwargs):
         self.Lx,self.Ly = Lx,Ly
+        self.nsite = Lx * Ly
         self.t,self.u = t,u
         self.ham = [None] * 3 
         self.ham[0] = HubbardFermion(t,0.,Lx,Ly,spinless=True,**kwargs)
@@ -510,7 +515,7 @@ class U(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-from .fermion_2d_vmc_ import ExchangeSampler as ExchangeSampler_
+from .fermion_2d_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ExchangeSampler_):
     def new_pair(self,i1,i2):
         return super().new_pair_full(i1,i2)
@@ -578,8 +583,7 @@ class ExchangeSampler(ExchangeSampler_):
             psi.cache_bot = dict()
             psi.get_all_top_envs(config[ix],imin=x_bsz)
 
-        #cdir = self.rng.choice([-1,1]) 
-        cdir = 1
+        cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz
@@ -604,8 +608,7 @@ class ExchangeSampler(ExchangeSampler_):
             psi.cache_top = dict()
             psi.get_all_bot_envs(config[ix],imax=self.Lx-1-x_bsz)
 
-        #cdir = self.rng.choice([-1,1]) 
-        cdir = 1
+        cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz

@@ -219,6 +219,7 @@ def config2pn(config,start,stop,spinless):
 class ContractionEngine(ContractionEngine_): 
     def init_contraction(self,L):
         self.L = L
+        self.nsite = L
         self.pbc = pbc
         self.data_map = data_map
     def _2backend(self,data,requires_grad):
@@ -294,13 +295,6 @@ class AmplitudeFactory(ContractionEngine,AmplitudeFactory_):
     def vec2tensor(self,x,ix):
         cons,dq = self.constructors[ix][0]
         return cons.vector_to_tensor(x,dq)
-    def update(self,x,fname=None,root=0):
-        psi = self.vec2psi(x,inplace=True)
-        self.set_psi(psi) 
-        if RANK==root:
-            if fname is not None: # save psi to disc
-                write_ftn_to_disc(psi,fname,provided_filename=True)
-        return psi
 ####################################################################################
 # ham class 
 ####################################################################################
@@ -321,6 +315,7 @@ class Hubbard(Hamiltonian):
         self.key = 'h1'
 
         self.pairs = self.pairs_nn()
+        self.plq_sz = 2,
     def pair_coeff(self,site1,site2):
         return -self.t
     def compute_local_energy_eigen(self,config):
@@ -496,26 +491,30 @@ class Hubbard(Hamiltonian):
 #####################################################################################
 ## sampler 
 #####################################################################################
-#from ..tensor_2d_vmc_ import ExchangeSampler2 as ExchangeSampler_
-#class ExchangeSampler(ExchangeSampler_):
-#    def new_pair(self,i1,i2):
-#        if self.amplitude_factory.spinless:
-#            return i2,i1
-#        return self.new_pair_full(i1,i2)
-#    def new_pair_full(self,i1,i2):
-#        n = abs(pn_map[i1]-pn_map[i2])
-#        if n==1:
-#            i1_new,i2_new = i2,i1
-#        else:
-#            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
-#            i1_new,i2_new = self.rng.choice(choices)
-#        return i1_new,i2_new 
+from ..tensor_1d_vmc import ExchangeSampler2 as ExchangeSampler_
+class ExchangeSampler(ExchangeSampler_):
+    def new_pair(self,i1,i2):
+        if self.amplitude_factory.spinless:
+            return i2,i1
+        return self.new_pair_full(i1,i2)
+    def new_pair_full(self,i1,i2):
+        n = abs(pn_map[i1]-pn_map[i2])
+        if n==1:
+            i1_new,i2_new = i2,i1
+        else:
+            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
+            i1_new,i2_new = self.rng.choice(choices)
+        return i1_new,i2_new 
 from ..tensor_1d_vmc import DenseSampler as DenseSampler_
 class DenseSampler(DenseSampler_):
-    def __init__(self,L,nelec,**kwargs):
+    def __init__(self,L,nelec,spinless=False,**kwargs):
         self.nelec = nelec
-        super().__init__(L,None,**kwargs)
+        self.spinless = spinless
+        nspin = (nelec,) if spinless else None
+        super().__init__(L,nspin,**kwargs)
     def get_all_configs(self):
+        if self.spinless:
+            return super().get_all_configs()
         return self.get_all_configs_u11()
     def get_all_configs_u11(self):
         assert isinstance(self.nelec,tuple)
