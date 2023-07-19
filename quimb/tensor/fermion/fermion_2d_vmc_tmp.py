@@ -25,10 +25,9 @@ from pyblock3.algebra.fermion_ops import vaccum,creation,H1
 
 import sys
 this = sys.modules[__name__]
-def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress_opts):
-    this.pbc = pbc
-    this.deterministic = True if pbc else deterministic
-    this.compress_opts = compress_opts
+def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False):
+    this._PBC = pbc
+    this._DETERMINISTIC = deterministic
 
     this.data_map = dict()
     # spinless
@@ -59,7 +58,6 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False,**compress
     this.data_map['occ_db'] = occ_db
     this.data_map['h1',False] = H1(symmetry=symmetry,flat=flat,spinless=False).transpose((0,2,1,3))
     return this.data_map
-pn_map = [0,1,1,2]
 config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
 from ..tensor_2d_vmc import flatten,flat2site 
 ####################################################################################
@@ -129,11 +127,6 @@ def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,spinless=False):
 # amplitude fxns 
 ####################################################################################
 from ..tensor_2d_vmc import ContractionEngine as ContractionEngine_
-def config2pn(config,start,stop,spinless):
-    if spinless:
-        return config[start:stop]
-    else:
-        return [pn_map[ci] for ci in config[start:stop]]
 class ContractionEngine(ContractionEngine_): 
     def init_contraction(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly

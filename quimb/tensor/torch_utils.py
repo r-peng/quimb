@@ -107,10 +107,13 @@ class SVD(torch.autograd.Function):
     def forward(self, A):
         U,S,Vh = SVDforward(A)
         self.save_for_backward(U, S, Vh)
+        #print(U.size(),S.size(),Vh.size(),S)
+        #print(S)
         return U, S, Vh
     @staticmethod
     def backward(self, dU, dS, dVh):
         U, S, Vh = self.saved_tensors
+        #print(dS,S,U)
         return SVDbackward(dU,dS,dVh,U,S,Vh)
 def test_svd():
     M, N = 50, 20

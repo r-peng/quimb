@@ -2,7 +2,6 @@ import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
 from .tfqmr import tfqmr
-#from memory_profiler import profile
 
 from quimb.utils import progbar as Progbar
 from mpi4py import MPI
@@ -972,3 +971,257 @@ class TNVMC: # stochastic sampling
             Hvsum = self.Hv.sum(axis=0)
             COMM.send([e,vsum,evsum,Hvsum],dest=0)
         COMM.Barrier()
+##############################################################################################
+# sampler
+#############################################################################################
+class SpinDenseSampler:
+    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-14):
+        self.nsite = nsite 
+        self.nspin = nspin
+
+        self.all_configs = self.get_all_configs()
+        self.ntotal = len(self.all_configs)
+        if RANK==0:
+            print('ntotal=',self.ntotal)
+        self.flat_indexes = list(range(self.ntotal))
+        self.p = None
+
+        batchsize,remain = self.ntotal//SIZE,self.ntotal%SIZE
+        self.count = np.array([batchsize]*SIZE)
+        if remain > 0:
+            self.count[-remain:] += 1
+        self.disp = np.concatenate([np.array([0]),np.cumsum(self.count[:-1])])
+        self.start = self.disp[RANK]
+        self.stop = self.start + self.count[RANK]
+
+        self.rng = np.random.default_rng(seed)
+        self.burn_in = 0
+        self.dense = True
+        self.exact = exact 
+        self.amplitude_factory = None
+        self.thresh = thresh
+    def preprocess(self):
+        self.compute_dense_prob()
+    def compute_dense_prob(self):
+        t0 = time.time()
+        ptotal = np.zeros(self.ntotal)
+        start,stop = self.start,self.stop
+        configs = self.all_configs[start:stop]
+
+        plocal = [] 
+        for config in configs:
+            plocal.append(self.amplitude_factory.prob(config))
+        plocal = np.array(plocal)
+         
+        COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
+        nonzeros = []
+        for ix,px in enumerate(ptotal):
+            if px > self.thresh:
+                nonzeros.append(ix) 
+        n = np.sum(ptotal)
+        ptotal /= n 
+        self.p = ptotal
+        if RANK==SIZE-1:
+            print('\tdense amplitude time=',time.time()-t0)
+
+        ntotal = len(nonzeros)
+        batchsize,remain = ntotal//(SIZE-1),ntotal%(SIZE-1)
+        L = SIZE-1-remain
+        if RANK-1<L:
+            start = (RANK-1)*batchsize
+            stop = start+batchsize
+        else:
+            start = (batchsize+1)*(RANK-1)-L
+            stop = start+batchsize+1
+        self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
+    def get_all_configs(self):
+        assert isinstance(self.nspin,tuple)
+        sites = list(range(self.nsite))
+        occs = list(itertools.combinations(sites,self.nspin[0]))
+        configs = [None] * len(occs) 
+        for i,occ in enumerate(occs):
+            config = [0] * (self.nsite) 
+            for ix in occ:
+                config[ix] = 1
+            configs[i] = tuple(config)
+        return configs
+    def sample(self):
+        flat_idx = self.rng.choice(self.flat_indexes,p=self.p)
+        config = self.all_configs[flat_idx]
+        omega = self.p[flat_idx]
+        return config,omega
+class FermionDenseSampler(SpinDenseSampler):
+    def __init__(self,nsite,nelec,spinless=False,**kwargs):
+        self.nelec = nelec
+        self.spinless = spinless
+        nspin = (nelec,) if spinless else None
+        super().__init__(nsite,nspin,**kwargs)
+    def get_all_configs(self):
+        if self.spinless:
+            return super().get_all_configs()
+        return self.get_all_configs_u11()
+    def get_all_configs_u11(self):
+        assert isinstance(self.nelec,tuple)
+        sites = list(range(self.nsite))
+        ls = [None] * 2
+        for spin in (0,1):
+            occs = list(itertools.combinations(sites,self.nelec[spin]))
+            configs = [None] * len(occs) 
+            for i,occ in enumerate(occs):
+                config = [0] * self.nsite 
+                for ix in occ:
+                    config[ix] = 1
+                configs[i] = tuple(config)
+            ls[spin] = configs
+
+        na,nb = len(ls[0]),len(ls[1])
+        configs = [None] * (na*nb)
+        for ixa,configa in enumerate(ls[0]):
+            for ixb,configb in enumerate(ls[1]):
+                config = [config_map[configa[i],configb[i]] \
+                          for i in range(self.nsite)]
+                ix = ixa * nb + ixb
+                configs[ix] = tuple(config)
+        return configs
+    def get_all_configs_u1(self):
+        if isinstance(self.nelec,tuple):
+            self.nelec = sum(self.nelec)
+        sites = list(range(self.nsite*2))
+        occs = list(itertools.combinations(sites,self.nelec))
+        configs = [None] * len(occs) 
+        for i,occ in enumerate(occs):
+            config = [0] * (self.nsite*2) 
+            for ix in occ:
+                config[ix] = 1
+            configs[i] = tuple(config)
+
+        for ix in range(len(configs)):
+            config = configs[ix]
+            configa,configb = config[:self.nsite],config[self.nsite:]
+            config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
+            configs[ix] = tuple(config)
+        return configs
+#####################################################################################
+# READ/WRITE FTN FUNCS
+#####################################################################################
+import pickle,uuid
+from .fermion.fermion_core import FermionTensor,FermionTensorNetwork
+def scale_wfn(psi,scale):
+    for tid in psi.tensor_map:
+        tsr = psi.tensor_map[tid]
+        tsr.modify(data=tsr.data*scale)
+    return psi
+def load_tn_from_disc(fname, delete_file=False):
+    if type(fname) != str:
+        data = fname
+    else:
+        with open(fname,'rb') as f:
+            data = pickle.load(f)
+    return data
+def write_tn_to_disc(tn, fname, provided_filename=False):
+    with open(fname, 'wb') as f:
+        pickle.dump(tn, f)
+    return fname
+def load_ftn_from_disc(fname, delete_file=False):
+
+    # Get the data
+    if type(fname) != str:
+        data = fname
+    else:
+        # Open up the file
+        with open(fname, 'rb') as f:
+            data = pickle.load(f)
+
+    # Set up a dummy fermionic tensor network
+    tn = FermionTensorNetwork([])
+
+    # Put the tensors into the ftn
+    tensors = [None,] * data['ntensors']
+    for i in range(data['ntensors']):
+
+        # Get the tensor
+        ten_info = data['tensors'][i]
+        ten = ten_info['tensor']
+        ten = FermionTensor(ten.data, inds=ten.inds, tags=ten.tags)
+
+        # Get/set tensor info
+        tid, site = ten_info['fermion_info']
+        ten.fermion_owner = None
+        ten._avoid_phase = False
+
+        # Add the required phase
+        ten.phase = ten_info['phase']
+
+        # Add to tensor list
+        tensors[site] = (tid, ten)
+
+    # Add tensors to the tn
+    for (tid, ten) in tensors:
+        tn.add_tensor(ten, tid=tid, virtual=True)
+
+    # Get addition attributes needed
+    tn_info = data['tn_info']
+
+    # Set all attributes in the ftn
+    extra_props = dict()
+    for props in tn_info:
+        extra_props[props[1:]] = tn_info[props]
+
+    # Convert it to the correct type of fermionic tensor network
+    tn = tn.view_as_(data['class'], **extra_props)
+
+    # Remove file (if desired)
+    if delete_file:
+        delete_ftn_from_disc(fname)
+
+    # Return resulting tn
+    return tn
+def rand_fname():
+    return str(uuid.uuid4())
+def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
+
+    # Create a generic dictionary to hold all information
+    data = dict()
+
+    # Save which type of tn this is
+    data['class'] = type(tn)
+
+    # Add information relevant to the tensors
+    data['tn_info'] = dict()
+    for e in tn._EXTRA_PROPS:
+        data['tn_info'][e] = getattr(tn, e)
+
+    # Add the tensors themselves
+    data['tensors'] = []
+    ntensors = 0
+    for ten in tn.tensors:
+        ten_info = dict()
+        ten_info['fermion_info'] = ten.get_fermion_info()
+        ten_info['phase'] = ten.phase
+        ten_info['tensor'] = ten
+        data['tensors'].append(ten_info)
+        ntensors += 1
+    data['ntensors'] = ntensors
+
+    # If tmpdir is None, then return the dictionary
+    if tmpdir is None:
+        return data
+
+    # Write fermionic tensor network to disc
+    else:
+        # Create a temporary file
+        if provided_filename:
+            fname = tmpdir
+            print('saving to ', fname)
+        else:
+            if tmpdir[-1] != '/': 
+                tmpdir = tmpdir + '/'
+            fname = tmpdir + rand_fname()
+
+        # Write to a file
+        with open(fname, 'wb') as f:
+            pickle.dump(data, f)
+
+        # Return the filename
+        return fname
+

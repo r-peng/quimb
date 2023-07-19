@@ -1,13 +1,7 @@
-import time,scipy,functools,h5py
+import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
 from .tfqmr import tfqmr
-
-#from memory_profiler import profile
-from pympler.classtracker import ClassTracker
-from pympler import muppy,summary
-import psutil,gc
-t0 = time.time()
 
 from quimb.utils import progbar as Progbar
 from mpi4py import MPI
@@ -19,16 +13,29 @@ DISCARD = 1e3
 CG_TOL = 1e-4
 MAXITER = 100
 #MAXITER = 2
-def _fn(psi):
-    if psi is None:
-        return
-    for tid in psi.tensor_map:
-        tsr = psi.tensor_map[tid]
-        assert len(tsr._owners)==1
 ##################################################################################################
 # VMC utils
 ##################################################################################################
-def _rgn_block_solve(H,E,S,g,cond):
+def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
+    sh = len(g)
+    # hessian 
+    hess = H - E * S
+    R = S + eta * np.eye(sh)
+
+    wmin = -1. + 0.j
+    eps = eps0 * 2.
+    while wmin.real < 0.:
+        # smallest eigenvalue
+        eps /= 2.
+        w = np.linalg.eigvals(hess + R/eps)
+        idx = np.argmin(w.real)
+        wmin = w[idx]
+    # solve
+    deltas = np.linalg.solve(hess + R/eps,g)
+    # compute model energy
+    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
+    return deltas,dE,wmin,eps
+def _newton_block_solve(H,E,S,g,cond):
     # hessian 
     hess = H - E * S
     # smallest eigenvalue
@@ -39,7 +46,7 @@ def _rgn_block_solve(H,E,S,g,cond):
     deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
-    return wmin,deltas,dE
+    return deltas,dE,wmin
 def _lin_block_solve(H,E,S,g,Hvmean,vmean,cond):
     Hi0 = g
     H0j = Hvmean - E * vmean
@@ -116,7 +123,7 @@ class TNVMC: # stochastic sampling
     ):
         # parse ham
         self.ham = ham
-        self.nsite = ham.Lx * ham.Ly
+        self.nsite = ham.model.nsite
 
         # parse sampler
         self.sampler = sampler
@@ -141,23 +148,15 @@ class TNVMC: # stochastic sampling
             solver = kwargs.get('solver','lgmres')
             self.solver = {'lgmres':spla.lgmres,
                            'tfqmr':tfqmr}[solver] 
+            self.pure_newton = kwargs.get('pure_newton',True)
+ 
         if self.optimizer=='lin':
-            #self.xi = None
             self.xi = kwargs.get('xi',0.5)
-            # only used for iterative full Hessian
-            #self.solver = kwargs.get('solver','davidson')
-            #if self.solver=='davidson':
-            #    maxsize = kwargs.get('maxsize',25)
-            #    maxiter = kwargs.get('maxiter',100)
-            #    restart_size = kwargs.get('restart_size',5)
-            #    from .davidson import davidson
-            #    self.davidson = functools.partial(davidson,
-            #        maxsize=maxsize,restart_size=restart_size,maxiter=maxiter,tol=CG_TOL) 
 
         # to be set before run
+        self.progbar = False
         self.tmpdir = None
         self.config = None
-        self.omega = None
         self.batchsize = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
@@ -165,7 +164,7 @@ class TNVMC: # stochastic sampling
         self.cond1 = None
         self.cond2 = None
         self.check = None 
-        self.accept_ratio = None
+        self.debug = False
 
         self.free_quantities()
     def free_quantities(self):
@@ -190,6 +189,7 @@ class TNVMC: # stochastic sampling
     def run(self,start,stop,tmpdir=None):
         self.Eold = 0.
         for step in range(start,stop):
+            self.ham.amplitude_factory = self.sampler.amplitude_factory
             self.step = step
             self.sample()
             self.extract_energy_gradient()
@@ -199,8 +199,7 @@ class TNVMC: # stochastic sampling
             fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
             psi = self.sampler.amplitude_factory.update(x,fname=fname,root=0)
     def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
-        #self.config,self.omega = self.sampler.preprocess(self.config) 
-        self.sampler.preprocess(self.config) 
+        self.sampler.preprocess()
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
 
         self.buf = np.zeros(4)
@@ -227,6 +226,10 @@ class TNVMC: # stochastic sampling
             samplesize = len(self.sampler.nonzeros)
         else:
             samplesize = self.batchsize if samplesize is None else samplesize
+
+        if self.progbar:
+            pg = Progbar(total=samplesize)
+
         self.f = []
         self.e = []
         err_mean = 0.
@@ -241,6 +244,8 @@ class TNVMC: # stochastic sampling
             err_mean += self.buf[3]
             err_max = max(err_max,self.buf[3])
             ncurr += 1
+            if self.progbar:
+                pg.update()
             #print(ncurr)
             if ncurr >= samplesize: # send termination message to all workers
                 self.terminate[0] = 1
@@ -252,39 +257,20 @@ class TNVMC: # stochastic sampling
         print('\tcontraction err=',err_mean / len(self.e),err_max)
         self.e = np.array(self.e)
         self.f = np.array(self.f)
-    def profile(self,n):
-        if RANK!=1:
-            return
-        #for obj in [self,self.sampler,self.sampler.amplitude_factory]:
-        #    tracker = ClassTracker()
-        #    tracker.track_object(obj)
-        #    tracker.create_snapshot()
-        #    tracker.stats.print_summary()
-        #ls = muppy.get_objects()
-        #sum_ = summary.summarize(ls) 
-        #summary.print_(sum_)
-        mem = psutil.virtual_memory()
-        print(f'n={n},time={time.time()-t0},percent={mem.percent}')
-        psi = self.sampler.amplitude_factory.psi
-        _fn(psi)
-        for key,psi in self.sampler.amplitude_factory.cache_top.items():
-            _fn(psi)
-        for key,psi in self.sampler.amplitude_factory.cache_bot.items():
-            _fn(psi)
-
     def _sample_stochastic(self,compute_v=True,compute_Hv=False):
         self.buf[1] = 1.
-        n = 0
+        c = []
+        e = []
+        configs = []
         while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
-            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
-                config,self.sampler.amplitude_factory,compute_v=compute_v,compute_Hv=compute_Hv)
-
+            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
             if cx is None or np.fabs(ex) > DISCARD:
-                print(f'RANK={RANK},config={config},cx={cx},ex={ex}')
+                print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = 0.
+                err = 0.
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype)
                 if compute_Hv:
@@ -298,17 +284,28 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
+            if self.debug:
+                c.append(cx)
+                e.append(ex)
+                configs.append(list(config))
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
-
-            n += 1
-            self.profile(n)
-
+        self.sampler.config = self.config
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:
             self.Hv = np.array(self.Hv)
+        if self.debug:
+            f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
+            if compute_Hv:
+                f.create_dataset('Hv',data=self.Hv)
+            if compute_v:
+                f.create_dataset('v',data=self.v)
+            f.create_dataset('e',data=np.array(e))
+            f.create_dataset('c',data=np.array(c))
+            f.create_dataset('config',data=np.array(configs))
+            f.close()
     def _sample_exact(self,compute_v=True,compute_Hv=None): 
         # assumes exact contraction
         p = self.sampler.p
@@ -321,8 +318,7 @@ class TNVMC: # stochastic sampling
         self.f = []
         for ix in ixs:
             config = all_configs[ix]
-            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(config,self.sampler.amplitude_factory,
-                                                        compute_v=compute_v,compute_Hv=compute_Hv)
+            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
             if cx is None:
                 raise ValueError
             if np.fabs(ex)*p[ix] > DISCARD:
@@ -349,17 +345,15 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         self.extract_energy()
         self.extract_gradient()
-        if self.optimizer in ['sr','rgn','lin']:
-            self.extract_S()
         if self.optimizer in ['rgn','lin']:
-            self.extract_H()
+            self._extract_Hvmean()
         if RANK==0:
             try:
                 print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite},gmax={np.amax(np.fabs(self.g))}')
             except TypeError:
                 print('E=',self.E)
                 print('Eerr=',self.Eerr)
-            print('\tcollect data time=',time.time()-t0)
+            print('\tcollect g,Hv time=',time.time()-t0)
             self.Eold = self.E
     def extract_energy(self):
         if RANK>0:
@@ -405,7 +399,6 @@ class TNVMC: # stochastic sampling
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
                 self.S[ix] = fxn(start=start,stop=stop)
     def extract_H(self,solve_full=None,solve_dense=None):
-        self._extract_Hvmean()
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
@@ -418,6 +411,7 @@ class TNVMC: # stochastic sampling
                 self.H[ix] = fxn(start=start,stop=stop)
     def _get_Smatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
+        t0 = time.time()
         if RANK==0:
             sh = stop-start
             vvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
@@ -433,9 +427,11 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             vmean = self.vmean[start:stop]
             S = vvsum / self.n - np.outer(vmean,vmean)
+            print('\tcollect S matrix time=',time.time()-t0)
         return S
     def _get_Hmatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
+        t0 = time.time()
         if RANK==0:
             sh = stop-start
             vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
@@ -455,6 +451,7 @@ class TNVMC: # stochastic sampling
             vmean = self.vmean[start:stop]
             g = self.g[start:stop]
             H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
+            print('\tcollect H matrix time=',time.time()-t0)
         return H
     def _get_S_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
@@ -531,17 +528,20 @@ class TNVMC: # stochastic sampling
     def _transform_gradients_sr(self,solve_dense=None,solve_full=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
         if solve_dense:
             return self._transform_gradients_sr_dense(solve_full=solve_full)
         else:
             return self._transform_gradients_sr_iterative(solve_full=solve_full)
-    def _transform_gradients_rgn(self,solve_dense=None,solve_full=None):
+    def _transform_gradients_rgn(self,solve_dense=None,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
+        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
         if solve_dense:
             dE = self._transform_gradients_rgn_dense(solve_full=solve_full)
         else:
-            dE = self._transform_gradients_rgn_iterative(solve_full=solve_full)
+            dE = self._transform_gradients_rgn_iterative(solve_full=solve_full,x0=x0)
         return dE
     def _transform_gradients_sr_dense(self,solve_full=None):
         if RANK>0:
@@ -576,17 +576,29 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            w,self.deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
+            if self.pure_newton:
+                self.deltas,dE,w = _newton_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
+                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
+            else:
+                self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
+                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w},eps={eps}')
         else:
-            w = [None] * self.nsite
-            dE = np.zeros(self.nsite)  
+            blk_dict = self.sampler.amplitude_factory.block_dict
+            w = [None] * len(blk_dict)
+            dE = np.zeros(len(blk_dict))  
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(self.ampler.amplitude_factory.block_dict):
-                w[ix],self.deltas[start:stop],dE[ix] = \
-                    _rgn_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
+            for ix,(start,stop) in enumerate(blk_dict):
+                if self.pure_newton:
+                    self.deltas[start:stop],dE[ix],w[ix] = _newton_block_solve(
+                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
+                    print(f'ix={ix},eigval={w[ix]}')
+                else:
+                    self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
+                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
+                    print(f'ix={ix},eigval={w[ix]},eps={eps}')
             w = min(np.array(w).real)
             dE = np.sum(dE)
-        print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
+            print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
         if self.tmpdir is not None:
             if self.solve_full:
                 H = self.H
@@ -605,19 +617,17 @@ class TNVMC: # stochastic sampling
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
         return dE
-    def solve_iterative(self,A,b,cond,symm):
+    def solve_iterative(self,A,b,symm,x0=None):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)
         sh = len(b)
         if RANK==0:
             t0 = time.time()
-            def _A(x):
-                return A(x) + cond * x
-            LinOp = spla.LinearOperator((sh,sh),matvec=_A,dtype=b.dtype)
+            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=b.dtype)
             if symm:
-                deltas,info = spla.minres(LinOp,b,tol=CG_TOL,maxiter=MAXITER)
+                deltas,info = spla.minres(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
             else: 
-                deltas,info = self.solver(LinOp,b,tol=CG_TOL,maxiter=MAXITER)
+                deltas,info = self.solver(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
             self.terminate[0] = 1
             COMM.Bcast(self.terminate,root=0)
             print(f'\tsolver time={time.time()-t0},exit status={info}')
@@ -625,7 +635,6 @@ class TNVMC: # stochastic sampling
             nit = 0
             while self.terminate[0]==0:
                 nit += 1
-                #self.terminate = A(buf)
                 A(deltas)
             if RANK==1:
                 print('niter=',nit)
@@ -634,21 +643,27 @@ class TNVMC: # stochastic sampling
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         if solve_full: 
-            self.deltas = self.solve_iterative(self.S,g,self.cond1,True)
+            def R(x):
+                return self.S(x) + self.cond1 * x
+            self.deltas = self.solve_iterative(R,g,True,x0=g)
         else:
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
-                self.deltas[strt:stop] = self.solve_iterative(self.S[ix],g[start:stop],self.cond1,True)
+                def R(x):
+                    return self.S[ix](x) + self.cond1 * x
+                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
         if RANK==0:
             return self.update(self.rate1)
         else:
             return np.zeros(self.nparam,dtype=self.dtype)
-    def _transform_gradients_rgn_iterative(self,solve_full=None):
+    def _transform_gradients_rgn_iterative(self,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         E = self.E if RANK==0 else 0
+        if RANK==0:
+            print('pure_newton=',self.pure_newton)
         if solve_full: 
-            def hess(x):
+            def A(x):
                 if self.terminate[0]==1:
                     return 0
                 Hx = self.H(x)
@@ -657,17 +672,22 @@ class TNVMC: # stochastic sampling
                 Sx = self.S(x)
                 if self.terminate[0]==1:
                     return 0
-                return Hx - E * Sx
-            self.deltas = self.solve_iterative(hess,g,self.cond2,False)
+                if self.pure_newton:
+                    return Hx - E * Sx + self.cond2 * x
+                else:
+                    return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+            self.deltas = self.solve_iterative(A,g,False,x0=x0)
             self.terminate[0] = 0
-            hessp = hess(self.deltas)
+            hessp = A(self.deltas)
             if RANK==0:
                 dE = np.dot(self.deltas,hessp)
         else:
             dE = 0.
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(self.block_dict):
-                def hess(x):
+            for ix,(start,stop) in enumerate(self.sampler.amplitude_factory.block_dict):
+                if RANK==0:
+                    print(f'ix={ix},sh={stop-start}')
+                def A(x):
                     if self.terminate[0]==1:
                         return 0
                     Hx = self.H[ix](x)
@@ -676,11 +696,15 @@ class TNVMC: # stochastic sampling
                     Sx = self.S[ix](x)
                     if self.terminate[0]==1:
                         return 0
-                    return Hx - self.E * Sx
-                deltas = self.solve_iterative(hess,g[start:stop],self.cond2,False)
+                    if self.pure_newton:
+                        return Hx - E * Sx + self.cond2 * x
+                    else:
+                        return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                x0_ = None if x0 is None else x0[start:stop]
+                deltas = self.solve_iterative(A,g[start:stop],False,x0=x0_)
                 self.deltas[start:stop] = deltas 
                 self.terminate[0] = 0
-                hessp = hess(deltas)
+                hessp = A(deltas)
                 if RANK==0:
                     dE += np.dot(hessp,deltas)
         if RANK==0:
@@ -688,21 +712,23 @@ class TNVMC: # stochastic sampling
         else:
             return 0. 
     def _transform_gradients_o2(self,full_sr=True,dense_sr=False):
+        # SR
+        xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
+        deltas_sr = self.deltas
+
         if self.optimizer=='rgn':
-            dE = self._transform_gradients_rgn()
+            dE = self._transform_gradients_rgn(x0=deltas_sr)
         elif self.optimizer=='lin':
             dE = self._transform_gradients_lin()
         else:
             raise NotImplementedError
-        xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        if self.pure_newton:
+            xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        else:
+            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         deltas_rgn = self.deltas
         if self.check is None:
             return xnew_rgn
-        # SR
-        if not ((full_sr==self.solve_full) and (dense_sr==self.solve_dense)):
-            self.extract_S(solve_full=full_sr,solve_dense=dense_sr)
-        xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
-        deltas_sr = self.deltas
         
         if RANK==0:
             g = self.g
@@ -830,7 +856,10 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             E,Eerr = self.E,self.Eerr
         self.free_quantities()
+        debug = self.debug
+        self.debug = False
         self.sample(samplesize=self.batchsize_small,compute_v=False,compute_Hv=False)
+        self.debug = debug
         self.extract_energy()
         if RANK>0:
             return True 
@@ -840,84 +869,455 @@ class TNVMC: # stochastic sampling
         err = (Eerr**2 + self.Eerr**2)**.5
         print(f'\tpredict={dEm},actual={(dE,err)}')
         return (dE < 0.) 
-class DMRG(TNVMC):
-    def __init__(
-        self,
-        ham,
-        sampler,
-        amplitude_factory,
-        optimizer='sr',
-        **kwargs,
-    ):
-        # parse ham
-        self.ham = ham
-        self.nsite = ham.Lx * ham.Ly
+    def measure(self,fname=None):
+        self.sample(compute_v=False,compute_Hv=False)
 
-        # parse sampler
-        self.sampler = sampler
-        self.exact_sampling = sampler.exact
+        sendbuf = np.array([self.ham.n])
+        recvbuf = np.zeros_like(sendbuf) 
+        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+        n = recvbuf[0]
 
-        # parse wfn 
-        self.amplitude_factory = amplitude_factory         
-        self.x = self.amplitude_factory.get_x()
-        self.block_dict = self.amplitude_factory.get_block_dict()
+        sendbuf = self.ham.data
+        recvbuf = np.zeros_like(sendbuf) 
+        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        data = recvbuf / n
+        if fname is not None:
+            f = h5py.File(fname,'w')
+            f.create_dataset('data',data=data) 
+            f.close()
+        self.ham._print(fname,data)
+    def debug_torch(self,tmpdir,step,rank=None):
+        if RANK==0:
+            return
+        if rank is not None:
+            if RANK!=rank:
+                return
+        f = h5py.File(tmpdir+f'step{step}RANK{RANK}.hdf5','r')
+        e = f['e'][:]
+        v = f['v'][:]
+        configs = f['config'][:]
+        f.close()
+        e_new = []
+        c_new = []
+        v_new = []
+        Hv_new = []
+        n = len(e)
+        print(f'RANK={RANK},n={n}')
+        for i in range(n):
+            config = tuple(configs[i,:])
+            cx,ex,vx,Hvx,err = self.ham.compute_local_energy(
+                config,self.sampler.amplitude_factory,compute_v=True,compute_Hv=True)
+            if cx is None or np.fabs(ex) > DISCARD:
+                print(f'RANK={RANK},cx={cx},ex={ex}')
+                ex = 0.
+                err = 0.
+                if compute_v:
+                    vx = np.zeros(self.nparam,dtype=self.dtype)
+                if compute_Hv:
+                    Hvx = np.zeros(self.nparam,dtype=self.dtype)
+            e_new.append(ex) 
+            c_new.append(cx) 
+            v_new.append(vx)
+            Hv_new.append(Hvx)
+            err_e = np.fabs(ex-e[i])
+            err_v = np.linalg.norm(vx-v[i,:])
+            if err_e > 1e-6 or err_v > 1e-6: 
+                print(f'RANK={RANK},config={config},ex={ex},ex_sr={e[i]},err_e={err_e},err_v={err_v}')
+            #else:
+            #    print(f'RANK={RANK},i={i}')
+        f = h5py.File(f'./step{step}RANK{RANK}.hdf5','w')
+        f.create_dataset('Hv',data=np.array(Hv_new))
+        f.create_dataset('v',data=np.array(v_new))
+        f.create_dataset('e',data=np.array(e_new))
+        f.create_dataset('c',data=np.array(c_new))
+        f.close()
+    def load(self,tmpdir):
+        if RANK==0:
+            vmean = np.zeros(self.nparam,dtype=self.dtype)
+            evmean = np.zeros(self.nparam,dtype=self.dtype)
+            Hvmean = np.zeros(self.nparam,dtype=self.dtype)
 
-        # parse gradient optimizer
-        self.optimizer = optimizer
-        self.compute_Hv = False
-        self.solve = 'matrix'
-        if self.optimizer in ['rgn','lin']:
-            self.ham.initialize_pepo(self.amplitude_factory.psi)
-            self.compute_Hv = True
-        if self.optimizer=='lin':
-            self.xi = kwargs.get('xi',0.5)
+            self.e = [] 
+            for rank in range(1,SIZE):
+                print('rank=',rank)
+                e,vsum,evsum,Hvsum = COMM.recv(source=rank)
+                self.e.append(e)
+                vmean += vsum
+                evmean += evsum
+                Hvmean += Hvsum
 
-        # to be set before run
-        self.ix = 0 
-        self.direction = 1
-        self.config = None
-        self.batchsize = None
-        self.ratio = None
-        self.batchsize_small = None
-        self.rate1 = None # rate for SGD,SR
-        self.rate2 = None # rate for LIN,RGN
-        self.cond1 = None
-        self.cond2 = None
-        self.check = None 
-        self.accept_ratio = None
-    def next_ix(self):
-        if self.direction == 1 and self.ix == self.nsite-1:
-            self.direction = -1
-        elif self.direction == -1 and self.ix == 0:
-            self.direction = 1
-        self.ix += self.direction 
-    def set_nparam(self):
-        start,stop = self.block_dict[self.ix]
-        self.nparam = stop - start
-        if self.ratio is not None:
-            self.batchsize = max(self.batchsize_small,self.nparam * self.ratio) 
-    def run(self,start,stop,tmpdir=None):
-        for step in range(start,stop):
-            self.amplitude_factory.ix = self.ix
-            self.set_nparam()
-            if RANK==0:
-                print(f'ix={self.ix},nparam={self.nparam}')
-            self.step = step
-            self.sample()
-            self.extract_energy_gradient()
-            self.transform_gradients()
-            COMM.Bcast(self.x,root=0) 
-            psi = self.amplitude_factory.update(self.x)
-            self.ham.update_cache(self.ix)
-            if RANK==0:
-                if tmpdir is not None: # save psi to disc
-                    write_ftn_to_disc(psi,tmpdir+f'psi{step+1}',provided_filename=True)
-            #self.next_ix()
-            self.ix = (self.ix + 1) % self.nsite
-    def update(self,rate):
-        start,stop = self.block_dict[self.ix]
-        x = self.x.copy()
-        x[start:stop] -= rate * self.deltas
-        return x 
-    def _transform_gradients_o2(self):
-        super()._transform_gradients_o2(solve_sr='matrix')
+            self.e = np.concatenate(self.e)
+            self.f = np.ones_like(self.e)
+            self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
+            self.n = len(self.e)
+
+            vmean /= self.n
+            evmean /= self.n
+            self.g = evmean - self.E * vmean
+            self.vmean = vmean 
+
+            Hvmean /= self.n
+            self.Hvmean = Hvmean
+        else:
+            f = h5py.File(tmpdir+f'step{self.step}RANK{RANK}.hdf5','r')
+            self.Hv = f['Hv'][:]
+            self.v = f['v'][:]
+            e = f['e'][:]
+            f.close()
+            vsum = self.v.sum(axis=0)
+            evsum = np.dot(e,self.v)
+            Hvsum = self.Hv.sum(axis=0)
+            COMM.send([e,vsum,evsum,Hvsum],dest=0)
+        COMM.Barrier()
+##############################################################################################
+# sampler
+#############################################################################################
+import itertools
+class SpinDenseSampler:
+    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-14):
+        self.nsite = nsite 
+        self.nspin = nspin
+
+        self.all_configs = self.get_all_configs()
+        self.ntotal = len(self.all_configs)
+        if RANK==0:
+            print('ntotal=',self.ntotal)
+        self.flat_indexes = list(range(self.ntotal))
+        self.p = None
+
+        batchsize,remain = self.ntotal//SIZE,self.ntotal%SIZE
+        self.count = np.array([batchsize]*SIZE)
+        if remain > 0:
+            self.count[-remain:] += 1
+        self.disp = np.concatenate([np.array([0]),np.cumsum(self.count[:-1])])
+        self.start = self.disp[RANK]
+        self.stop = self.start + self.count[RANK]
+
+        self.rng = np.random.default_rng(seed)
+        self.burn_in = 0
+        self.dense = True
+        self.exact = exact 
+        self.amplitude_factory = None
+        self.thresh = thresh
+    def preprocess(self):
+        self.compute_dense_prob()
+    def compute_dense_prob(self):
+        t0 = time.time()
+        ptotal = np.zeros(self.ntotal)
+        start,stop = self.start,self.stop
+        configs = self.all_configs[start:stop]
+
+        plocal = [] 
+        for config in configs:
+            plocal.append(self.amplitude_factory.prob(config))
+        plocal = np.array(plocal)
+         
+        COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
+        nonzeros = []
+        for ix,px in enumerate(ptotal):
+            if px > self.thresh:
+                nonzeros.append(ix) 
+        n = np.sum(ptotal)
+        ptotal /= n 
+        self.p = ptotal
+        if RANK==SIZE-1:
+            print('\tdense amplitude time=',time.time()-t0)
+
+        ntotal = len(nonzeros)
+        batchsize,remain = ntotal//(SIZE-1),ntotal%(SIZE-1)
+        L = SIZE-1-remain
+        if RANK-1<L:
+            start = (RANK-1)*batchsize
+            stop = start+batchsize
+        else:
+            start = (batchsize+1)*(RANK-1)-L
+            stop = start+batchsize+1
+        self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
+    def get_all_configs(self):
+        assert isinstance(self.nspin,tuple)
+        sites = list(range(self.nsite))
+        occs = list(itertools.combinations(sites,self.nspin[0]))
+        configs = [None] * len(occs) 
+        for i,occ in enumerate(occs):
+            config = [0] * (self.nsite) 
+            for ix in occ:
+                config[ix] = 1
+            configs[i] = tuple(config)
+        return configs
+    def sample(self):
+        flat_idx = self.rng.choice(self.flat_indexes,p=self.p)
+        config = self.all_configs[flat_idx]
+        omega = self.p[flat_idx]
+        return config,omega
+class FermionDenseSampler(SpinDenseSampler):
+    def __init__(self,nsite,nelec,spinless=False,**kwargs):
+        self.nelec = nelec
+        self.spinless = spinless
+        nspin = (nelec,) if spinless else None
+        super().__init__(nsite,nspin,**kwargs)
+    def get_all_configs(self):
+        if self.spinless:
+            return super().get_all_configs()
+        return self.get_all_configs_u11()
+    def get_all_configs_u11(self):
+        assert isinstance(self.nelec,tuple)
+        sites = list(range(self.nsite))
+        ls = [None] * 2
+        for spin in (0,1):
+            occs = list(itertools.combinations(sites,self.nelec[spin]))
+            configs = [None] * len(occs) 
+            for i,occ in enumerate(occs):
+                config = [0] * self.nsite 
+                for ix in occ:
+                    config[ix] = 1
+                configs[i] = tuple(config)
+            ls[spin] = configs
+
+        na,nb = len(ls[0]),len(ls[1])
+        configs = [None] * (na*nb)
+        for ixa,configa in enumerate(ls[0]):
+            for ixb,configb in enumerate(ls[1]):
+                config = [config_map[configa[i],configb[i]] \
+                          for i in range(self.nsite)]
+                ix = ixa * nb + ixb
+                configs[ix] = tuple(config)
+        return configs
+    def get_all_configs_u1(self):
+        if isinstance(self.nelec,tuple):
+            self.nelec = sum(self.nelec)
+        sites = list(range(self.nsite*2))
+        occs = list(itertools.combinations(sites,self.nelec))
+        configs = [None] * len(occs) 
+        for i,occ in enumerate(occs):
+            config = [0] * (self.nsite*2) 
+            for ix in occ:
+                config[ix] = 1
+            configs[i] = tuple(config)
+
+        for ix in range(len(configs)):
+            config = configs[ix]
+            configa,configb = config[:self.nsite],config[self.nsite:]
+            config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
+            configs[ix] = tuple(config)
+        return configs
+#####################################################################################
+# READ/WRITE FTN FUNCS
+#####################################################################################
+import pickle,uuid
+from .fermion.fermion_core import FermionTensor,FermionTensorNetwork
+def scale_wfn(psi,scale):
+    for tid in psi.tensor_map:
+        tsr = psi.tensor_map[tid]
+        tsr.modify(data=tsr.data*scale)
+    return psi
+def load_tn_from_disc(fname, delete_file=False):
+    if type(fname) != str:
+        data = fname
+    else:
+        with open(fname,'rb') as f:
+            data = pickle.load(f)
+    return data
+def write_tn_to_disc(tn, fname, provided_filename=False):
+    with open(fname, 'wb') as f:
+        pickle.dump(tn, f)
+    return fname
+def load_ftn_from_disc(fname, delete_file=False):
+
+    # Get the data
+    if type(fname) != str:
+        data = fname
+    else:
+        # Open up the file
+        with open(fname, 'rb') as f:
+            data = pickle.load(f)
+
+    # Set up a dummy fermionic tensor network
+    tn = FermionTensorNetwork([])
+
+    # Put the tensors into the ftn
+    tensors = [None,] * data['ntensors']
+    for i in range(data['ntensors']):
+
+        # Get the tensor
+        ten_info = data['tensors'][i]
+        ten = ten_info['tensor']
+        ten = FermionTensor(ten.data, inds=ten.inds, tags=ten.tags)
+
+        # Get/set tensor info
+        tid, site = ten_info['fermion_info']
+        ten.fermion_owner = None
+        ten._avoid_phase = False
+
+        # Add the required phase
+        ten.phase = ten_info['phase']
+
+        # Add to tensor list
+        tensors[site] = (tid, ten)
+
+    # Add tensors to the tn
+    for (tid, ten) in tensors:
+        tn.add_tensor(ten, tid=tid, virtual=True)
+
+    # Get addition attributes needed
+    tn_info = data['tn_info']
+
+    # Set all attributes in the ftn
+    extra_props = dict()
+    for props in tn_info:
+        extra_props[props[1:]] = tn_info[props]
+
+    # Convert it to the correct type of fermionic tensor network
+    tn = tn.view_as_(data['class'], **extra_props)
+
+    # Remove file (if desired)
+    if delete_file:
+        delete_ftn_from_disc(fname)
+
+    # Return resulting tn
+    return tn
+def rand_fname():
+    return str(uuid.uuid4())
+def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
+
+    # Create a generic dictionary to hold all information
+    data = dict()
+
+    # Save which type of tn this is
+    data['class'] = type(tn)
+
+    # Add information relevant to the tensors
+    data['tn_info'] = dict()
+    for e in tn._EXTRA_PROPS:
+        data['tn_info'][e] = getattr(tn, e)
+
+    # Add the tensors themselves
+    data['tensors'] = []
+    ntensors = 0
+    for ten in tn.tensors:
+        ten_info = dict()
+        ten_info['fermion_info'] = ten.get_fermion_info()
+        ten_info['phase'] = ten.phase
+        ten_info['tensor'] = ten
+        data['tensors'].append(ten_info)
+        ntensors += 1
+    data['ntensors'] = ntensors
+
+    # If tmpdir is None, then return the dictionary
+    if tmpdir is None:
+        return data
+
+    # Write fermionic tensor network to disc
+    else:
+        # Create a temporary file
+        if provided_filename:
+            fname = tmpdir
+            print('saving to ', fname)
+        else:
+            if tmpdir[-1] != '/': 
+                tmpdir = tmpdir + '/'
+            fname = tmpdir + rand_fname()
+
+        # Write to a file
+        with open(fname, 'wb') as f:
+            pickle.dump(data, f)
+
+        # Return the filename
+        return fname
+##############################################################################################
+# Amplitude Factory
+##############################################################################################
+import torch
+from .tensor_core import rand_uuid,group_inds
+def safe_contract(tn):
+    try:
+        data = tn.contract()
+    except (ValueError,IndexError):
+        return None
+    if isinstance(data,int):
+        return None
+    return data
+def tsr2backend(data,backend,requires_grad=False):
+    if isinstance(data,np.ndarray):
+        if backend=='torch': # numpy to torch 
+            data = torch.tensor(data,requires_grad=requires_grad)
+    elif isinstance(data,torch.Tensor):
+        if backend=='numpy': # torch to numpy
+            data = data.detach().numpy()
+            if data.size==1:
+                data = data.reshape(-1)[0]
+        else: # torch to torch
+            data.requires_grad_(requires_grad=requires_grad)
+    else:
+        print(data)
+        raise TypeError
+    return data
+def tsr_grad(tsr,set_zero=True):
+    grad = tsr.grad
+    if set_zero:
+        tsr.grad = None
+    return grad 
+def contraction_error(cx):
+    cx = np.array(list(cx.values()))
+    max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
+    return mean_,np.fabs((max_-min_)/mean_)
+class SpinAmplitudeFactory:
+    def intermediate_sign(self,config=None,ix1=None,ix2=None):
+        return 1.
+    def config_sign(self,config=None):
+        return 1.
+    def tsr2backend(self,data,backend,requires_grad=False):
+        return tsr2backend(data,backend,requires_grad=requires_grad)
+    def tensor_compress_bond(self,T1,T2,absorb='right'):
+        # TODO:check for absorb='left'
+        left_env_ix, shared_ix, right_env_ix = group_inds(T1, T2)
+        if not shared_ix:
+            raise ValueError("The tensors specified don't share an bond.")
+        elif len(shared_ix) > 1:
+            # fuse multibonds
+            T1.fuse_({shared_ix[0]: shared_ix})
+            T2.fuse_({shared_ix[0]: shared_ix})
+            shared_ix = (shared_ix[0],)
+        T1_inds,T2_inds = T1.inds,T2.inds
+
+        tmp_ix = rand_uuid()
+        T1.reindex_({shared_ix[0]:tmp_ix})
+        T2.reindex_({shared_ix[0]:tmp_ix})
+        if absorb=='right': # assume T2 is isometric
+            T1_L, T1_R = T1.split(left_inds=left_env_ix, right_inds=(tmp_ix,),
+                                  get='tensors', method='qr')
+            M,T2_R = T1_R,T2
+        elif absorb=='left': # assume T1 is isometric
+            T2_L, T2_R = T2.split(left_inds=(tmp_ix,), right_inds=right_env_ix,
+                                  get='tensors', method='lq')
+            T1_L,M = T1,T2_L
+        else:
+            raise NotImplementedError(f'absorb={absorb}')
+        M_L, *s, M_R = M.split(left_inds=T1_L.bonds(M), get='tensors',
+                               absorb=absorb, **self.compress_opts)
+
+        # make sure old bond being used
+        ns_ix, = M_L.bonds(M_R)
+        M_L.reindex_({ns_ix: shared_ix[0]})
+        M_R.reindex_({ns_ix: shared_ix[0]})
+
+        T1C = T1_L.contract(M_L, output_inds=T1_inds)
+        T2C = M_R.contract(T2_R, output_inds=T2_inds)
+
+        # update with the new compressed data
+        T1.modify(data=T1C.data)
+        T2.modify(data=T2C.data)
+
+        if absorb == 'right':
+            T1.modify(left_inds=left_env_ix)
+        else:
+            T2.modify(left_inds=right_env_ix)
+def config2pn(config,start,stop,spinless):
+    pn_map = [0,1,1,2]
+    if spinless:
+        return config[start:stop]
+    else:
+        return [pn_map[ci] for ci in config[start:stop]]
+class FermionAmplitudeFactory(SpinAmplitudeFactory):
+    

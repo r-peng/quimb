@@ -249,7 +249,6 @@ def svd(x, cutoff=-1.0, cutoff_mode=3, max_bond=-1, absorb=0, renorm=0):
     return _trim_and_renorm_SVD(U, s, VH, cutoff, cutoff_mode,
                                 max_bond, absorb, renorm)
 
-
 def svdvals(x):
     """SVD-decomposition, but return singular values only.
     """
