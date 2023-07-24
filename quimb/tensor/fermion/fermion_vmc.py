@@ -1,12 +1,11 @@
 from ..tensor_vmc import DenseSampler as DenseSampler_ 
 class DenseSampler(DenseSampler_):
-    def __init__(self,nsite,nelec,spinless=False,**kwargs):
+    def __init__(self,nsite,nelec,**kwargs):
         self.nelec = nelec
-        self.spinless = spinless
         nspin = (nelec,) if spinless else None
         super().__init__(nsite,nspin,**kwargs)
     def get_all_configs(self):
-        if self.spinless:
+        if self.amplitude_factory.spinless:
             return super().get_all_configs()
         return self.get_all_configs_u11()
     def get_all_configs_u11(self):
@@ -50,6 +49,18 @@ class DenseSampler(DenseSampler_):
             config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
             configs[ix] = tuple(config)
         return configs
+from ..tensor_vmc import ExchangeSampler as ExchangeSampler_
+class ExchangeSampler(ExchangeSampler_):
+    def propose_new_pair(self,i1,i2):
+        if self.amplitude_factory.spinless:
+            return i2,i1
+        n = abs(pn_map[i1]-pn_map[i2])
+        if n==1:
+            i1_new,i2_new = i2,i1
+        else:
+            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
+            i1_new,i2_new = self.rng.choice(choices)
+        return i1_new,i2_new 
 from .fermion_core import FermionTensor,FermionTensorNetwork
 def load_tn_from_disc(fname, delete_file=False):
 
@@ -208,14 +219,44 @@ def tensor2backend(self,data,backend,requires_grad=False):
 class AmplitudeFactory:
     def write_tn_to_disc(self,tn,fname):
         return write_tn_to_disc(tn,fname)
+    def get_constructors(self,psi):
+        from .block_interface import Constructor
+        constructors = [None] * self.nsite 
+        for site in self.sites:
+            data = psi[self.site_tag(site)].data
+            bond_infos = [data.get_bond_info(ax,flip=False) \
+                          for ax in range(data.ndim)]
+            cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=self.flat)
+            dq = data.dq
+            size = cons.vector_size(dq)
+            ix = self.site_map[site]
+            constructors[ix] = (cons,dq),size,site
+        return constructors
     def get_data_map(self,backend,symmetry='u1',flat=True):
         return get_data_map(backend,symmetry=symmetry,flat=flat)
+    def tensor2vec(self,tsr,ix):
+        cons,dq = self.constructors[ix][0]
+        return tensor2backend(cons.tensor_to_vector(tsr),'numpy')
+    def vec2tensor(self,x,ix):
+        cons,dq = self.constructors[ix][0]
+        return self.tensor2backend(cons.vector_to_tensor(x,dq),self.backend)
     def tensor_grad(self,tsr,set_zero=True):
         return tsr.get_grad(set_zero=set_zero) 
     def config2pn(self,config,start,stop):
         return config2pn(config,start,stop,self.spinless)
     def intermediate_sign(self,config,ix1,ix2):
         return (-1)**(sum(self.config2pn(config,ix1+1,ix2)) % 2)
+    def get_bra_tsr(self,ci,site,append=''):
+        inds = self.site_ind(site)+append,
+        tags = self.site_tags(site) + ('BRA',)
+        data = self.data_map[ci].copy()
+        return FermionTensor(data=data,inds=inds,tags=tags)
+    def site_grad(self,tn,site):
+        ket = tn[self.site_tag(site),'KET']
+        tid = ket.get_fermion_info()[0]
+        ket = tn._pop_tensor(tid,remove_from_fermion_space='end')
+        g = tn.contract(output_inds=ket.inds[::-1])
+        return g.data.dagger 
     def tensor_compress_bond(self,T1,T2,absorb='right'):
         site1 = T1.get_fermion_info()[1]
         site2 = T2.get_fermion_info()[1]
@@ -224,36 +265,3 @@ class AmplitudeFactory:
         else:
             absorb = {'left':'right','right':'left'}[absorb]
             self._tensor_compress_bond(T2,T1,absorb=absorb)
-    def _tensor_compress_bond(self,T1,T2,absorb='right'):
-        shared_ix, left_env_ix = T1.filter_bonds(T2)
-        if not shared_ix:
-            raise ValueError("The tensors specified don't share an bond.")
-        T1_inds,T2_inds = T1.inds,T2.inds
-    
-        tmp_ix = rand_uuid()
-        T1.reindex_({shared_ix[0]:tmp_ix})
-        T2.reindex_({shared_ix[0]:tmp_ix})
-        if absorb=='right':
-            T1_L, T1_R = T1.split(left_inds=left_env_ix, right_inds=(tmp_ix,), absorb="right",
-                                  get='tensors', method='qr')
-            M,T2_R = T1_R,T2
-        elif absorb=='left':
-            T2_L, T2_R = T2.split(left_inds=(tmp_ix,), absorb="left", get='tensors', method='qr')
-            T1_L,M = T1,T2_L
-        else:
-            raise NotImplementedError(f'absorb={absorb}')
-        M.drop_tags()
-        M_L, *s, M_R = M.split(left_inds=T1_L.bonds(M), get='tensors',
-                               absorb=absorb, **self.compress_opts)
-    
-        # make sure old bond being used
-        ns_ix, = M_L.bonds(M_R)
-        M_L.reindex_({ns_ix: shared_ix[0]})
-        M_R.reindex_({ns_ix: shared_ix[0]})
-    
-        T1C = T1_L.contract(M_L)
-        T2C = M_R.contract(T2_R)
-    
-        # update with the new compressed data
-        T1.modify(data=T1C.data, inds=T1C.inds)
-        T2.modify(data=T2C.data, inds=T2C.inds)

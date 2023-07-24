@@ -7,7 +7,7 @@ RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 import autoray as ar
-import torch
+import torch,h5py
 torch.autograd.set_detect_anomaly(False)
 
 from .torch_utils import SVD,QR,SVDforward
@@ -34,25 +34,43 @@ def set_options(pbc=False):
     set_options_(pbc=pbc,deterministic=True,backend='torch')
 class AmplitudeFactory(AmplitudeFactory_):
     def __init__(self,psi,blks=None,phys_dim=2,**compress_opts):
-        self.gauge = dict()
+        self.gauges = dict()
         super().__init__(psi,blks=blks,phys_dim=phys_dim,**compress_opts)
-    def init_gauge(self,eps=0.):
+    def init_gauge(self,eps=0.,fname=None):
         chi = self.compress_opts['max_bond']
         data = np.random.rand(chi,chi) * eps
         if _PBC:
             raise NotImplementedError
         else:
-            self.gauge = {((i,j),(i,j+1)):self.tensor2backend(data,'torch') for (i,j) in itertools.product(range(1,self.Lx-1),range(self.Ly-1))}
+            gauges = {((i,j),(i,j+1)):self.tensor2backend(data,'torch') for (i,j) in itertools.product(range(1,self.Lx-1),range(self.Ly-1))}
+        self.get_gauge_info(gauges)
+        gauge_vec = self.gauge2vec(gauges) 
+        COMM.Bcast(gauge_vec,root=0) 
+        self.gauges = self.vec2gauge(gauge_vec)
+        if RANK==0:
+            if fname is not None:
+                self.write_gauge_to_disc(fname)
+    def write_gauge_to_disc(self,fname,gauges=None):
+        gauges = self.gauges if gauges is None else gauges
+        f = h5py.File(fname+'.hdf5','w')
+        for where,gauge in gauges.items():
+            f.create_dataset(f'{where}',data=tensor2backend(gauge,'numpy'))
+        f.close()
+    def load_gauge_from_disc(self,fname):
+        self.auges = dict()
+        f = h5py.File(fname+'.hdf5','r')
+        for (i,j) in itertools.product(range(1,self.Lx-1),range(self.Ly-1)):
+            where = (i,j),(i,j+1)
+            self.gauges[where] = self.tensor2backend(f[f'{where}'][:],'torch')
+        f.close() 
         self.get_gauge_info()
-    def gauge_sval(self,s,where):
-        sh = len(s)
-        return self.gauge[where][:sh,:sh] + torch.diag(s) 
-    def get_gauge_info(self):
-        self.gauge_order = list(self.gauge.keys())
+    def get_gauge_info(self,gauges=None):
+        gauges = self.gauges if gauges is None else gauges
+        self.gauge_order = list(gauges.keys())
         self.gauge_map = dict() 
         start = 0
         for ix,where in enumerate(self.gauge_order):
-            shape = self.gauge[where].shape
+            shape = gauges[where].shape
             size = np.prod(np.array(shape))
             stop = start + size
             self.gauge_map[where] = shape,start,stop
@@ -60,19 +78,19 @@ class AmplitudeFactory(AmplitudeFactory_):
         self.gauge_size = stop
         if RANK==0:
             print('gauge_size=',self.gauge_size)
-    def gauge2vec(self,gauge=None):
-        gauge = self.gauge if gauge is None else gauge
+    def gauge2vec(self,gauges=None):
+        gauges = self.gauges if gauges is None else gauges
         v = np.zeros(self.gauge_size)  
         for where,(_,start,stop) in self.gauge_map.items():
-            g = gauge[where]
+            g = gauges[where]
             if g is not None:
                 v[start:stop] = self.tensor2backend(g,'numpy').reshape(-1)
         return v 
     def vec2gauge(self,x):
-        gauge = dict()
+        gauges = dict()
         for where,(shape,start,stop) in self.gauge_map.items():
-            gauge[where] = self.tensor2backend(x[start:stop].reshape(shape),'torch')
-        return gauge 
+            gauges[where] = self.tensor2backend(x[start:stop].reshape(shape),'torch')
+        return gauges 
     def get_x(self):
         x1 = self.psi2vec()
         x2 = self.gauge2vec()
@@ -81,15 +99,16 @@ class AmplitudeFactory(AmplitudeFactory_):
         x1,x2 = np.split(x,[len(x)-self.gauge_size])
         psi = self.vec2psi(x1,inplace=True)
         self.set_psi(psi) 
-        self.gauge = self.vec2gauge(x2)
+        self.gauges = self.vec2gauge(x2)
         if RANK==root:
             if fname is not None: # save psi to disc
                 self.write_tn_to_disc(psi,fname)
+                self.write_gauge_to_disc(fname)
         return psi
     def wfn2backend(self,backend=None,requires_grad=False):
         super().wfn2backend(backend='torch',requires_grad=requires_grad)
-        for where in self.gauge:
-            self.gauge[where] = self.tensor2backend(self.gauge[where],'torch',requires_grad=requires_grad)
+        for where in self.gauges:
+            self.gauges[where] = self.tensor2backend(self.gauges[where],'torch',requires_grad=requires_grad)
     def parse_hessian(self,ex,cx=None):
         if len(ex)==0:
             return 0.,0.
@@ -99,10 +118,13 @@ class AmplitudeFactory(AmplitudeFactory_):
         Hvx1 = {(i,j):self.tensor_grad(self.psi[i,j].data) for i,j in itertools.product(range(self.Lx),range(self.Ly))}
         Hvx1 = self.dict2vec(Hvx1)
 
-        Hvx2 = {where:self.tensor_grad(tsr) for where,tsr in self.gauge.items()}
+        Hvx2 = {where:self.tensor_grad(tsr) for where,tsr in self.gauges.items()}
         Hvx2 = self.gauge2vec(Hvx2)
         assert cx is None
         return None,tensor2backend(ex_num,'numpy'),np.concatenate([Hvx1,Hvx2]) 
+    def gauge_sval(self,s,where):
+        sh = len(s)
+        return self.gauges[where][:sh,:sh] + torch.diag(s) 
     def tensor_svd(self,
         T,
         where,
@@ -217,4 +239,3 @@ class AmplitudeFactory(AmplitudeFactory_):
             where = (i,j),(i,j+1)
             self.tensor_compress_bond(tn[i,j],tn[i,j+1],absorb='right',where=where)        
         return tn
-            

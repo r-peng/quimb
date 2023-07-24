@@ -517,35 +517,34 @@ class U(Hamiltonian):
 ####################################################################################
 from .fermion_2d_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ExchangeSampler_):
-    def new_pair(self,i1,i2):
-        return super().new_pair_full(i1,i2)
-    def update_pair(self,i,j,x_bsz,y_bsz,cols,tn):
-        sites,config_sites,config_new = self._new_pair(i,j,x_bsz,y_bsz)
+    def _update_pair(self,site1,site2,plq,cols):
+        sites,config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
-            return tn
+            return plq,cols
 
         configs = [None,None,config_sites]
         configs[0],configs[1] = config_to_ab(config_sites)
         py = 1.
+        plq_new = [None] * 3
         for ix in range(3):
             psi = self.amplitude_factory.psi[ix]
-            cols_ix = psi.replace_sites(cols[ix],sites,configs[ix]) 
-            py_ix = psi.safe_contract(cols_ix)
-            if py_ix is None:
-                return tn 
-            py *= py_ix ** 2
+            plq_new[ix] = psi.replace_sites(plq[ix].copy(),sites,configs[ix]) 
+            cy_ix = safe_contract(plq_new[ix])
+            if cy_ix is None:
+                return plq,cols
+            py *= tensor2backend(py_ix ** 2,'numpy')
 
         try:
             acceptance = py / self.px
         except ZeroDivisionError:
             acceptance = 1. if py > self.px else 0.
-        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-            self.px = py
-            self.config = config_new
-            for ix in range(3):
-                psi = self.amplitude_factory.psi[ix]
-                tn[ix] = psi.replace_sites(tn[ix],sites,configs[ix])
-        return tn
+        if acceptance < self.rng.uniform: # reject
+            return plq,cols
+        self.px = py
+        self.config = config_new
+        plq = [psi.replace_sites(plq_ix,(site1,site2),config) for psi,cols_ix,config in zip(self.amplitude_factory.psi,cols,configs)]
+        cols = [psi.replace_sites(cols_ix,(site1,site2),config) for psi,cols_ix,config in zip(self.amplitude_factory.psi,cols,configs)]
+        return plq,cols
     def sweep_col_forward(self,i,tn,x_bsz,y_bsz):
         renvs = [None] * 3
         for ix in range(3):

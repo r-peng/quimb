@@ -145,13 +145,6 @@ class AmplitudeFactory(AmplitudeFactory_):
         for ix,(_,_,(i,j)) in enumerate(self.constructors):
             psi[i,j].modify(data=self.vec2tensor(ls[ix],ix))
         return psi
-    def update(self,x,fname=None,root=0):
-        psi = self.vec2psi(x,inplace=True)
-        self.set_psi(psi) 
-        if RANK==root:
-            if fname is not None: # save psi to disc
-                self.write_tn_to_disc(psi,fname)
-        return psi
     def set_psi(self,psi):
         self.psi = psi
 
@@ -1495,7 +1488,7 @@ class ExchangeSampler2:
             self.px = py
             self.config = tuple(config_new) 
 
-def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):
+def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True,rand=False):
     arrays = []
     for i in range(Lx):
         row = []
@@ -1508,7 +1501,7 @@ def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):
             shape = tuple(shape) + (pdim,)
 
             if config is None:
-                data = np.ones(shape) 
+                data = np.random.rand(*shape) if rand else np.ones(shape) 
             else:
                 data = np.zeros(shape) 
                 ix = flatten(i,j,Ly)

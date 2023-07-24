@@ -35,7 +35,7 @@ from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid,tensor_sp
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-from ..tensor_2d_vmc_tmp import AmplitudeFactory as AmplitudeFactory2D
+from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory2D
 from .fermion_vmc import AmplitudeFactory as FermionAmplitudeFactory
 from ..tensor_vmc import tensor2backend
 def compute_fpeps_parity(fs,start,stop):
@@ -51,11 +51,12 @@ def get_parity_cum(fpeps):
         start,stop = i*fpeps.Ly,(i+1)*fpeps.Ly
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
-class AmplitudeFactory(AmplitudeFactory2D,FermionAmplitudeFactory): 
+class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D): 
     def __init__(self,psi,blks=None,spinless=False):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
+        self.sites = list(itertools.product(range(self.Lx),range(self.Ly))
         psi.add_tag('KET')
         psi.reorder(direction='row',inplace=True)
         self.set_psi(psi) # current state stored in self.psi
@@ -79,37 +80,10 @@ class AmplitudeFactory(AmplitudeFactory2D,FermionAmplitudeFactory):
         # init contraction
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
         self.compress_opts = compress_opts
-    def get_constructors(self,psi):
-        from .block_interface import Constructor
-        constructors = [None] * (self.Lx * self.Ly)
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            data = psi[i,j].data
-            bond_infos = [data.get_bond_info(ax,flip=False) \
-                          for ax in range(data.ndim)]
-            cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=_FLAT)
-            dq = data.dq
-            size = cons.vector_size(dq)
-            ix = self.site_map[i,j]
-            constructors[ix] = (cons,dq),size,(i,j)
-        return constructors
-    def tensor2vec(self,tsr,ix):
-        cons,dq = self.constructors[ix][0]
-        return tensor2backend(cons.tensor_to_vector(tsr),'numpy')
-    def vec2tensor(self,x,ix):
-        cons,dq = self.constructors[ix][0]
-        return self.tensor2backend(cons.vector_to_tensor(x,dq),_BACKEND)
-    def get_bra_tsr(self,ci,i,j,append='',tn=None):
-        tn = self.psi if tn is None else tn 
-        inds = tn.site_ind(i,j)+append,
-        tags = tn.site_tag(i,j),tn.row_tag(i),tn.col_tag(j),'BRA' 
-        data = self.data_map[ci].dagger
-        return FermionTensor(data=data,inds=inds,tags=tags)
-    def site_grad(self,ftn_plq,i,j):
-        ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
-        tid = ket.get_fermion_info()[0]
-        ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
-        g = ftn_plq.contract(output_inds=ket.inds[::-1])
-        return g.data.dagger 
+        self.flat = _FLAT
+        self.deterministic = _DETERMINISTIC
+        self.pbc = _PBC
+        self.backend = _BACKEND
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
@@ -118,17 +92,24 @@ class AmplitudeFactory(AmplitudeFactory2D,FermionAmplitudeFactory):
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
         return (-1)**(np.dot(parity[1:],parity_cum) % 2)
+    def get_all_lenvs(self,cols,jmax=None,inplace=False):
+        cols.reorder('col',inplace=True)
+        return super().get_all_lenvs(cols,jmax=jmax,inplace=inplace)
+    def get_all_renvs(self,cols,jmin=None,inplace=False):
+        cols.reorder('col',inplace=True)
+        return super().get_all_renvs(cols,jmin=jmin,inplace=inplace)
+
 ####################################################################################
 # ham class 
 ####################################################################################
-from ..tensor_2d_vmc_tmp import Hamiltonian as Hamiltonian_
+from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def pair_tensor(self,bixs,kixs,tags=None):
         data = self.model.gate 
         inds = bixs[0],kixs[0],bixs[1],kixs[1]
         return FermionTensor(data=data,inds=inds,tags=tags) 
-from ..tensor_2d_vmc_tmp import model 
 from pyblock3.algebra.fermion_ops import H1
+from ..tensor_2d_vmc import model 
 from .fermion_vmc import tensor2backend as ftensor2backend
 class Hubbard(Hamiltonian):
     def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
@@ -316,21 +297,10 @@ class DensityMatrix(Hamiltonian):
 ####################################################################################
 # sampler 
 ####################################################################################
-from ..tensor_2d_vmc_tmp import ExchangeSampler2 as ExchangeSampler_
-class ExchangeSampler(ExchangeSampler_):
-    def new_pair(self,i1,i2):
-        if self.amplitude_factory.spinless:
-            return i2,i1
-        return self.new_pair_full(i1,i2)
-    def new_pair_full(self,i1,i2):
-        n = abs(pn_map[i1]-pn_map[i2])
-        if n==1:
-            i1_new,i2_new = i2,i1
-        else:
-            choices = [(i2,i1),(0,3),(3,0)] if n==0 else [(i2,i1),(1,2),(2,1)]
-            i1_new,i2_new = self.rng.choice(choices)
-        return i1_new,i2_new 
-
+from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler2D
+from .fermion_vmc import ExchangeSampler as FermionExchangeSampler
+class ExchangeSampler(FermionExchangeSampler,ExchangeSampler2D):
+    pass
 pattern_map = {'u':'+','r':'+','d':'-','l':'-','p':'+'}
 def get_patterns(Lx,Ly,shape='urdlp'):
     patterns = dict()

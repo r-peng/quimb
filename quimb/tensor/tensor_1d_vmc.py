@@ -1,4 +1,3 @@
-
 import time,itertools
 import numpy as np
 from mpi4py import MPI
@@ -8,91 +7,93 @@ RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 # set tensor symmetry
-import sys
 import autoray as ar
 import torch
 torch.autograd.set_detect_anomaly(False)
+
 from .torch_utils import SVD,QR
 ar.register_function('torch','linalg.svd',SVD.apply)
 ar.register_function('torch','linalg.qr',QR.apply)
+
+import sys
 this = sys.modules[__name__]
-def set_options(pbc=False):
-    this.pbc = pbc
-
-from .tensor_1d import MatrixProductState
-from .tensor_core import Tensor
-def get_product_state(L,config=None,bdim=1,eps=0.,pdim=4,normalize=True,pbc=False):
-    arrays = []
-    for i in range(L):
-        shape = [bdim] * 2
-        if not pbc and (i==0 or i==L-1):
-            shape.pop()
-        shape = tuple(shape) + (pdim,)
-
-        if config is None:
-            data = np.ones(shape)
-        else:
-            data = np.zeros(shape)
-            ix = config[i]
-            data[(0,)*(len(shape)-1)+(ix,)] = 1.
-        data += eps * np.random.rand(*shape)
-        if normalize:
-            data /= np.linalg.norm(data)
-        arrays.append(data)
-    return MatrixProductState(arrays) 
-class ContractionEngine:
-    def init_contraction(self,L,phys_dim=2):
+from .tensor_vmc import (
+    tensor2backend,
+    safe_contract,
+    contraction_error,
+)
+from .tensor_vmc import AmplitudeFactory as AmplitudeFactory_
+def set_options(pbc=False,deterministic=False,backend='numpy'):
+    this._PBC = pbc
+def get_all_lenvs(L,tn,jmax=None):
+    jmax = L-2 if jmax is None else jmax
+    first_col = tn.site_tag(0)
+    lenvs = [None] * L
+    for j in range(jmax+1): 
+        tags = first_col if j==0 else (first_col,tn.site_tag(j))
+        try:
+            tn ^= tags
+            lenvs[j] = tn.select(first_col,virtual=False)
+        except (ValueError,IndexError):
+            return lenvs
+    return lenvs
+def get_all_renvs(L,tn,jmin=None):
+    jmin = 1 if jmin is None else jmin
+    last_col = tn.site_tag(L-1)
+    renvs = [None] * L
+    for j in range(L-1,jmin-1,-1): 
+        tags = last_col if j==L-1 else (tn.site_tag(j),last_col)
+        try:
+            tn ^= tags
+            renvs[j] = tn.select(last_col,virtual=False)
+        except (ValueError,IndexError):
+            return renvs
+    return renvs
+def get_plq_from_envs(L,bsz,tn,lenvs,renvs):
+    plq = dict()
+    for j in range(L-bsz+1): 
+        tags = [tn.site_tag(j+ix) for ix in range(bsz)]
+        cols = tn.select(tags,which='any',virtual=False)
+        try:
+            if j>0:
+                other = cols
+                cols = lenvs[j-1]
+                cols.add_tensor_network(other,virtual=False)
+            if j<L-bsz:
+                cols.add_tensor_network(renvs[j+bsz],virtual=False)
+            plq[j,bsz] = cols.view_like_(tn)
+        except (AttributeError,TypeError): # lenv/renv is None
+            return plq
+    return plq
+class AmplitudeFactory(AmplitudeFactory_):
+    def __init__(self,psi,blks=None,phys_dim=2,**compress_opts):
         self.L = L
         self.nsite = L
-        self.pbc = pbc
+        self.sites = list(range(self.L))
+        psi.add_tag('KET')
+        self.set_psi(psi)
+        self.backend = _BACKEND
+        self.wfn2backend()
 
-        self.data_map = dict()
-        for i in range(phys_dim):
-            data = np.zeros(phys_dim)
-            data[i] = 1.
-            self.data_map[i] = data
-    def pair_valid(self,i1,i2):
-        if i1==i2:
-            return False
-        else:
-            return True
-    def intermediate_sign(self,config=None,ix1=None,ix2=None):
-        return 1.
-    def safe_contract(self,tn):
-        try:
-            data = tn.contract()
-        except (ValueError,IndexError):
-            return None
-        if self.backend=='torch':
-            if isinstance(data,torch.Tensor):
-                return data
-            else:
-                return None
-        return data
-    def _2backend(self,data,requires_grad):
-        if self.backend=='torch':
-            data = torch.tensor(data,requires_grad=requires_grad)
-        return data
-    def _torch2numpy(self,data,backend=None):
-        backend = self.backend if backend is None else backend
-        if backend=='torch':
-            data = data.detach().numpy()
-            if data.size==1:
-                data = data.reshape(-1)[0]
-        return data
-    def _2numpy(self,data,backend=None):
-        return self._torch2numpy(data,backend=backend)
-    def tsr_grad(self,tsr,set_zero=True):
-        grad = tsr.grad
-        if set_zero:
-            tsr.grad = None
-        return grad 
-    def get_bra_tsr(self,ci,i,append='',tn=None):
-        tn = self.psi if tn is None else tn 
-        inds = tn.site_ind(i)+append,
-        tags = tn.site_tag(i),'BRA'
-        data = self._2backend(self.data_map[ci],False)
-        return Tensor(data=data,inds=inds,tags=tags)
+        if blks is None:
+            blks = [self.sites]
+        self.site_map = self.get_site_map(blks)
+        self.constructors = self.get_constructors(psi)
+        self.block_dict = self.get_block_dict(blks)
+        if RANK==0:
+            sizes = [stop-start for start,stop in self.block_dict]
+            print('block_dict=',self.block_dict)
+            print('sizes=',sizes)
+    def site_tag(self,site):
+        return self.psi.site_tag(site)
+    def site_tags(self,site):
+        return (self.site_tag(site),)
+    def site_ind(self,site):
+        return self.psi.site_ind(site)
+    def plq_site(self,plq_key):
+        raise NotImplementedError
+    def update_cache(self,config=None):
+        pass
     def get_mid_env(self,config,append='',psi=None):
         psi = self.psi if psi is None else psi 
         row = psi.copy()
@@ -108,71 +109,18 @@ class ContractionEngine:
             row = None 
         return row
     def get_all_lenvs(self,tn,jmax=None):
-        jmax = self.L-2 if jmax is None else jmax
-        first_col = tn.site_tag(0)
-        lenvs = [None] * self.L
-        for j in range(jmax+1): 
-            tags = first_col if j==0 else (first_col,tn.site_tag(j))
-            try:
-                tn ^= tags
-                lenvs[j] = tn.select(first_col,virtual=False)
-            except (ValueError,IndexError):
-                return lenvs
-        return lenvs
+        return get_all_lenvs(self.L,tn,jmax=jmax)
     def get_all_renvs(self,tn,jmin=None):
-        jmin = 1 if jmin is None else jmin
-        last_col = tn.site_tag(self.L-1)
-        renvs = [None] * self.L
-        for j in range(self.L-1,jmin-1,-1): 
-            tags = last_col if j==self.L-1 else (tn.site_tag(j),last_col)
-            try:
-                tn ^= tags
-                renvs[j] = tn.select(last_col,virtual=False)
-            except (ValueError,IndexError):
-                return renvs
-        return renvs
-    def replace_sites(self,tn,sites,cis):
-        for i,ci in zip(sites,cis): 
-            bra = tn[tn.site_tag(i),'BRA']
-            bra_target = self.get_bra_tsr(ci,i,tn=tn)
-            bra.modify(data=bra_target.data,inds=bra_target.inds)
-        return tn
-    def site_grad(self,tn_plq,i):
-        tid = tuple(tn_plq._get_tids_from_tags((tn_plq.site_tag(i),'KET'),which='all'))[0]
-        ket = tn_plq._pop_tensor(tid)
-        g = tn_plq.contract(tags=all,output_inds=ket.inds)
-        return g.data 
-    def update_plq_from_3row(self,plq,tn,bsz,psi=None):
-        jmax = self.L - bsz
+        return get_all_renvs(self.L,tn,jmin=jmin)
+    def get_plq(self,config,bsz,psi=None):
         psi = self.psi if psi is None else psi
-        lenvs = self.get_all_lenvs(tn.copy(),jmax=jmax-1)
-        renvs = self.get_all_renvs(tn.copy(),jmin=bsz)
-        for j in range(jmax+1): 
-            tags = [tn.site_tag(j+ix) for ix in range(bsz)]
-            cols = tn.select(tags,which='any',virtual=False)
-            try:
-                if j>0:
-                    other = cols
-                    cols = lenvs[j-1]
-                    cols.add_tensor_network(other,virtual=False)
-                if j<jmax:
-                    cols.add_tensor_network(renvs[j+bsz],virtual=False)
-                plq[j,bsz] = cols.view_like_(psi)
-            except (AttributeError,TypeError): # lenv/renv is None
-                return plq
-        return plq
-    def get_plq_from_benvs(self,config,bsz,psi=None):
-        psi = self.psi if psi is None else psi
-        tn = self.get_mid_env(config) 
-        try:
-            tn.reorder(inplace=True)
-        except (NotImplementedError,AttributeError):
-            pass
+        tn = self.get_mid_env(config,psi=psi) 
         plq = dict()
         if self.pbc:
             plq[self.L-1,self.L] = tn.copy()
-        plq = self.update_plq_from_3row(plq,tn,bsz,psi=psi)
-        return plq
+        lenvs = self.get_all_lenvs(tn.copy(),jmax=self.Ly-bsz-1)
+        renvs = self.get_all_renvs(tn.copy(),jmin=bsz)
+        return get_plq_from_envs(self.L,bsz,tn,lenvs,renvs)
     def get_grad_dict_from_plq(self,plq,cx,backend='numpy'):
         # gradient
         vx = dict()
@@ -185,20 +133,6 @@ class ContractionEngine:
                     continue
                 vx[i] = self._2numpy(self.site_grad(tn.copy(),i)/cx[where],backend=backend)
         return vx
-class AmplitudeFactory(ContractionEngine):
-    def __init__(self,psi,phys_dim=2):
-        super().init_contraction(psi.L,phys_dim=phys_dim)
-        psi.add_tag('KET')
-
-        self.constructors = self.get_constructors(psi)
-        self.block_dict = self.get_block_dict()
-        if RANK==0:
-            sizes = [stop-start for start,stop in self.block_dict]
-            print('block_dict=',self.block_dict)
-            print('sizes=',sizes)
-
-        self.set_psi(psi) # current state stored in self.psi
-        self.backend = 'numpy'
     def config_sign(self,config=None):
         return 1.
     def get_constructors(self,psi):
@@ -281,136 +215,32 @@ class AmplitudeFactory(ContractionEngine):
         """Calculate the probability of a configuration.
         """
         return self.unsigned_amplitude(config) ** 2
-class Hamiltonian(ContractionEngine):
-    def __init__(self,L,nbatch=1,phys_dim=2):
-        super().init_contraction(L,phys_dim=phys_dim)
-        self.nbatch = nbatch
-    def pair_tensor(self,bixs,kixs,tags=None):
-        data = self._2backend(self.data_map[self.key],False)
-        inds = bixs[0],kixs[0],bixs[1],kixs[1]
-        return Tensor(data=data,inds=inds,tags=tags) 
-    def _pair_energy_from_plq(self,tn,config,where):
-        ix1,ix2 = where 
-        i1,i2 = config[ix1],config[ix2] 
-        if not self.pair_valid(i1,i2): # term vanishes 
-            return None 
-        kixs = [tn.site_ind(site) for site in where]
-        bixs = [kix+'*' for kix in kixs]
-        for site,kix,bix in zip((ix1,ix2),kixs,bixs):
-            tn[tn.site_tag(site),'BRA'].reindex_({kix:bix})
-        tn.add_tensor(self.pair_tensor(bixs,kixs),virtual=True)
-        ex = self.safe_contract(tn)
-        if ex is None:
-            return None
-        return self.pair_coeff(*where) * ex 
-    def _pair_energies_from_plq(self,plq,pairs,config):
-        ex = dict()
-        cx = dict()
-        for where in pairs:
-            key = self.pair_key(*where)
-
-            tn = plq[key] 
-            if tn is not None:
-                eij = self._pair_energy_from_plq(tn.copy(),config,where) 
-                if eij is not None:
-                    ex[where] = eij
-
-                cij = self._2numpy(tn.copy().contract())
-                cx[where] = cij 
-        return ex,cx
-    def batch_pair_energies_from_plq(self,config,psi):
+from .tensor_vmc import Hamiltonian as Hamiltonian_
+class Hamiltonian(Hamiltonian_):
+    def batch_pair_energies_from_plq(self,config,batch_idx):
+        return self.pair_energies_from_plq(config)
+    def pair_energy_from_plq(self,config):
         # form plqs
         plq = dict()
-        for bsz in self.plq_types:
-            plq.update(self.get_plq_from_benvs(config,bsz,psi=psi))
+        for bsz in self.model.plq_sz:
+            plq.update(self.amplitude_factory.get_plq(config,))
 
         # compute energy numerator 
-        ex,cx = self._pair_energies_from_plq(plq,pairs,config)
+        ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config)
         return ex,cx,plq
-    def batch_hessian_from_plq(self,config,amplitude_factory): # only used for Hessian
-        self.backend = 'torch'
-        psi = amplitude_factory.psi.copy()
-        for i in range(self.L):
-            psi[i].modify(data=self._2backend(psi[i].data,True))
-        ex,cx,plq = self.batch_pair_energies_from_plq(config,psi)
-
-        _,Hvx = self.parse_hessian(ex,peps,amplitude_factory)
-        ex = sum([self._2numpy(eij)/cx[where] for where,eij in ex.items()])
-        vx = self.get_grad_dict_from_plq(plq,cx,backend=self.backend) 
-        return ex,Hvx,cx,vx
-    def compute_local_energy_hessian_from_plq(self,config,amplitude_factory): 
-        ar.set_backend(torch.zeros(1))
-
-        ex,Hvx,cx,vx = self.batch_hessian_from_plq(config,amplitude_factory)  
-        eu = self.compute_local_energy_eigen(config)
-        ex += eu
-
-        vx = amplitude_factory.dict2vec(vx)
-        cx,err = self.contraction_error(cx)
-
-        Hvx = Hvx/cx + eu*vx
-        ar.set_backend(np.zeros(1))
-        return cx,ex,vx,Hvx,err 
-    def pair_energies_from_plq(self,config,amplitude_factory): 
-        self.backend = 'numpy'
-        plq = dict()
-        for bsz in self.plq_sz:
-            plq.update(amplitude_factory.get_plq_from_benvs(config,bsz))
-
-        ex,cx = self._pair_energies_from_plq(plq,self.pairs,config)
-        return ex,cx,plq
-    def compute_local_energy_gradient_from_plq(self,config,amplitude_factory,compute_v=True):
-        ex,cx,plq = self.pair_energies_from_plq(config,amplitude_factory)
-
-        ex = sum([eij/cx[where] for where,eij in ex.items()])
-        eu = self.compute_local_energy_eigen(config)
-        ex += eu
-
-        if not compute_v:
-            cx,err = self.contraction_error(cx)
-            return cx,ex,None,None,err 
-        #vx = amplitude_factory.get_grad_from_plq(plq,cx)  
-        vx = self.amplitude_gradient_deterministic(config,amplitude_factory)
-        cx,err = self.contraction_error(cx)
-        #print(ex,cx,err)
-        return cx,ex,vx,None,err
-    def amplitude_gradient_deterministic(self,config,amplitude_factory):
-        self.backend = 'torch'
-        ar.set_backend(torch.zeros(1))
-        cache_top = dict()
-        cache_bot = dict()
-        psi = amplitude_factory.psi.copy()
-        for i in range(self.L):
-            psi[i].modify(data=self._2backend(psi[i].data,True))
-
-        tn = self.get_mid_env(config,psi=psi)
-        cx = tn.contract() 
-
-        cx.backward()
-        vx = dict()
-        for i in range(self.L):
-            vx[i] = self.tsr_grad(psi[i].data)  
-        vx = {site:self._2numpy(vij) for site,vij in vx.items()}
-        vx = amplitude_factory.dict2vec(vx)  
-        cx = self._2numpy(cx)
-        return vx/cx
-    def compute_local_energy(self,config,amplitude_factory,compute_v=True,compute_Hv=False):
+    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         if compute_Hv:
-            return self.compute_local_energy_hessian_from_plq(config,amplitude_factory)
+            return self.compute_local_energy_hessian_from_plq(config)
         else:
-            return self.compute_local_energy_gradient_from_plq(config,amplitude_factory,compute_v=compute_v)
-    def parse_hessian(self,ex,psi,amplitude_factory):
-        if len(ex)==0:
-            return 0.,0.
-        ex_num = sum(ex.values())
-        ex_num.backward()
-        Hvx = dict()
-        for i in range(self.L):
-            Hvx[i] = self._2numpy(self.tsr_grad(psi[i].data))
-        return self._2numpy(ex_num),amplitude_factory.dict2vec(Hvx)  
-    def contraction_error(self,cx):
-        cx = np.array(list(cx.values()))
-        return np.mean(cx),0.
+            return self.compute_local_energy_gradient_from_plq(config,compute_v=compute_v)
+class Model:
+    def __init__(self,L):
+        self.L = L
+        self.nsite = L
+    def flatten(self,site):
+        return site
+    def flat2site(self,ix):
+        return ix
     def pairs_nn(self,d=1):
         ls = [] 
         for j in range(self.L):
@@ -418,118 +248,239 @@ class Hamiltonian(ContractionEngine):
                 where = j,j+d
                 ls.append(where)
             else:
-                if self.pbc:
+                if _PBC:
                     where = j,(j+d)%self.L
                     ls.append(where)
         return ls
     def pair_key(self,i,j):
         return i,abs(j-i)+1
-class ExchangeSampler2:
-    def __init__(self,L,seed=None,burn_in=0):
-        self.L = L
-        self.nsite = L
+from .tensor_vmc import get_gate2,_add_gate
+class J1J2(Model): 
+    def __init__(self,J1,J2,L):
+        super().__init__(L)
+        self.J1,self.J2 = J1,J2
 
-        self.rng = np.random.default_rng(seed)
-        self.exact = False
-        self.dense = False
-        self.burn_in = burn_in 
-        self.amplitude_factory = None
-        self.backend = 'numpy'
-    def preprocess(self):
-        self._burn_in()
-    def _burn_in(self,config=None,burn_in=None):
-        if config is not None:
-            self.config = config 
-        self.px = self.amplitude_factory.prob(self.config)
+        self.gate = tensor2backend(get_gate2((1.,1.,0.),to_bk=False),_BACKEND)
 
-        if RANK==0:
-            print('\tprob=',self.px)
-            return 
-        t0 = time.time()
-        burn_in = self.burn_in if burn_in is None else burn_in
-        for n in range(burn_in):
-            self.config,self.omega = self.sample()
-        if RANK==SIZE-1:
-            print('\tburn in time=',time.time()-t0)
-    def new_pair(self,i1,i2):
-        return i2,i1
-    def _new_pair(self,i,bsz):
-        ix1,ix2 = i,(i+1)%self.L
-        i1,i2 = self.config[ix1],self.config[ix2]
-        if not self.amplitude_factory.pair_valid(i1,i2): # continue
-            return (None,) * 3
-        i1_new,i2_new = self.new_pair(i1,i2)
-        config_new = list(self.config)
-        config_new[ix1] = i1_new
-        config_new[ix2] = i2_new
-        return (ix1,ix2),(i1_new,i2_new),tuple(config_new)
-    def update_pair(self,i,bsz,cols,tn):
-        sites,config_sites,config_new = self._new_pair(i,bsz)
-        if config_sites is None:
-            return tn
+        self.pairs = self.pairs_nn() + self.pairs_nn(d=2)
+        self.plq_sz = 3,
+    def pair_valid(self,i1,i2):
+        if i1==i2:
+            return False
+        else:
+            return True
+    def pair_coeff(self,i,j): # coeff for pair tsr
+        d = abs(i-j)
+        if d==1:
+            return self.J1
+        if d==2:
+            return self.J2
+    def compute_local_energy_eigen(self,config):
+        e = np.zeros(2) 
+        for d in (1,2):
+            for i in range(self.L):
+                s1 = (-1) ** config[self.flatten(i)]
+                if i+d<self.L:
+                    e1 += s1 * (-1)**config[i+d]
+                else:
+                    if _PBC:
+                        e1 += s1 * (-1)**config[(i+d)%self.L]
+        return .25 * (e[0]*self.J1 + e[1]*self.J2) 
+    def pair_terms(self,i1,i2):
+        return [(1-i1,1-i2,.5)]
+#class ExchangeSampler2:
+#    def __init__(self,L,seed=None,burn_in=0):
+#        self.L = L
+#        self.nsite = L
+#
+#        self.rng = np.random.default_rng(seed)
+#        self.exact = False
+#        self.dense = False
+#        self.burn_in = burn_in 
+#        self.amplitude_factory = None
+#        self.backend = 'numpy'
+#    def preprocess(self):
+#        self._burn_in()
+#    def _burn_in(self,config=None,burn_in=None):
+#        if config is not None:
+#            self.config = config 
+#        self.px = self.amplitude_factory.prob(self.config)
+#
+#        if RANK==0:
+#            print('\tprob=',self.px)
+#            return 
+#        t0 = time.time()
+#        burn_in = self.burn_in if burn_in is None else burn_in
+#        for n in range(burn_in):
+#            self.config,self.omega = self.sample()
+#        if RANK==SIZE-1:
+#            print('\tburn in time=',time.time()-t0)
+#    def new_pair(self,i1,i2):
+#        return i2,i1
+#    def _new_pair(self,i,bsz):
+#        ix1,ix2 = i,(i+1)%self.L
+#        i1,i2 = self.config[ix1],self.config[ix2]
+#        if not self.amplitude_factory.pair_valid(i1,i2): # continue
+#            return (None,) * 3
+#        i1_new,i2_new = self.new_pair(i1,i2)
+#        config_new = list(self.config)
+#        config_new[ix1] = i1_new
+#        config_new[ix2] = i2_new
+#        return (ix1,ix2),(i1_new,i2_new),tuple(config_new)
+#    def update_pair(self,i,bsz,cols,tn):
+#        sites,config_sites,config_new = self._new_pair(i,bsz)
+#        if config_sites is None:
+#            return tn
+#
+#        cols = self.amplitude_factory.replace_sites(cols,sites,config_sites) 
+#        py = self.amplitude_factory.safe_contract(cols)
+#        if py is None:
+#            return tn 
+#        py = py ** 2
+#
+#        try:
+#            acceptance = py / self.px
+#        except ZeroDivisionError:
+#            acceptance = 1. if py > self.px else 0.
+#        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
+#            self.px = py
+#            self.config = config_new
+#            tn = self.amplitude_factory.replace_sites(tn,sites,config_sites)
+#        return tn
+#    def _get_cols_forward(self,first_col,j,bsz,tn,renvs):
+#        tags = [tn.site_tag(j+ix) for ix in range(bsz)]
+#        cols = tn.select(tags,which='any',virtual=False)
+#        if j>0:
+#            other = cols
+#            cols = tn.select(first_col,virtual=False)
+#            cols.add_tensor_network(other,virtual=False)
+#        if j<self.L - bsz:
+#            cols.add_tensor_network(renvs[j+bsz],virtual=False)
+#        cols.view_like_(tn)
+#        return cols
+#    def sweep_col_forward(self,tn,bsz):
+#        try:
+#            tn.reorder(inplace=True)
+#        except (NotImplementedError,AttributeError):
+#            pass
+#        renvs = self.amplitude_factory.get_all_renvs(tn.copy(),jmin=bsz)
+#        first_col = tn.site_tag(0)
+#        for j in range(self.L - bsz + 1): 
+#            cols = self._get_cols_forward(first_col,j,bsz,tn,renvs)
+#            tn = self.update_pair(j,bsz,cols,tn) 
+#            tn ^= first_col,tn.site_tag(j) 
+#    def _get_cols_backward(self,last_col,j,bsz,tn,lenvs):
+#        tags = [tn.site_tag(j+ix) for ix in range(bsz)] 
+#        cols = tn.select(tags,which='any',virtual=False)
+#        if j>0:
+#            other = cols
+#            cols = lenvs[j-1]
+#            cols.add_tensor_network(other,virtual=False)
+#        if j<self.L - bsz:
+#            cols.add_tensor_network(tn.select(last_col,virtual=False),virtual=False)
+#        cols.view_like_(tn)
+#        return cols
+#    def sweep_col_backward(self,tn,bsz):
+#        try:
+#            tn.reorder(inplace=True)
+#        except (NotImplementedError,AttributeError):
+#            pass
+#        lenvs = self.amplitude_factory.get_all_lenvs(tn.copy(),jmax=self.L-1-bsz)
+#        last_col = tn.site_tag(self.L-1)
+#        for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
+#            cols = self._get_cols_backward(last_col,j,bsz,tn,lenvs)
+#            tn = self.update_pair(j,bsz,cols,tn) 
+#            tn ^= tn.site_tag(j+bsz-1),last_col
+#    def sample(self):
+#        cdir = self.rng.choice([-1,1]) 
+#        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+#        tn = self.amplitude_factory.get_mid_env(self.config)
+#        sweep_col(tn,2)
+#        return self.config,self.px
+from .tensor_1d import MatrixProductState,MatrixProductOperator
+from .tensor_core import Tensor,TensorNetwork,rand_uuid
+def get_product_state(L,config=None,bdim=1,eps=0.,pdim=4,normalize=True,pbc=False):
+    arrays = []
+    for i in range(L):
+        shape = [bdim] * 2
+        if not pbc and (i==0 or i==L-1):
+            shape.pop()
+        shape = tuple(shape) + (pdim,)
 
-        cols = self.amplitude_factory.replace_sites(cols,sites,config_sites) 
-        py = self.amplitude_factory.safe_contract(cols)
-        if py is None:
-            return tn 
-        py = py ** 2
+        if config is None:
+            data = np.ones(shape)
+        else:
+            data = np.zeros(shape)
+            ix = config[i]
+            data[(0,)*(len(shape)-1)+(ix,)] = 1.
+        data += eps * np.random.rand(*shape)
+        if normalize:
+            data /= np.linalg.norm(data)
+        arrays.append(data)
+    return MatrixProductState(arrays) 
+def compute_energy(mps,terms):
+    # terms: tebd ham terms
+    norm,_,bra = mps.make_norm(return_all=True)
+    bsz = max([abs(i-j)+1 for i,j in terms.keys()])
+    lenvs = get_all_lenvs(mps.L,norm.copy(),jmax=mps.L-bsz-1) 
+    renvs = get_all_renvs(mps.L,norm.copy(),jmin=bsz)
+    n = lenvs[bsz-1].copy()
+    n.add_tensor_network(renvs[bsz],virtual=False)
+    n = n.contract()
+    print('norm=',n)
 
-        try:
-            acceptance = py / self.px
-        except ZeroDivisionError:
-            acceptance = 1. if py > self.px else 0.
-        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-            self.px = py
-            self.config = config_new
-            tn = self.amplitude_factory.replace_sites(tn,sites,config_sites)
-        return tn
-    def _get_cols_forward(self,first_col,j,bsz,tn,renvs):
-        tags = [tn.site_tag(j+ix) for ix in range(bsz)]
-        cols = tn.select(tags,which='any',virtual=False)
-        if j>0:
-            other = cols
-            cols = tn.select(first_col,virtual=False)
-            cols.add_tensor_network(other,virtual=False)
-        if j<self.L - bsz:
-            cols.add_tensor_network(renvs[j+bsz],virtual=False)
-        cols.view_like_(tn)
-        return cols
-    def sweep_col_forward(self,tn,bsz):
-        try:
-            tn.reorder(inplace=True)
-        except (NotImplementedError,AttributeError):
-            pass
-        renvs = self.amplitude_factory.get_all_renvs(tn.copy(),jmin=bsz)
-        first_col = tn.site_tag(0)
-        for j in range(self.L - bsz + 1): 
-            cols = self._get_cols_forward(first_col,j,bsz,tn,renvs)
-            tn = self.update_pair(j,bsz,cols,tn) 
-            tn ^= first_col,tn.site_tag(j) 
-    def _get_cols_backward(self,last_col,j,bsz,tn,lenvs):
-        tags = [tn.site_tag(j+ix) for ix in range(bsz)] 
-        cols = tn.select(tags,which='any',virtual=False)
-        if j>0:
-            other = cols
-            cols = lenvs[j-1]
-            cols.add_tensor_network(other,virtual=False)
-        if j<self.L - bsz:
-            cols.add_tensor_network(tn.select(last_col,virtual=False),virtual=False)
-        cols.view_like_(tn)
-        return cols
-    def sweep_col_backward(self,tn,bsz):
-        try:
-            tn.reorder(inplace=True)
-        except (NotImplementedError,AttributeError):
-            pass
-        lenvs = self.amplitude_factory.get_all_lenvs(tn.copy(),jmax=self.L-1-bsz)
-        last_col = tn.site_tag(self.L-1)
-        for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
-            cols = self._get_cols_backward(last_col,j,bsz,tn,lenvs)
-            tn = self.update_pair(j,bsz,cols,tn) 
-            tn ^= tn.site_tag(j+bsz-1),last_col
-    def sample(self):
-        cdir = self.rng.choice([-1,1]) 
-        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-        tn = self.amplitude_factory.get_mid_env(self.config)
-        sweep_col(tn,2)
-        return self.config,self.px
+    plq = get_plq_from_envs(mps.L,bsz,norm,lenvs,renvs)
+    e = 0.
+    for (i,j),gate in terms.items():
+        if gate.shape==(4,4):
+            gate = gate.reshape((2,)*4)
+        e += _add_gate(plq[min(i,j,mps.L-bsz),bsz].copy(),gate,(i,j),mps.site_ind,mps.site_tag,contract=True)
+    return e/n  
+def build_mpo(L,terms):
+    self = None
+    for (i,j),gate in terms.items():
+        if gate.shape==(4,4):
+            gate = gate.reshape((2,)*4) # gate=(b1,b2,k1,k2)
+        gate = gate.transpose(0,2,1,3)
+        gate = gate.reshape((4,4))
+        u,s,v = np.linalg.svd(gate)
+        bdim = len(s)
+        s **= .5
+        u *= s.reshape((1,-1))
+        v *= s.reshape((-1,1))
+        u = u.reshape((2,2,bdim))
+        v = v.reshape((bdim,2,2))
+        
+
+        arrs = []
+        for site in range(i):
+            arr = np.eye(2)
+            if site>0:
+                arr = arr.reshape((1,)+arr.shape)
+            arr = arr.reshape(arr.shape+(1,))
+            arrs.append(arr)
+
+        if i>0:
+            u = u.reshape((1,)+u.shape)
+        arrs.append(u)
+        for site in range(i+1,j):
+            arr = np.einsum('lr,ud->ludr',np.eye(bdim),np.eye(2))
+            arrs.append(arr.reshape((1,)+arr.shape+(1,)))
+        if j<L-1:
+            v = v.reshape(v.shape+(1,))
+        arrs.append(v)
+
+        for site in range(j+1,L):
+            arr = np.eye(2)
+            arr = arr.reshape((1,)+arr.shape)
+            if site<L-1:
+                arr = arr.reshape(arr.shape+(1,))
+            arrs.append(arr)
+        other = MatrixProductOperator(arrs,shape='ludr')
+        print(i,j)
+        print(other)
+        if self is None:
+            self = other 
+        else:
+            self.add_MPO(other,inplace=True,compress=True)
+        print(self) 
