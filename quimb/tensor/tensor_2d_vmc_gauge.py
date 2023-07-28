@@ -109,7 +109,7 @@ class AmplitudeFactory(AmplitudeFactory_):
         super().wfn2backend(backend='torch',requires_grad=requires_grad)
         for where in self.gauges:
             self.gauges[where] = self.tensor2backend(self.gauges[where],'torch',requires_grad=requires_grad)
-    def parse_hessian(self,ex,cx=None):
+    def parse_derivative(self,ex,cx=None):
         if len(ex)==0:
             return 0.,0.
         ex_num = sum(ex.values())

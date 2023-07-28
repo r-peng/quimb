@@ -7,37 +7,22 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-# set backend
-import autoray as ar
-import torch
-torch.autograd.set_detect_anomaly(False)
-
-from ..torch_utils import SVD,QR
-ar.register_function('torch','linalg.svd',SVD.apply)
-ar.register_function('torch','linalg.qr',QR.apply)
-
-import pyblock3.algebra.ad
-pyblock3.algebra.ad.ENABLE_AUTORAY = True
-from pyblock3.algebra.ad import core
-core.ENABLE_FUSED_IMPLS = False
-
 import sys
 this = sys.modules[__name__]
-def set_options(pbc=False,deterministic=False,backend='numpy',symmetry='u1',flat=True):
+def set_options(pbc=False,deterministic=False,symmetry='u1',flat=True):
     this._PBC = pbc
     this._DETERMINISTIC = deterministic
-    this._BACKEND = backend
     this._SYMMETRY = symmetry
     this._FLAT = flat 
-config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
+    from ..tensor_2d_vmc import set_options
+    set_options(pbc=pbc,deterministic=deterministic)
 from ..tensor_2d_vmc import flatten,flat2site 
-from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid,tensor_split
+from .fermion_core import FermionTensor,FermionTensorNetwork
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
 from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory2D
 from .fermion_vmc import AmplitudeFactory as FermionAmplitudeFactory
-from ..tensor_vmc import tensor2backend
 def compute_fpeps_parity(fs,start,stop):
     if start==stop:
         return 0
@@ -52,17 +37,28 @@ def get_parity_cum(fpeps):
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
 class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D): 
-    def __init__(self,psi,blks=None,spinless=False):
+    def __init__(self,psi,blks=None,spinless=False,backend='numpy',**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
+        self.sites = list(itertools.product(range(self.Lx),range(self.Ly)))
         psi.add_tag('KET')
         psi.reorder(direction='row',inplace=True)
         self.set_psi(psi) # current state stored in self.psi
+        self.backend = backend
+
+        self.symmetry = _SYMMETRY
+        self.flat = _FLAT
+        self.spinless = spinless
+        self.data_map = self.get_data_map()
         self.wfn2backend()
 
-        self.data_map = self.get_data_map(_BACKEND,symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
-        self.spinless = spinless
+        # init contraction
+        self.compress_opts = compress_opts
+        self.pbc = _PBC
+        self.deterministic = _DETERMINISTIC
+        if self.deterministic:
+            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         self.parity_cum = get_parity_cum(psi)
 
@@ -75,41 +71,8 @@ class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D):
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
+        self.nparam = len(self.get_x())
 
-        # init contraction
-        self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-        self.compress_opts = compress_opts
-    def get_constructors(self,psi):
-        from .block_interface import Constructor
-        constructors = [None] * (self.Lx * self.Ly)
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            data = psi[i,j].data
-            bond_infos = [data.get_bond_info(ax,flip=False) \
-                          for ax in range(data.ndim)]
-            cons = Constructor.from_bond_infos(bond_infos,data.pattern,flat=_FLAT)
-            dq = data.dq
-            size = cons.vector_size(dq)
-            ix = self.site_map[i,j]
-            constructors[ix] = (cons,dq),size,(i,j)
-        return constructors
-    def tensor2vec(self,tsr,ix):
-        cons,dq = self.constructors[ix][0]
-        return tensor2backend(cons.tensor_to_vector(tsr),'numpy')
-    def vec2tensor(self,x,ix):
-        cons,dq = self.constructors[ix][0]
-        return self.tensor2backend(cons.vector_to_tensor(x,dq),_BACKEND)
-    def get_bra_tsr(self,ci,i,j,append='',tn=None):
-        tn = self.psi if tn is None else tn 
-        inds = tn.site_ind(i,j)+append,
-        tags = tn.site_tag(i,j),tn.row_tag(i),tn.col_tag(j),'BRA' 
-        data = self.data_map[ci].dagger
-        return FermionTensor(data=data,inds=inds,tags=tags)
-    def site_grad(self,ftn_plq,i,j):
-        ket = ftn_plq[ftn_plq.site_tag(i,j),'KET']
-        tid = ket.get_fermion_info()[0]
-        ket = ftn_plq._pop_tensor(tid,remove_from_fermion_space='end')
-        g = ftn_plq.contract(output_inds=ket.inds[::-1])
-        return g.data.dagger 
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
@@ -118,29 +81,44 @@ class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D):
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
         return (-1)**(np.dot(parity[1:],parity_cum) % 2)
-####################################################################################
-# ham class 
-####################################################################################
-from ..tensor_2d_vmc import Hamiltonian as Hamiltonian_
-class Hamiltonian(Hamiltonian_):
-    def pair_tensor(self,bixs,kixs,tags=None):
-        data = self.model.gate 
-        inds = bixs[0],kixs[0],bixs[1],kixs[1]
-        return FermionTensor(data=data,inds=inds,tags=tags) 
+    def get_all_lenvs(self,cols,jmax=None,inplace=False):
+        cols.reorder('col',inplace=True)
+        return super().get_all_lenvs(cols,jmax=jmax,inplace=inplace)
+    def get_all_renvs(self,cols,jmin=None,inplace=False):
+        cols.reorder('col',inplace=True)
+        return super().get_all_renvs(cols,jmin=jmin,inplace=inplace)
+
 from pyblock3.algebra.fermion_ops import H1
-from ..tensor_2d_vmc import model 
-from .fermion_vmc import tensor2backend as ftensor2backend
-class Hubbard(Hamiltonian):
+from ..tensor_2d_vmc import Model as Model2D
+from .fermion_vmc import Model as FermionModel
+from .fermion_vmc import pn_map
+class Model(FermionModel,Model2D):
+    pass 
+class Hubbard(Model):
     def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
         super().__init__(Lx,Ly,nbatch=nbatch)
         self.t,self.u = t,u
-        self.gate = ftensor2backend(H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless).transpose((0,2,1,3)),_BACKEND)
+        self.gate = H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
+        self.order = 'b1,b2,k1,k2'
+        self.spinless = spinless
 
         self.pairs = self.pairs_nn()
-        if self.deterministic:
-            self.batch_deterministic()
+        if _DETERMINISTIC:
+            self.batched_pairs = dict()
+            self.batch_deterministic_nnh() 
+            self.batch_deterministic_nnv() 
         else:
             self.batch_plq_nn()
+    def pair_key(self,site1,site2):
+        # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
+        dx = site2[0]-site1[0]
+        dy = site2[1]-site1[1]
+        return site1,(dx+1,dy+1)
+    def pair_valid(self,i1,i2):
+        if i1==i2:
+            return False
+        else:
+            return True
     def pair_coeff(self,site1,site2):
         return -self.t
     def compute_local_energy_eigen(self,config):
@@ -187,7 +165,7 @@ class FDKineticO2(Hubbard):
                     h[ix1,ix2] = -self.t
                     h[ix2,ix1] = -self.t
         return h
-class FDKineticO4(Hamiltonian):
+class FDKineticO4(Model):
     def __init__(self,N,L,**kwargs):
         super().__init__(N,N,**kwargs)
         self.eps = L/(N+1e-15) if pbc else L/(N+1.)
@@ -297,7 +275,7 @@ class UEGO4(FDKineticO4):
     def compute_local_energy_eigen(self,config):
         ke = super().compute_local_energy_eigen(config)
         v = coulomb(config,self.Lx,self.Ly,self.eps,self.spinless)
-class DensityMatrix(Hamiltonian):
+class DensityMatrix:
     def __init__(self,Lx,Ly,spinless=False):
         self.Lx,self.Ly = Lx,Ly 
         self.pairs = [] 

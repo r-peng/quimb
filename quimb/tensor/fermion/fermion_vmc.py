@@ -1,11 +1,15 @@
+import numpy as np
+import itertools
 from ..tensor_vmc import DenseSampler as DenseSampler_ 
+config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
 class DenseSampler(DenseSampler_):
-    def __init__(self,nsite,nelec,**kwargs):
+    def __init__(self,nsite,nelec,spinless=False,**kwargs):
         self.nelec = nelec
+        self.spinless = spinless
         nspin = (nelec,) if spinless else None
         super().__init__(nsite,nspin,**kwargs)
     def get_all_configs(self):
-        if self.amplitude_factory.spinless:
+        if self.spinless:
             return super().get_all_configs()
         return self.get_all_configs_u11()
     def get_all_configs_u11(self):
@@ -62,7 +66,8 @@ class ExchangeSampler(ExchangeSampler_):
             i1_new,i2_new = self.rng.choice(choices)
         return i1_new,i2_new 
 from .fermion_core import FermionTensor,FermionTensorNetwork
-def load_tn_from_disc(fname, delete_file=False):
+import pickle,uuid
+def load_ftn_from_disc(fname, delete_file=False):
 
     # Get the data
     if type(fname) != str:
@@ -118,7 +123,7 @@ def load_tn_from_disc(fname, delete_file=False):
     return tn
 def rand_fname():
     return str(uuid.uuid4())
-def write_tn_to_disc(tn, tmpdir, provided_filename=False):
+def write_ftn_to_disc(tn, tmpdir, provided_filename=False):
 
     # Create a generic dictionary to hold all information
     data = dict()
@@ -164,16 +169,20 @@ def write_tn_to_disc(tn, tmpdir, provided_filename=False):
 
         # Return the filename
         return fname
+pn_map = [0,1,1,2]
 def config2pn(config,start,stop,spinless):
-    pn_map = [0,1,1,2]
     if spinless:
         return config[start:stop]
     else:
         return [pn_map[ci] for ci in config[start:stop]]
+import pyblock3.algebra.ad
+pyblock3.algebra.ad.ENABLE_AUTORAY = True
+from pyblock3.algebra.ad import core
+core.ENABLE_FUSED_IMPLS = False
 from pyblock3.algebra.ad.fermion import SparseFermionTensor
 from pyblock3.algebra.fermion import FlatFermionTensor
 from pyblock3.algebra.fermion_ops import vaccum,creation,H1
-def get_data_map(self,backend,symmetry='u1',flat=True,spinless=False):
+def get_data_map(symmetry='u1',flat=True,spinless=False):
     data_map = dict()
     if spinless: # spinless
         cre = creation(spin='a',symmetry=symmetry,flat=flat,spinless=True)
@@ -181,8 +190,8 @@ def get_data_map(self,backend,symmetry='u1',flat=True,spinless=False):
         occ = np.tensordot(cre,vac,axes=([1],[0])) 
         data_map['cre'] = cre
         data_map['ann'] = cre.dagger 
-        data_map[0] = occ 
-        data_map[1] = vac 
+        data_map[0] = vac 
+        data_map[1] = occ 
     else: # spin-1/2
         cre_a = creation(spin='a',symmetry=symmetry,flat=flat,spinless=False)
         cre_b = creation(spin='b',symmetry=symmetry,flat=flat,spinless=False)
@@ -199,26 +208,46 @@ def get_data_map(self,backend,symmetry='u1',flat=True,spinless=False):
         data_map[1] = occ_a
         data_map[2] = occ_b
         data_map[3] = occ_db
-
-    for key in data_map:
-        data_map[key] = tensor2backend(data_map[key],backend)   
     return data_map
-def tensor2backend(self,data,backend,requires_grad=False):
+def tensor2backend(data,backend,requires_grad=False):
     if isinstance(data,FlatFermionTensor): 
         if backend=='torch':
-            data = SparsefermionTensor.from_flat(data,requires_grad=requires_grad)
-    elif instance(data,SparseFermionTensor):
+            data = SparseFermionTensor.from_flat(data,requires_grad=requires_grad)
+    elif isinstance(data,SparseFermionTensor):
         if backend=='numpy':
             data = data.to_flat()
         else:
-            data/requires_grad_(requires_grad=requires_grad)
-    else:
-        print(data)
-        raise TypeError
+            data.requires_grad_(requires_grad=requires_grad)
+    elif isinstance(data,np.ndarray):
+        if backend=='numpy':
+            pass
+        else:
+            print(data)
+            raise TypeError
     return data
+from ..tensor_vmc import safe_contract
+def _add_gate(tn,gate,order,where,site_ind,site_tag,contract=True):
+    # reindex
+    kixs = [site_ind(site) for site in where]
+    bixs = [kix+'*' for kix in kixs]
+    for site,kix,bix in zip(where,kixs,bixs):
+        tn[site_tag(site),'BRA'].reindex_({kix:bix})
+
+    # add gate
+    if order=='b1,k1,b2,k2':
+        inds = bixs[0],kixs[0],bixs[1],kixs[1]
+    elif order=='b1,b2,k1,k2':
+        inds = bixs + kixs
+    else:
+        raise NotImplementedError
+    T = FermionTensor(data=gate,inds=inds)
+    tn.add_tensor(T,virtual=True)
+    if not contract:
+        return tn  
+    return safe_contract(tn)
 class AmplitudeFactory:
     def write_tn_to_disc(self,tn,fname):
-        return write_tn_to_disc(tn,fname)
+        return write_ftn_to_disc(tn,fname,provided_filename=True)
     def get_constructors(self,psi):
         from .block_interface import Constructor
         constructors = [None] * self.nsite 
@@ -232,11 +261,14 @@ class AmplitudeFactory:
             ix = self.site_map[site]
             constructors[ix] = (cons,dq),size,site
         return constructors
-    def get_data_map(self,backend,symmetry='u1',flat=True):
-        return get_data_map(backend,symmetry=symmetry,flat=flat)
+    def get_data_map(self):
+        return get_data_map(symmetry=self.symmetry,flat=self.flat,spinless=self.spinless)
+    def tensor2backend(self,data,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        return tensor2backend(data,backend,requires_grad=requires_grad)
     def tensor2vec(self,tsr,ix):
         cons,dq = self.constructors[ix][0]
-        return tensor2backend(cons.tensor_to_vector(tsr),'numpy')
+        return cons.tensor_to_vector(self.tensor2backend(tsr,'numpy'))
     def vec2tensor(self,x,ix):
         cons,dq = self.constructors[ix][0]
         return self.tensor2backend(cons.vector_to_tensor(x,dq),self.backend)
@@ -249,7 +281,7 @@ class AmplitudeFactory:
     def get_bra_tsr(self,ci,site,append=''):
         inds = self.site_ind(site)+append,
         tags = self.site_tags(site) + ('BRA',)
-        data = self.data_map[ci].copy()
+        data = self.data_map[ci].dagger
         return FermionTensor(data=data,inds=inds,tags=tags)
     def site_grad(self,tn,site):
         ket = tn[self.site_tag(site),'KET']
@@ -265,3 +297,8 @@ class AmplitudeFactory:
         else:
             absorb = {'left':'right','right':'left'}[absorb]
             self._tensor_compress_bond(T2,T1,absorb=absorb)
+    def _add_gate(self,tn,gate,order,where,contract=True):
+        return _add_gate(tn.copy(),gate,order,where,self.site_ind,self.site_tag,contract=contract)
+class Model:
+    def gate2backend(self,backend):
+        self.gate = tensor2backend(self.gate,backend)

@@ -1011,6 +1011,8 @@ class DenseSampler:
 
         plocal = [] 
         for config in configs:
+            #print('sampler',config)
+            config = self.amplitude_factory.parse_config(config)
             plocal.append(self.amplitude_factory.prob(config))
         plocal = np.array(plocal)
          
@@ -1039,6 +1041,7 @@ class DenseSampler:
         assert isinstance(self.nspin,tuple)
         sites = list(range(self.nsite))
         occs = list(itertools.combinations(sites,self.nspin[0]))
+        #occs = list(itertools.product((0,1),repeat=self.nsite))
         configs = [None] * len(occs) 
         for i,occ in enumerate(occs):
             config = [0] * (self.nsite) 
@@ -1057,7 +1060,8 @@ class ExchangeSampler:
     def _burn_in(self,config=None,burn_in=None):
         if config is not None:
             self.config = config 
-        self.px = self.amplitude_factory.prob(self.config)
+        af = self.amplitude_factory
+        self.px = af.prob(af.parse_config(self.config))
 
         if RANK==0:
             print('\tprob=',self.px)
@@ -1104,11 +1108,46 @@ def safe_contract(tn):
     if isinstance(data,int):
         return None
     return data
-def contraction_error(cx):
-    cx = np.array(list(cx.values()))
-    max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
-    return mean_,np.fabs((max_-min_)/mean_)
+def contraction_error(cx,multiply=True):
+    def _contraction_error(cx):
+        if isinstance(cx,dict):
+            cx = np.array(list(cx.values()))
+            max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
+            return mean_,np.fabs((max_-min_)/mean_)
+        else:
+            return cx,0.
+
+    if isinstance(cx,dict):
+        return _contraction_error(cx)
+    if isinstance(cx,list):
+        cx_,err = np.zeros(3),np.zeros(3)
+        for ix in range(3): 
+            cx_[ix],err[ix] = _contraction_error(cx[ix])
+        if multiply:
+            cx_ = np.prod(cx_)
+        return cx_,np.amax(err)
+    return cx,0.
+def list2dict(ls):
+    if isinstance(ls,dict):
+        return ls
+    dict_ = dict()
+    for ix in range(3):
+        for key,val in ls[ix].items():
+            dict_[key,ix] = val
+    return dict_
+def dict2list(dict_):
+    if isinstance(dict_,list):
+        return dict_
+    ls = [dict(),dict(),dict()] 
+    for (key,ix),val in dict_.items():
+        ls[ix][key] = val
+    return ls
+import autoray as ar
 import torch
+torch.autograd.set_detect_anomaly(False)
+from .torch_utils import SVD,QR
+ar.register_function('torch','linalg.svd',SVD.apply)
+ar.register_function('torch','linalg.qr',QR.apply)
 def tensor2backend(data,backend,requires_grad=False):
     if isinstance(data,np.ndarray):
         if backend=='torch': # numpy to torch 
@@ -1121,19 +1160,39 @@ def tensor2backend(data,backend,requires_grad=False):
         else: # torch to torch
             data.requires_grad_(requires_grad=requires_grad)
     else:
-        print(data)
-        raise TypeError
+        pass
     return data
-from .tensor_core import Tensor,rand_uuid,group_inds
+from .tensor_core import Tensor,rand_uuid
+def _add_gate(tn,gate,order,where,site_ind,site_tag,contract=True):
+    # reindex
+    kixs = [site_ind(site) for site in where]
+    bixs = [kix+'*' for kix in kixs]
+    for site,kix,bix in zip(where,kixs,bixs):
+        tn[site_tag(site),'BRA'].reindex_({kix:bix})
+
+    # add gate
+    if order=='b1,k1,b2,k2':
+        inds = bixs[0],kixs[0],bixs[1],kixs[1]
+    elif order=='b1,b2,k1,k2':
+        inds = bixs + kixs
+    else:
+        raise NotImplementedError
+    T = Tensor(data=gate,inds=inds)
+    tn.add_tensor(T,virtual=True)
+    if not contract:
+        return tn
+    return safe_contract(tn)
 class AmplitudeFactory:
-###############################################################################################
-# wfn methods
-###############################################################################################
+##### wfn methods #####
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
+        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+        ar.set_backend(tsr)
         for site in self.sites:
             tag = self.site_tag(site)
-            self.psi[tag].modify(data=self.tensor2backend(self.psi[tag].data,backend,requires_grad=requires_grad))
+            self.psi[tag].modify(data=self.tensor2backend(self.psi[tag].data,backend=backend,requires_grad=requires_grad))
+        for key in self.data_map:
+            self.data_map[key] = self.tensor2backend(self.data_map[key],backend=backend,requires_grad=False)
     def get_site_map(self,blks):
         site_order = []
         for blk in blks:
@@ -1217,69 +1276,27 @@ class AmplitudeFactory:
             if fname is not None: # save psi to disc
                 self.write_tn_to_disc(psi,fname)
         return psi
-    def parse_hessian(self,ex,cx=None):
-        if len(ex)==0:
-            return 0.,0.
-        ex_num = sum(ex.values())
-        ex_num.backward()
-        Hvx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
-        ex = None if cx is None else sum([tensor2backend(eij,'numpy')/cx[where] for where,eij in ex.items()])
-        return ex,tensor2backend(ex_num,'numpy'),self.dict2vec(Hvx)  
-    def get_grad_from_plq(self,plq,cx,to_vec=True):
-        vx = dict()
-        for plq_key,tn in plq.items():
-            sites,pair = self.plq_sites(plq_key)
-            for site in sites:
-                if site in vx:
-                    continue
-                vx[site] = self.site_grad(tn.copy(),site)/cx[pair]
-        if to_vec:
-            vx = self.dict2vec(vx)
-        return vx
-    def get_grad_deterministic(self,config,unsigned=False):
-        self.wfn2backend(backend='torch',requires_grad=True)
-        cache_top = dict()
-        cache_bot = dict()
-        cx = self.unsigned_amplitude(config,cache_top=cache_top,cache_bot=cache_bot)
-        _,cx,vx = self.parse_hessian({0:cx})
-        sign = 1. if unsigned else self.config_sign(config)
-        self.wfn2backend()
-        return cx*sign,vx/cx
-    def amplitude(self,config):
-        raise NotImplementedError
-        unsigned_cx = self.unsigned_amplitude(config)
-        sign = self.compute_config_sign(config)
-        return unsigned_cx * sign 
-    def prob(self, config, to_numpy=True):
-        """Calculate the probability of a configuration.
-        """
-        return self.unsigned_amplitude(config,to_numpy=to_numpy) ** 2
-#################################################################################################
-# tsr methods
-#################################################################################################
-    def get_data_map(self,backend,phys_dim=2):
+##### tsr methods #####
+    def get_data_map(self,phys_dim=2):
         data_map = dict()
         for i in range(phys_dim):
             data = np.zeros(phys_dim)
             data[i] = 1.
-            data_map[i] = tensor2backend(data,backend)
+            data_map[i] = data
         return data_map
-    def tensor2backend(self,data,backend,requires_grad=False):
+    def tensor2backend(self,data,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
         return tensor2backend(data,backend,requires_grad=requires_grad)
     def tensor2vec(self,tsr,ix=None):
-        return self.tensor2backend(tsr,'numpy').flatten()
+        return self.tensor2backend(tsr,backend='numpy').flatten()
     def vec2tensor(self,x,ix):
         shape = self.constructors[ix][0]
-        return self.tensor2backend(x.reshape(shape),self.backend)
+        return self.tensor2backend(x.reshape(shape))
     def tensor_grad(self,tsr,set_zero=True):
         grad = tsr.grad
         if set_zero:
             tsr.grad = None
         return grad 
-    def intermediate_sign(self,config=None,ix1=None,ix2=None):
-        return 1.
-    def config_sign(self,config=None):
-        return 1.
     def get_bra_tsr(self,ci,site,append=''):
         inds = self.site_ind(site)+append,
         tags = self.site_tags(site) + ('BRA',)
@@ -1297,7 +1314,7 @@ class AmplitudeFactory:
             bra.modify(data=bra_target.data,inds=bra_target.inds)
         return tn
     def tensor_compress_bond(self,T1,T2,absorb='right'):
-        self._tensor_compress_bond(self,T1,T2,absorb=absorb)
+        self._tensor_compress_bond(T1,T2,absorb=absorb)
     def _tensor_compress_bond(self,T1,T2,absorb='right'):
         # TODO:check for absorb='left'
         shared_ix, left_env_ix = T1.filter_bonds(T2)
@@ -1332,63 +1349,124 @@ class AmplitudeFactory:
         # update with the new compressed data
         T1.modify(data=T1C.data, inds=T1C.inds)
         T2.modify(data=T2C.data, inds=T2C.inds)
-##################################################################################
-# for sampler 
-##################################################################################
-    def _add_gate(self,tn,gate,where,contract=True):
-        return _add_gate(tn,gate,self.site_ind,self.site_tag,contract=contract)
+##### ham methods #####
+    def parse_config(self,config):
+        return config
+    def intermediate_sign(self,config=None,ix1=None,ix2=None):
+        return 1.
+    def config_sign(self,config=None):
+        return 1.
+    def get_grad_from_plq(self,plq,cx,to_vec=True):
+        vx = dict()
+        for plq_key,tn in plq.items():
+            sites,pair = self.plq_sites(plq_key)
+            for site in sites:
+                if site in vx:
+                    continue
+                vx[site] = self.site_grad(tn.copy(),site)/cx[pair]
+        if to_vec:
+            vx = self.dict2vec(vx)
+        return vx
+    def _add_gate(self,tn,gate,order,where,contract=True):
+        return _add_gate(tn.copy(),gate,order,where,self.site_ind,self.site_tag,contract=contract)
+    def pair_energy_from_plq(self,tn,config,where,model):
+        ix1,ix2 = [model.flatten(where[ix]) for ix in (0,1)]
+        i1,i2 = config[ix1],config[ix2] 
+        if not model.pair_valid(i1,i2): # term vanishes 
+            return None 
+        ex = self._add_gate(tn.copy(),model.gate,model.order,where,contract=True)
+        if ex is None:
+            return None
+        return model.pair_coeff(*where) * ex 
+    def parse_hessian_from_plq(self,Hvx,vx,ex,eu,cx):
+        vx = self.dict2vec(vx)
+        cx,err = contraction_error(cx) 
+        return cx,ex+eu,vx,Hvx/cx+eu*vx,err
+    def parse_hessian_deterministic(self,Hvx,vx,ex,eu,cx):
+        return cx,ex/cx+eu,vx,Hvx/cx+eu*vx,0.
+    def parse_energy_deterministic(self,ex,cx,to_numpy=True):
+        ex = sum(ex.values())/cx
+        if to_numpy:
+            ex = tensor2backend(ex,'numpy')
+        return ex,cx
+    def parse_energy_from_plq(self,ex,cx):
+        ex = sum([eij/cx[where] for where,eij in ex.items()])
+        return tensor2backend(ex,'numpy')
+    def parse_derivative(self,ex,cx=None):
+        if len(ex)==0:
+            return 0.,0.,np.zeros(self.nparam)
+        ex_num = sum(ex.values())
+        ex_num.backward()
+        Hvx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
+        if cx is None:
+            ex = None
+        elif isinstance(cx,dict):
+            ex = self.parse_energy_from_plq(ex,cx)
+        else:
+            ex = self.parse_energy_deterministic(ex,cx)
+        return ex,tensor2backend(ex_num,'numpy'),self.dict2vec(Hvx)  
+    def get_grad_deterministic(self,config,unsigned=False):
+        self.wfn2backend(backend='torch',requires_grad=True)
+        cache_top = dict()
+        cache_bot = dict()
+        cx = self.unsigned_amplitude(config,cache_top=cache_top,cache_bot=cache_bot,to_numpy=False)
+        if cx is None:
+            vx = np.zeros(self.nparam)
+        else:
+            _,cx,vx = self.parse_derivative({0:cx})
+            vx /= cx
+            sign = 1. if unsigned else self.config_sign(config)
+            cx *= sign
+        self.wfn2backend()
+        return cx,vx
+##### sampler methods ######
+    def amplitude(self,config):
+        raise NotImplementedError
+        unsigned_cx = self.unsigned_amplitude(config)
+        sign = self.compute_config_sign(config)
+        return unsigned_cx * sign 
+    def prob(self, config):
+        """Calculate the probability of a configuration.
+        """
+        return self.unsigned_amplitude(config) ** 2
     def _new_prob_from_plq(self,plq,sites,cis):
         plq_new = self.replace_sites(plq.copy(),sites,cis) 
-        cy = safe_contract(cy)
+        cy = safe_contract(plq_new)
         if cy is None:
             return plq_new,None
         return plq_new,tensor2backend(cy**2,'numpy') 
-def _add_gate(tn,gate,where,site_ind,site_tag,contract=True):
-    # reindex
-    kixs = [site_ind(site) for site in where]
-    bixs = [kix+'*' for kix in kixs]
-    for site,kix,bix in zip(where,kixs,bixs):
-        tn[site_tag(site),'BRA'].reindex_({kix:bix})
-
-    # add gate
-    inds = bixs[0],kixs[0],bixs[1],kixs[1]
-    T = Tensor(data=gate,inds=inds)
-    tn.add_tensor(T,virtual=True)
-    if not contract:
-        return tn  
-    return safe_contract(tn)
+class Model:
+    def gate2backend(self,backend):
+        self.gate = tensor2backend(self.gate,backend)
 class Hamiltonian:
     def __init__(self,model):
         self.model = model
-    def _pair_energy_from_plq(self,tn,config,where):
-        ix1,ix2 = [self.model.flatten(*where[ix]) for ix in (0,1)]
-        i1,i2 = config[ix1],config[ix2] 
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return None 
-        ex = self.amplitude_factory._add_gate(tn,self.model.gate,where,contract=True)
-        if ex is None:
-            return None
-        return self.model.pair_coeff(*where) * ex 
-    def _pair_energies_from_plq(self,plq,pairs,config):
+    def _pair_energies_from_plq(self,plq,pairs,config,af=None):
         ex = dict()
         cx = dict()
+        af = self.amplitude_factory if af is None else af
         for where in pairs:
             key = self.model.pair_key(*where)
 
             tn = plq.get(key,None) 
             if tn is not None:
-                eij = self._pair_energy_from_plq(tn.copy(),config,where) 
+                eij = af.pair_energy_from_plq(tn,config,where,self.model) 
                 if eij is not None:
                     ex[where] = eij
-                cx[where] = tensor2backend(tn.copy().contract(),'numpy')
+                cx[where] = tensor2backend(safe_contract(tn.copy()),'numpy')
         return ex,cx
     def batch_hessian_from_plq(self,batch_idx,config): # only used for Hessian
-        self.amplitude_factory.wfn2backend(backend='torch',requires_grad=True)
+        af = self.amplitude_factory
+        af.wfn2backend(backend='torch',requires_grad=True)
+        self.model.gate2backend('torch')
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config)
 
-        ex,_,Hvx = self.amplitude_factory.parse_hessian(ex,cx=cx)
-        vx = self.amplitude_factory.get_grad_from_plq(plq,cx,to_vec=False) 
-        self.amplitude_factory.wfn2backend()
+        ex,_,Hvx = af.parse_derivative(ex,cx=cx)
+        vx = af.get_grad_from_plq(plq,cx,to_vec=False) 
+        vx = list2dict(vx)
+        cx = list2dict(cx)
+        af.wfn2backend()
+        self.model.gate2backend(af.backend)
         return ex,Hvx,cx,vx
     def compute_local_energy_hessian_from_plq(self,config): 
         ex,Hvx = 0.,0.
@@ -1400,78 +1478,74 @@ class Hamiltonian:
             cx.update(cx_)
             vx.update(vx_)
         eu = self.model.compute_local_energy_eigen(config)
-        ex += eu
-
-        vx = self.amplitude_factory.dict2vec(vx)
-        cx,err = contraction_error(cx)
-
-        Hvx = Hvx/cx + eu*vx
-        return cx,ex,vx,Hvx,err 
+        return self.amplitude_factory.parse_hessian_from_plq(Hvx,vx,ex,eu,cx)
     def compute_local_energy_gradient_from_plq(self,config,compute_v=True):
         ex,cx,plq = self.pair_energies_from_plq(config)
 
-        ex = sum([eij/cx[where] for where,eij in ex.items()])
+        af = self.amplitude_factory
+        ex = af.parse_energy_from_plq(ex,cx)
         eu = self.model.compute_local_energy_eigen(config)
         ex += eu
 
         if not compute_v:
             cx,err = contraction_error(cx)
             return cx,ex,None,None,err 
-        vx = self.amplitude_factory.get_grad_from_plq(plq,cx)  
+        vx = af.get_grad_from_plq(plq,cx)  
         cx,err = contraction_error(cx)
-        #print(ex,cx,err)
         return cx,ex,vx,None,err
     def batch_hessian_deterministic(self,config,batch_imin,batch_imax):
-        self.amplitude_factory.wfn2backend(backend='torch',requires_grad=True)
+        af = self.amplitude_factory
+        af.wfn2backend(backend='torch',requires_grad=True)
         ex = self.batch_pair_energies_deterministic(config,batch_imin,batch_imax)
-        _,ex,Hvx = self.amplitude_factory.parse_hessian(ex)
-        self.amplitude_factory.wfn2backend()
+        _,ex,Hvx = af.parse_derivative(ex)
+        af.wfn2backend()
         return ex,Hvx
     def pair_hessian_deterministic(self,config,site1,site2):
-        self.amplitude_factory.wfn2backend(backend='torch',requires_grad=True)
+        af = self.amplitude_factory
+        af.wfn2backend(backend='torch',requires_grad=True)
         ex = self.pair_energy_deterministic(config,site1,site2)
-        if ex is None:
-            ex,Hvx = 0.,0.
-        else:
-            _,ex,Hvx = self.amplitude_factory.parse_hessian({(site1,site2):ex})
-        self.amplitude_factory.wfn2backend()
+        _,ex,Hvx = af.parse_derivative(ex)
+        af.wfn2backend()
         return ex,Hvx 
     def compute_local_energy_hessian_deterministic(self,config):
-        cx,vx = self.get_grad_deterministic(config)
+        af = self.amplitude_factory
+        cx,vx = af.get_grad_deterministic(config)
 
         ex = 0. 
         Hvx = 0.
-        for key in self.batched_pairs:
+        for key in self.model.batched_pairs:
             if key=='pbc':
                 continue
             imin,imax = key
             ex_,Hvx_ = self.batch_hessian_deterministic(config,imin,imax) 
             ex += ex_
             Hvx += Hvx_
-        if self.amplitude_factory.pbc:
+        if af.pbc:
             for site1,site2 in self.batched_pairs['pbc']:
                 ex_,Hvx_ = self.pair_hessian_deterministic(self,config,site1,site2)
                 ex += ex_
                 Hvx += Hvx_
          
         eu = self.model.compute_local_energy_eigen(config)
-        ex = ex/cx + eu
-        Hvx = Hvx/cx + eu*vx
-        return cx,ex,vx,Hvx,0. 
+        return af.parse_hessian_deterministic(Hvx,vx,ex,eu,cx)
     def compute_local_energy_gradient_deterministic(self,config,compute_v=True):
+        af = self.amplitude_factory
         ex = self.pair_energies_deterministic(config)
-        sign = self.amplitude_factory.config_sign(config)
         if compute_v:
-            cx,vx = self.amplitude_factory.get_grad_deterministic(config,unsigned=True)
+            cx,vx = af.get_grad_deterministic(config)
         else:
-            cx = self.amplitude_factory.unsigned_amplitude(config,to_numpy=True)
+            cx = af.unsigned_amplitude(config)
+            sign = af.config_sign(config)
+            cx *= sign
             vx = None
-        cx *= sign
-        ex = tensor2backend(sum(ex.values()) / cx,'numpy') 
+        if cx is None:
+            return 0.,0.,vx,None,0.
+        ex,cx = af.parse_energy_deterministic(ex,cx) 
         eu = self.model.compute_local_energy_eigen(config)
         ex += eu
         return cx,ex,vx,None,0.
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
+        config = self.amplitude_factory.parse_config(config)
         if self.amplitude_factory.deterministic:
             if compute_Hv:
                 return self.compute_local_energy_hessian_deterministic(config)
@@ -1482,7 +1556,6 @@ class Hamiltonian:
                 return self.compute_local_energy_hessian_from_plq(config)
             else:
                 return self.compute_local_energy_gradient_from_plq(config,compute_v=compute_v)
-
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5
@@ -1505,4 +1578,3 @@ def get_gate2(j,to_bk=False,to_matrix=False):
     if to_matrix:
         data = data.reshape((4,4))
     return data
-     
