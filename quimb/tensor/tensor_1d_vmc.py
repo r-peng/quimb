@@ -48,7 +48,7 @@ class AmplitudeFactory(AmplitudeFactory_):
     def site_ind(self,site):
         return self.psi.site_ind(site)
     def col_tag(self,col):
-        
+        return self.psi.site_tag(col)    
     def plq_sites(self,plq_key):
         i0,bsz = plq_key
         pair = i0,i0+bsz-1
@@ -222,7 +222,9 @@ def compute_energy(mps,terms,order,pbc=False):
     n = n.contract()
     print('norm=',n)
 
-    plq = get_plq_from_envs(mps.L,bsz,norm,lenvs,renvs)
+    plq = dict()
+    for j in range(mps.L-bsz+1):
+        plq[j,bsz] = af._get_plq(j,bsz,norm,lenvs,renvs)
     e = 0.
     for (i,j),gate in terms.items():
         if gate.shape==(4,4):
@@ -271,8 +273,6 @@ def build_mpo(L,terms,order):
                 arr = arr.reshape(arr.shape+(1,))
             arrs.append(arr)
         other = MatrixProductOperator(arrs,shape='ludr')
-        print(i,j)
-        print(other)
         if self is None:
             self = other 
         else:

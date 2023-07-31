@@ -18,6 +18,8 @@ class DenseSampler(DenseSampler_):
         ls = [None] * 2
         for spin in (0,1):
             occs = list(itertools.combinations(sites,self.nelec[spin]))
+            print(len(occs))
+            exit()
             configs = [None] * len(occs) 
             for i,occ in enumerate(occs):
                 config = [0] * self.nsite 
