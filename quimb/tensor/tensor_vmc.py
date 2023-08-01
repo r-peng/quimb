@@ -1363,7 +1363,10 @@ class AmplitudeFactory:
             for site in sites:
                 if site in vx:
                     continue
-                vx[site] = self.site_grad(tn.copy(),site)/cx[pair]
+                try:
+                    vx[site] = self.site_grad(tn.copy(),site)/cx[pair]
+                except (ValueError,IndexError):
+                    pass
         if to_vec:
             vx = self.dict2vec(vx)
         return vx
@@ -1491,7 +1494,10 @@ class Hamiltonian:
             cx,err = contraction_error(cx)
             return cx,ex,None,None,err 
         vx = af.get_grad_from_plq(plq,cx)  
-        cx,err = contraction_error(cx)
+        try:
+            cx,err = contraction_error(cx)
+        except TypeError:
+            cx,err = 0.,0.
         return cx,ex,vx,None,err
     def batch_hessian_deterministic(self,config,batch_imin,batch_imax):
         af = self.amplitude_factory

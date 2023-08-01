@@ -203,12 +203,9 @@ class AmplitudeFactory(FermionAmplitudeFactory):
             for where in exf:
                 try:
                     ratio_ix.append(exf[where] * exj[where][ix]/ (cxf[where] * cxj[where]))
-                except:
-                    print(exf[where],exj[where][ix],cxf[where],cxj[where]) 
-                    exit()
-            ratio[ix] = None if len(ratio_ix)==0 else sum(ratio_ix)
-            if ratio[ix] is not None:
-                ratio[ix] = tensor2backend(ratio[ix],'numpy')
+                except TypeError:
+                    pass
+            ratio[ix] = 0. if len(ratio_ix)==0 else tensor2backend(sum(ratio_ix),'numpy')
         ratio = np.array(ratio) 
         if _sum:
             ratio = sum(ratio)

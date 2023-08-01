@@ -855,9 +855,15 @@ class ExchangeSampler(ExchangeSampler_):
         return cols
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
-        cols,renvs = af.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+        try:
+            cols,renvs = af.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+        except AttributeError:
+            return
         for j in range(self.Ly - y_bsz + 1): 
-            plq = af._get_plq_forward(j,y_bsz,cols,renvs)
+            try:
+                plq = af._get_plq_forward(j,y_bsz,cols,renvs)
+            except AttributeError:
+                return
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             try:
                 cols = af._contract_cols(cols,(0,j))
@@ -865,9 +871,15 @@ class ExchangeSampler(ExchangeSampler_):
                 return
     def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
-        cols,lenvs = af.get_all_lenvs(cols,jmax=self.Ly-1-y_bsz,inplace=False)
+        try:
+            cols,lenvs = af.get_all_lenvs(cols,jmax=self.Ly-1-y_bsz,inplace=False)
+        except AttributeError:
+            return
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
-            plq = af._get_plq_backward(j,y_bsz,cols,lenvs)
+            try:
+                plq = af._get_plq_backward(j,y_bsz,cols,lenvs)
+            except AttributeError:
+                return
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             try:
                 cols = af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
