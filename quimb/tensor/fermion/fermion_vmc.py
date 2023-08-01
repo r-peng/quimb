@@ -1,7 +1,6 @@
 import numpy as np
 import itertools
 from ..tensor_vmc import DenseSampler as DenseSampler_ 
-config_map = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
 class DenseSampler(DenseSampler_):
     def __init__(self,nsite,nelec,spinless=False,**kwargs):
         self.nelec = nelec
@@ -18,24 +17,19 @@ class DenseSampler(DenseSampler_):
         ls = [None] * 2
         for spin in (0,1):
             occs = list(itertools.combinations(sites,self.nelec[spin]))
-            print(len(occs))
-            exit()
             configs = [None] * len(occs) 
             for i,occ in enumerate(occs):
-                config = [0] * self.nsite 
-                for ix in occ:
-                    config[ix] = 1
-                configs[i] = tuple(config)
+                config = np.zeros(self.nsite,dtype=int) 
+                config[occ,] = 1
+                configs[i] = config
             ls[spin] = configs
 
         na,nb = len(ls[0]),len(ls[1])
         configs = [None] * (na*nb)
-        for ixa,configa in enumerate(ls[0]):
-            for ixb,configb in enumerate(ls[1]):
-                config = [config_map[configa[i],configb[i]] \
-                          for i in range(self.nsite)]
+        for ixa,config_a in enumerate(ls[0]):
+            for ixb,config_b in enumerate(ls[1]):
                 ix = ixa * nb + ixb
-                configs[ix] = tuple(config)
+                configs[ix] = tuple(config_a + config_b * 2)
         return configs
     def get_all_configs_u1(self):
         if isinstance(self.nelec,tuple):
@@ -44,16 +38,14 @@ class DenseSampler(DenseSampler_):
         occs = list(itertools.combinations(sites,self.nelec))
         configs = [None] * len(occs) 
         for i,occ in enumerate(occs):
-            config = [0] * (self.nsite*2) 
-            for ix in occ:
-                config[ix] = 1
-            configs[i] = tuple(config)
+            config = np.zeros(self.nsite,dtype=int) 
+            config[occ,] = 1
+            configs[i] = config
 
         for ix in range(len(configs)):
             config = configs[ix]
-            configa,configb = config[:self.nsite],config[self.nsite:]
-            config = [config_map[configa[i],configb[i]] for i in range(self.nsite)]
-            configs[ix] = tuple(config)
+            config_a,config_b = config[:self.nsite],config[self.nsite:]
+            configs[ix] = tuple(config_a + config_b * 2)
         return configs
 from ..tensor_vmc import ExchangeSampler as ExchangeSampler_
 class ExchangeSampler(ExchangeSampler_):
@@ -261,7 +253,7 @@ class AmplitudeFactory:
             dq = data.dq
             size = cons.vector_size(dq)
             ix = self.site_map[site]
-            constructors[ix] = (cons,dq),size,site
+            constructors[ix] = (cons,dq,data.shape),size,site
         return constructors
     def get_data_map(self):
         return get_data_map(symmetry=self.symmetry,flat=self.flat,spinless=self.spinless)
@@ -269,11 +261,13 @@ class AmplitudeFactory:
         backend = self.backend if backend is None else backend
         return tensor2backend(data,backend,requires_grad=requires_grad)
     def tensor2vec(self,tsr,ix):
-        cons,dq = self.constructors[ix][0]
+        cons,dq,_ = self.constructors[ix][0]
         return cons.tensor_to_vector(self.tensor2backend(tsr,'numpy'))
     def vec2tensor(self,x,ix):
-        cons,dq = self.constructors[ix][0]
-        return self.tensor2backend(cons.vector_to_tensor(x,dq),self.backend)
+        cons,dq,shape = self.constructors[ix][0]
+        data = cons.vector_to_tensor(x,dq)
+        data.shape = shape
+        return self.tensor2backend(data,self.backend)
     def tensor_grad(self,tsr,set_zero=True):
         return tsr.get_grad(set_zero=set_zero) 
     def config2pn(self,config,start,stop):

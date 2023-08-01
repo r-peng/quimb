@@ -1041,12 +1041,10 @@ class DenseSampler:
         assert isinstance(self.nspin,tuple)
         sites = list(range(self.nsite))
         occs = list(itertools.combinations(sites,self.nspin[0]))
-        #occs = list(itertools.product((0,1),repeat=self.nsite))
         configs = [None] * len(occs) 
         for i,occ in enumerate(occs):
-            config = [0] * (self.nsite) 
-            for ix in occ:
-                config[ix] = 1
+            config = np.zeros(self.nsite,dtype=int) 
+            config[occ,] = 1
             configs[i] = tuple(config)
         return configs
     def sample(self):

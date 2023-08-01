@@ -72,9 +72,7 @@ class JastrowAmplitudeFactory(BosonAmplitudeFactory):
             if i1_new is None:
                 continue
             tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
-            cx_new = safe_contract(tn_new)
-            if cx_new is not None:
-                cx[ix] = cx_new 
+            cx[ix] = safe_contract(tn_new)
         return cx 
     def pair_energy_deterministic(self,config,site1,site2,top,bot,model,cache_top=None,cache_bot=None):
         ix1,ix2 = model.flatten(site1),model.flatten(site2)
@@ -203,7 +201,11 @@ class AmplitudeFactory(FermionAmplitudeFactory):
             exf = ex[ix]
             cxf = cx[ix]
             for where in exf:
-                ratio_ix.append(exf[where] * exj[where][ix]/ (cxf[where] * cxj[where]))
+                try:
+                    ratio_ix.append(exf[where] * exj[where][ix]/ (cxf[where] * cxj[where]))
+                except:
+                    print(exf[where],exj[where][ix],cxf[where],cxj[where]) 
+                    exit()
             ratio[ix] = None if len(ratio_ix)==0 else sum(ratio_ix)
             if ratio[ix] is not None:
                 ratio[ix] = tensor2backend(ratio[ix],'numpy')
