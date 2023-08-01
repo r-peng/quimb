@@ -41,6 +41,7 @@ class AmplitudeFactory(AmplitudeFactory_):
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
+        self.nparam = len(self.get_x())
     def site_tag(self,site):
         return self.psi.site_tag(site)
     def site_tags(self,site):
@@ -52,7 +53,7 @@ class AmplitudeFactory(AmplitudeFactory_):
     def plq_sites(self,plq_key):
         i0,bsz = plq_key
         pair = i0,i0+bsz-1
-        sites = list(range(i0,i0+x_bsz))
+        sites = list(range(i0,i0+bsz))
         return sites,pair
     def update_cache(self,config=None):
         pass
@@ -61,7 +62,7 @@ class AmplitudeFactory(AmplitudeFactory_):
         row = psi.copy()
         # compute mid env for row i
         for j in range(self.L-1,-1,-1):
-            row.add_tensor(self.get_bra_tsr(config[j],j,append=append,tn=row),virtual=True)
+            row.add_tensor(self.get_bra_tsr(config[j],j,append=append),virtual=True)
         return row
     def contract_mid_env(self,row):
         try: 
@@ -78,8 +79,8 @@ class AmplitudeFactory(AmplitudeFactory_):
             plq[self.L-1,self.L] = tn.copy()
         cols,lenvs = self.get_all_lenvs(cols,jmax=self.Ly-bsz-1,inplace=False)
         cols,renvs = self.get_all_renvs(cols,jmin=bsz,inplace=False)
-        for j in range(self.L-bsz_+1):
-            plq[j,bsz] = self._get_plq(j,bsz,cols,lenvs.renvs)
+        for j in range(self.L-bsz+1):
+            plq[j,bsz] = self._get_plq(j,bsz,cols,lenvs,renvs)
         return plq 
     def unsigned_amplitude(self,config,to_numpy=True):
         tn = self.get_mid_env(config)
@@ -96,12 +97,12 @@ from .tensor_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
     def batch_pair_energies_from_plq(self,batch_idx,config):
         return self.pair_energies_from_plq(config)
-    def pair_energy_from_plq(self,config):
+    def pair_energies_from_plq(self,config):
         af = self.amplitude_factory  
         # form plqs
         plq = dict()
         for bsz in self.model.plq_sz:
-            plq.update(af._get_plq(config,bsz))
+            plq.update(af.get_plq(config,bsz))
 
         # compute energy numerator 
         ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config,af=af)
@@ -111,7 +112,8 @@ class Hamiltonian(Hamiltonian_):
             return self.compute_local_energy_hessian_from_plq(config)
         else:
             return self.compute_local_energy_gradient_from_plq(config,compute_v=compute_v)
-class Model:
+from .tensor_vmc import Model as Model_
+class Model(Model_):
     def __init__(self,L):
         self.L = L
         self.nsite = L
@@ -130,8 +132,6 @@ class Model:
                     where = j,(j+d)%self.L
                     ls.append(where)
         return ls
-    def pair_key(self,i,j):
-        return i,abs(j-i)+1
 from .tensor_vmc import get_gate2,_add_gate
 class J1J2(Model): 
     def __init__(self,J1,J2,L):
@@ -142,7 +142,10 @@ class J1J2(Model):
         self.order = 'b1,k1,b2,k2'
 
         self.pairs = self.pairs_nn() + self.pairs_nn(d=2)
+        self.batched_pairs = [None]
         self.plq_sz = 3,
+    def pair_key(self,i,j):
+        return min(i,j,self.L-3),3
     def pair_valid(self,i1,i2):
         if i1==i2:
             return False
@@ -158,12 +161,12 @@ class J1J2(Model):
         e = np.zeros(2) 
         for d in (1,2):
             for i in range(self.L):
-                s1 = (-1) ** config[self.flatten(i)]
+                s1 = (-1) ** config[i]
                 if i+d<self.L:
-                    e1 += s1 * (-1)**config[i+d]
+                    e[d-1] += s1 * (-1)**config[i+d]
                 else:
                     if _PBC:
-                        e1 += s1 * (-1)**config[(i+d)%self.L]
+                        e[d-1] += s1 * (-1)**config[(i+d)%self.L]
         return .25 * (e[0]*self.J1 + e[1]*self.J2) 
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
@@ -182,6 +185,26 @@ class ExchangeSampler(ExchangeSampler_):
         return i
     def flat2site(self,i):
         return i
+    def sweep_col_forward(self,cols,bsz):
+        af = self.amplitude_factory
+        cols,renvs = af.get_all_renvs(cols,jmin=bsz,inplace=False)
+        for j in range(self.L - bsz + 1): 
+            plq = af._get_plq_forward(j,bsz,cols,renvs)
+            _,cols = self._update_pair(j,j+1,plq,cols) 
+            try:
+                cols = af._contract_cols(cols,(0,j))
+            except (ValueError,IndexError):
+                return
+    def sweep_col_backward(self,cols,bsz):
+        af = self.amplitude_factory
+        cols,lenvs = af.get_all_lenvs(cols,jmax=self.L-1-bsz,inplace=False)
+        for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
+            plq = af._get_plq_backward(j,bsz,cols,lenvs)
+            _,cols = self._update_pair(j,j+1,plq,cols) 
+            try:
+                cols = af._contract_cols(cols,(j+bsz-1,self.L-1))
+            except (ValueError,IndexError):
+                return
     def sample(self):
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward

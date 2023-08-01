@@ -976,11 +976,11 @@ class TNVMC: # stochastic sampling
 #############################################################################################
 import itertools
 class DenseSampler:
-    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-14):
+    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-14,fix_sector=True):
         self.nsite = nsite 
         self.nspin = nspin
 
-        self.all_configs = self.get_all_configs()
+        self.all_configs = self.get_all_configs(fix_sector=fix_sector)
         self.ntotal = len(self.all_configs)
         if RANK==0:
             print('ntotal=',self.ntotal)
@@ -1037,7 +1037,9 @@ class DenseSampler:
             start = (batchsize+1)*(RANK-1)-L
             stop = start+batchsize+1
         self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
-    def get_all_configs(self):
+    def get_all_configs(self,fix_sector=True):
+        if not fix_sector:
+            return list(itertools.product((0,1),repeat=self.nsite))
         assert isinstance(self.nspin,tuple)
         sites = list(range(self.nsite))
         occs = list(itertools.combinations(sites,self.nspin[0]))
@@ -1303,7 +1305,7 @@ class AmplitudeFactory:
     def site_grad(self,tn,site):
         tid = tuple(tn._get_tids_from_tags((self.site_tag(site),'KET'),which='all'))[0]
         ket = tn._pop_tensor(tid)
-        g = tn.contract(output_inds=ket.inds)
+        g = tn.contract(output_inds=ket.inds,tags=all)
         return g.data 
     def replace_sites(self,tn,sites,cis):
         for site,ci in zip(sites,cis): 
