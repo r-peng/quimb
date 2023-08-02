@@ -1496,7 +1496,7 @@ class Hamiltonian:
         vx = af.get_grad_from_plq(plq,cx)  
         try:
             cx,err = contraction_error(cx)
-        except TypeError:
+        except (TypeError,ValueError):
             cx,err = 0.,0.
         return cx,ex,vx,None,err
     def batch_hessian_deterministic(self,config,batch_imin,batch_imax):
