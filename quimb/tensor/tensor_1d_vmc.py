@@ -52,11 +52,12 @@ class AmplitudeFactory(AmplitudeFactory_):
         return self.psi.site_tag(col)    
     def plq_sites(self,plq_key):
         i0,bsz = plq_key
-        pair = i0,i0+bsz-1
         sites = list(range(i0,i0+bsz))
-        return sites,pair
+        return sites
     def update_cache(self,config=None):
         pass
+    def set_psi(self,psi):
+        self.psi = psi
     def get_mid_env(self,config,append='',psi=None):
         psi = self.psi if psi is None else psi 
         row = psi.copy()

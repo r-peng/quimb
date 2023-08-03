@@ -62,6 +62,8 @@ class AmplitudeFactory(AmplitudeFactory_):
         return self.psi.site_ind(*site)
     def col_tag(self,col):
         return self.psi.col_tag(col)
+    def row_tag(self,row):
+        return self.psi.row_tag(row)
     def plq_sites(self,plq_key):
         (i0,j0),(x_bsz,y_bsz) = plq_key
         sites = list(itertools.product(range(i0,i0+x_bsz),range(j0,j0+y_bsz)))
@@ -83,27 +85,38 @@ class AmplitudeFactory(AmplitudeFactory_):
 
         self.cache_bot = dict()
         self.cache_top = dict()
+        self.cache_left = dict()
+        self.cache_right = dict()
 ##################################################################################################
-# contraction methods                                          
+# compress row methods  
 ##################################################################################################
-    def get_mid_env(self,i,config,append='',psi=None):
+    def get_mid_env(self,i,config,append='',psi=None,direction='row'):
         psi = self.psi if psi is None else psi 
-        row = psi.select(psi.row_tag(i),virtual=False)
-        key = config[i*self.Ly:(i+1)*self.Ly]
+        if direction=='row':
+            row_tag = self.row_tag
+            Ly = self.Ly
+            slc = slice(i*self.Ly,(i+1)*self.Ly,1) 
+        else:
+            row_tag = self.col_tag
+            Ly = self.Lx
+            slc = slice(i,self.nsite,self.Ly) 
+        row = psi.select(row_tag(i),virtual=False)
+        key = config[slc]
         # compute mid env for row i
-        for j in range(self.Ly-1,-1,-1):
-            row.add_tensor(self.get_bra_tsr(key[j],(i,j),append=append),virtual=True)
+        for j in range(Ly-1,-1,-1):
+            site = (i,j) if direction=='row' else (j,i)
+            row.add_tensor(self.get_bra_tsr(key[j],site,append=append),virtual=True)
         return row
     def contract_mid_env(self,i,row):
         try: 
             for j in range(self.Ly-1,-1,-1):
-                row.contract_tags(row.site_tag(i,j),inplace=True)
+                row.contract_tags(self.site_tag((i,j)),inplace=True)
         except (ValueError,IndexError):
             row = None 
         return row
     def compress_row_pbc(self,tn,i):
         for j in range(self.Ly): # compress between j,j+1
-            tn.compress_between(tn.site_tag(i,j),tn.site_tag(i,(j+1)%self.Ly),
+            tn.compress_between(self.site_tag((i,j)),self.site_tag((i,(j+1)%self.Ly)),
                                 **self.compress_opts)
         return tn
     def compress_row_obc(self,tn,i):
@@ -328,6 +341,9 @@ class AmplitudeFactory(AmplitudeFactory_):
         if to_numpy:
             cx = 0. if cx is None else tensor2backend(cx,'numpy')
         return cx  
+##################################################################################################
+# compress col methods  
+##################################################################################################
 ################################################################################
 # for hamiltonian
 ################################################################################

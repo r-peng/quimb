@@ -14,8 +14,6 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False):
     this._DETERMINISTIC = deterministic
     this._SYMMETRY = symmetry
     this._FLAT = flat 
-    from ..tensor_2d_vmc import set_options 
-    set_options(pbc=pbc,deterministic=deterministic)
     from .fermion_2d_vmc import set_options as set_options
     return set_options(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic)
 
@@ -143,8 +141,8 @@ class AmplitudeFactory(FermionAmplitudeFactory):
         for ix in range(3):
             sign[ix] = self.psi[ix].config_sign(config[ix])
         return sign 
-    def get_grad_from_plq(self,plq,cx,to_vec=True):
-        vx = [self.psi[ix].get_grad_from_plq(plq[ix],cx[ix],to_vec=to_vec) for ix in range(3)]
+    def get_grad_from_plq(self,plq,to_vec=True):
+        vx = [self.psi[ix].get_grad_from_plq(plq[ix],to_vec=to_vec) for ix in range(3)]
         if to_vec:
             vx = np.concatenate(vx)
         return vx

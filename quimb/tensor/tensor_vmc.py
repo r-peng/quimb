@@ -1111,6 +1111,8 @@ def safe_contract(tn):
 def contraction_error(cx,multiply=True):
     def _contraction_error(cx):
         if isinstance(cx,dict):
+            if len(cx)==0:
+                return 0.,0.
             cx = np.array(list(cx.values()))
             max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
             return mean_,np.fabs((max_-min_)/mean_)
@@ -1264,11 +1266,6 @@ class AmplitudeFactory:
         return psi
     def write_tn_to_disc(self,tn,fname):
         return write_tn_to_disc(tn,fname)
-    def set_psi(self,psi):
-        self.psi = psi
-
-        self.cache_bot = dict()
-        self.cache_top = dict()
     def update(self,x,fname=None,root=0):
         psi = self.vec2psi(x,inplace=True)
         self.set_psi(psi) 
@@ -1356,17 +1353,17 @@ class AmplitudeFactory:
         return 1.
     def config_sign(self,config=None):
         return 1.
-    def get_grad_from_plq(self,plq,cx,to_vec=True):
+    def get_grad_from_plq(self,plq,to_vec=True):
         vx = dict()
         for plq_key,tn in plq.items():
-            sites,pair = self.plq_sites(plq_key)
+            cij = tensor2backend(safe_contract(tn.copy()),'numpy')
+            if cij is None:
+                continue
+            sites = self.plq_sites(plq_key)
             for site in sites:
                 if site in vx:
                     continue
-                try:
-                    vx[site] = self.site_grad(tn.copy(),site)/cx[pair]
-                except (ValueError,IndexError):
-                    pass
+                vx[site] = self.site_grad(tn.copy(),site)/cij
         if to_vec:
             vx = self.dict2vec(vx)
         return vx
@@ -1393,6 +1390,8 @@ class AmplitudeFactory:
             ex = tensor2backend(ex,'numpy')
         return ex,cx
     def parse_energy_from_plq(self,ex,cx):
+        if len(cx)==0:
+            return 0.
         ex = sum([eij/cx[where] for where,eij in ex.items()])
         return tensor2backend(ex,'numpy')
     def parse_derivative(self,ex,cx=None):
@@ -1453,10 +1452,15 @@ class Hamiltonian:
 
             tn = plq.get(key,None) 
             if tn is not None:
+                cij = tensor2backend(safe_contract(tn.copy()),'numpy')
+                if cij is None:
+                    continue
+                cx[where] = cij
+
                 eij = af.pair_energy_from_plq(tn,config,where,self.model) 
-                if eij is not None:
-                    ex[where] = eij
-                cx[where] = tensor2backend(safe_contract(tn.copy()),'numpy')
+                if eij is None:
+                    continue
+                ex[where] = eij
         return ex,cx
     def batch_hessian_from_plq(self,batch_idx,config): # only used for Hessian
         af = self.amplitude_factory
@@ -1465,7 +1469,7 @@ class Hamiltonian:
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config)
 
         ex,_,Hvx = af.parse_derivative(ex,cx=cx)
-        vx = af.get_grad_from_plq(plq,cx,to_vec=False) 
+        vx = af.get_grad_from_plq(plq,to_vec=False) 
         vx = list2dict(vx)
         cx = list2dict(cx)
         af.wfn2backend()
@@ -1493,11 +1497,8 @@ class Hamiltonian:
         if not compute_v:
             cx,err = contraction_error(cx)
             return cx,ex,None,None,err 
-        vx = af.get_grad_from_plq(plq,cx)  
-        try:
-            cx,err = contraction_error(cx)
-        except (TypeError,ValueError):
-            cx,err = 0.,0.
+        vx = af.get_grad_from_plq(plq)  
+        cx,err = contraction_error(cx)
         return cx,ex,vx,None,err
     def batch_hessian_deterministic(self,config,batch_imin,batch_imax):
         af = self.amplitude_factory
