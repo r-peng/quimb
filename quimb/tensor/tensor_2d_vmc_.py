@@ -68,6 +68,21 @@ class AmplitudeFactory(AmplitudeFactory_):
         (i0,j0),(x_bsz,y_bsz) = plq_key
         sites = list(itertools.product(range(i0,i0+x_bsz),range(j0,j0+y_bsz)))
         return sites
+    def get_cache(self,direction,step):
+        if direction=='row':
+            cache = self.cache_bot if step==1 else self.cache_top
+        else:
+            cache = self.cache_left if step==1 else self.cache_right
+        return cache
+    def cache_key(self,config,i,direction,step):
+        if direction=='row':
+            if step==1: # bottom env
+                return config[:(i+1)*self.Ly] 
+            else: # top env
+                return config[i*self.Ly:]
+        else: 
+            cols = range(i+1) if step==1 else range(i,self.Ly)
+            return tuple([config[slc] for slc in [slice(col,self.nsite,self.Ly) for col in cols]])
     def _new_cache(self,config,cache_bot,cache_top):
         cache_bot_new = dict()
         for i in range(self.rix1+1):
@@ -107,222 +122,274 @@ class AmplitudeFactory(AmplitudeFactory_):
             site = (i,j) if direction=='row' else (j,i)
             row.add_tensor(self.get_bra_tsr(key[j],site,append=append),virtual=True)
         return row
-    def contract_mid_env(self,i,row):
+    def contract_mid_env(self,i,row,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
         try: 
-            for j in range(self.Ly-1,-1,-1):
-                row.contract_tags(self.site_tag((i,j)),inplace=True)
+            for j in range(Ly-1,-1,-1):
+                site = (i,j) if direction=='row' else (j,i)
+                row.contract_tags(self.site_tag(site),inplace=True)
         except (ValueError,IndexError):
             row = None 
         return row
-    def compress_row_pbc(self,tn,i):
-        for j in range(self.Ly): # compress between j,j+1
-            tn.compress_between(self.site_tag((i,j)),self.site_tag((i,(j+1)%self.Ly)),
+    def compress_row_pbc(self,tn,i,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
+        for j in range(Ly): # compress between j,j+1
+            if direction=='row':
+                site1,site2 = (i,j),(i,(j+1)%Ly) 
+            else:
+                site1,site2 = (j,i),((j+1)%Ly,i) 
+            tn.compress_between(self.site_tag(site1),self.site_tag(site2),
                                 **self.compress_opts)
         return tn
-    def compress_row_obc(self,tn,i):
-        tn.canonize_row(i,sweep='left')
-        for j in range(self.Ly-1):
-            self.tensor_compress_bond(tn[i,j],tn[i,j+1],absorb='right')        
-        return tn
-    def contract_boundary_single(self,tn,i,iprev):
-        for j in range(self.Ly):
-            tag1,tag2 = tn.site_tag(iprev,j),tn.site_tag(i,j)
-            tn.contract_((tag1,tag2),which='any')
-        if _PBC:
-            return self.compress_row_pbc(tn,i)
+    def compress_row_obc(self,tn,i,direction='row'):
+        if direction=='row':
+            tn.canonize_row(i,sweep='left')
+            Ly = self.Ly
         else:
-            return self.compress_row_obc(tn,i)
-    def get_bot_env(self,i,row,env_prev,config,cache=None):
-        # contract mid env for row i with prev bot env 
-        key = config[:(i+1)*row.Ly]
-        cache = self.cache_bot if cache is None else cache
+            tn.canonize_column(i,sweep='up')
+            Ly = self.Lx
+        for j in range(Ly-1):
+            if direction=='row':
+                site1,site2 = (i,j),(i,j+1) 
+            else:
+                site1,site2 = (j,i),(j+1,i) 
+            self.tensor_compress_bond(tn[site1],tn[site2],absorb='right')        
+        return tn
+    def contract_boundary_single(self,tn,i,iprev,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
+        for j in range(Ly):
+            if direction=='row':
+                sites = (iprev,j),(i,j) 
+            else:
+                sites = (j,iprev),(j,i) 
+            tn.contract_([self.site_tag(site) for site in sites],which='any')
+        if _PBC:
+            return self.compress_row_pbc(tn,i,direction=direction)
+        else:
+            return self.compress_row_obc(tn,i,direction=direction)
+    def get_benv(self,i,row,env_prev,config,step,cache=None,direction='row'):
+        cache = self.get_cache(direction,step) if cache is None else cache 
+        key = self.cache_key(config,i,direction,step)
         if key in cache: # reusable
             return cache[key]
-        row = self.contract_mid_env(i,row)
-        if i==0:
+        row = self.contract_mid_env(i,row,direction=direction)
+
+        # is terminal
+        if step==1 and i==0:
             cache[key] = row
             return row
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==-1 and i==Lx-1:
+            cache[key] = row
+            return row
+
+        # contraction fails
         if row is None:
             cache[key] = row
             return row
         if env_prev is None:
             cache[key] = None 
             return None
-        tn = env_prev.copy()
-        tn.add_tensor_network(row,virtual=False)
+
+        if step==1:
+            tn = env_prev.copy()
+            tn.add_tensor_network(row,virtual=False)
+        else:
+            tn = row
+            tn.add_tensor_network(env_prev,virtual=False)
         try:
-            tn = self.contract_boundary_single(tn,i,i-1)
+            tn = self.contract_boundary_single(tn,i,i-step,direction=direction)
         except (ValueError,IndexError):
             tn = None
         cache[key] = tn
         return tn 
-    def get_all_bot_envs(self,config,psi=None,cache=None,imin=None,imax=None,append=''):
-        imin = 0 if imin is None else imin
-        imax = self.Lx-2 if imax is None else imax
+    def get_env_prev(self,config,i,step,cache=None,direction='row'):
+        if step==1 and i==0:
+            return None 
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==-1 and i==Lx-1:
+            return None
+        cache = self.get_cache(direction,step) if cache is None else cache 
+        key = self.cache_key(config,i-step,direction,step)
+        return cache[key]
+    def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
         psi = self.psi if psi is None else psi
-        cache = self.cache_bot if cache is None else cache
-        env_prev = None if imin==0 else cache[config[:imin*self.Ly]] 
-        for i in range(imin,imax+1):
-            row = self.get_mid_env(i,config,append=append,psi=psi)
-            env_prev = self.get_bot_env(i,row,env_prev,config,cache=cache)
+        cache = self.get_cache(direction,step) if cache is None else cache 
+
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==1:
+            start = 0 if start is None else start
+            stop = Lx-1 if stop is None else stop
+        else:
+            start = Lx-1 if start is None else start
+            stop = 0 if stop is None else stop 
+        env_prev = self.get_env_prev(config,start,step,cache=cache,direction=direction)
+        for i in range(start,stop,step):
+            row = self.get_mid_env(i,config,append=append,psi=psi,direction=direction)
+            env_prev = self.get_benv(i,row,env_prev,config,step,cache=cache,direction=direction)
         return env_prev
-    def get_top_env(self,i,row,env_prev,config,cache=None):
-        # contract mid env for row i with prev top env 
-        key = config[i*row.Ly:]
-        cache = self.cache_top if cache is None else cache
-        if key in cache: # reusable
-            return cache[key]
-        row = self.contract_mid_env(i,row)
-        if i==row.Lx-1:
-            cache[key] = row
-            return row
-        if row is None:
-            cache[key] = row
-            return row
-        if env_prev is None:
-            cache[key] = None 
-            return None
-        tn = row
-        tn.add_tensor_network(env_prev,virtual=False)
-        try:
-            tn = self.contract_boundary_single(tn,i,i+1)
-        except (ValueError,IndexError):
-            tn = None
-        cache[key] = tn
-        return tn 
-    def get_all_top_envs(self,config,psi=None,cache=None,imin=None,imax=None,append=''):
-        imin = 1 if imin is None else imin
-        imax = self.Lx - 1 if imax is None else imax
-        psi = self.psi if psi is None else psi 
-        cache = self.cache_top if cache is None else cache
-        env_prev = None if imax==self.Lx-1 else cache[config[(imax+1)*self.Ly:]]
-        for i in range(imax,imin-1,-1):
-             row = self.get_mid_env(i,config,append=append,psi=psi)
-             env_prev = self.get_top_env(i,row,env_prev,config,cache=cache)
-        return env_prev
+    def get_all_bot_envs(self,config,psi=None,cache=None,imin=None,imax=None,append='',direction='row'):
+        stop = None if imax is None else imax+1
+        return self._get_all_benvs(config,1,psi=psi,cache=cache,start=imin,stop=stop,append=append,direction=direction)
+    def get_all_top_envs(self,config,psi=None,cache=None,imin=None,imax=None,append='',direction='row'):
+        stop = None if imin is None else imin-1
+        return self._get_all_benvs(config,-1,psi=psi,cache=cache,start=imax,stop=stop,append=append,direction=direction)
     def get_all_benvs(self,config,psi=None,cache_bot=None,cache_top=None,x_bsz=1,
-                      compute_bot=True,compute_top=True,rix1=None,rix2=None):
+                      compute_bot=True,compute_top=True,rix1=None,rix2=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
+        Lx = self.Lx if direction=='row' else self.Ly
 
         env_bot = None
         env_top = None
         if compute_bot: 
-            imax = self.Lx-1-x_bsz if rix1 is None else rix1 
-            env_bot = self.get_all_bot_envs(config,psi=psi,cache=cache_bot,imax=imax)
+            stop = Lx-x_bsz if rix1 is None else rix1+1 
+            env_bot = self._get_all_benvs(config,1,psi=psi,cache=cache_bot,stop=stop,direction=direction)
         if compute_top:
-            imin = x_bsz if rix2 is None else rix2 
-            env_top = self.get_all_top_envs(config,psi=psi,cache=cache_top,imin=imin)
+            stop = x_bsz-1 if rix2 is None else rix2-1
+            env_top = self._get_all_benvs(config,-1,psi=psi,cache=cache_top,stop=stop,direction=direction)
         #print(imin,imax)
         return env_bot,env_top
-    def _contract_cols(self,cols,js):
-        tags = [self.col_tag(j) for j in js]
+    def _contract_cols(self,cols,js,direction='col'):
+        col_tag = self.col_tag if direction=='col' else self.row_tag
+        tags = [col_tag(j) for j in js]
         cols ^= tags
         return cols
-    def get_all_lenvs(self,cols,jmax=None,inplace=False):
+    def get_all_envs(self,cols,step,stop=None,inplace=False,direction='col'):
         tmp = cols if inplace else cols.copy()
-        jmax = self.Ly-2 if jmax is None else jmax
-        first_col = self.col_tag(0)
-        lenvs = [None] * self.Ly
-        for j in range(jmax+1): 
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        if step==1:
+            start = 0
+            stop = Ly - 1 if stop is None else stop
+        else:
+            start = Ly - 1
+            stop = 0 if stop is None else stop
+        first_col = col_tag(start)
+        envs = [None] * Ly
+        for j in range(start,stop,step): 
             try:
-                tmp = self._contract_cols(tmp,(0,j))
-                lenvs[j] = tmp.select(first_col,virtual=False)
+                tmp = self._contract_cols(tmp,(start,j),direction=direction)
+                envs[j] = tmp.select(first_col,virtual=False)
             except (ValueError,IndexError):
-                return cols,lenvs
-        return cols,lenvs
-    def get_all_renvs(self,cols,jmin=None,inplace=False):
-        tmp = cols if inplace else cols.copy()
-        jmin = 1 if jmin is None else jmin
-        last_col = self.col_tag(self.Ly-1)
-        renvs = [None] * self.Ly
-        for j in range(self.Ly-1,jmin-1,-1): 
-            try:
-                tmp = self._contract_cols(tmp,(j,self.Ly-1))
-                renvs[j] = tmp.select(last_col,virtual=False)
-            except (ValueError,IndexError):
-                return cols,renvs
-        return cols,renvs
-    def _get_plq_forward(self,j,y_bsz,cols,renvs):
+                return cols,envs
+        return cols,envs
+    def get_all_lenvs(self,cols,jmax=None,inplace=False,direction='col'):
+        stop = None if jmax is None else jmax+1
+        return self.get_all_envs(cols,1,stop=stop,inplace=inplace,direction=direction)
+    def get_all_renvs(self,cols,jmin=None,inplace=False,direction='col'):
+        stop = None if jmin is None else jmin-1
+        return self.get_all_envs(cols,-1,stop=stop,inplace=inplace,direction=direction)
+    def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
         # lenv from col, renv from renv
-        first_col = self.col_tag(0)
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)]
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        first_col = col_tag(0)
+        tags = [col_tag(j+ix) for ix in range(y_bsz)]
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = cols.select(first_col,virtual=False)
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(renvs[j+y_bsz],virtual=False)
         plq.view_like_(cols)
         return plq
-    def _get_plq_backward(self,j,y_bsz,cols,lenvs):
+    def _get_plq_backward(self,j,y_bsz,cols,lenvs,direction='col'):
         # lenv from lenv, renv from cols
-        last_col = self.col_tag(self.Ly-1)
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)] 
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        last_col = col_tag(Ly-1)
+        tags = [col_tag(j+ix) for ix in range(y_bsz)] 
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = lenvs[j-1]
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(cols.select(last_col,virtual=False),virtual=False)
         plq.view_like_(cols)
         return plq
-    def _get_plq(self,j,y_bsz,cols,lenvs,renvs):
+    def _get_plq(self,j,y_bsz,cols,lenvs,renvs,direction='col'):
         # lenvs from lenvs, renvs from renvs
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)]
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        tags = [col_tag(j+ix) for ix in range(y_bsz)]
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = lenvs[j-1]
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(renvs[j+y_bsz],virtual=False)
         plq.view_like_(cols)
         return plq
-    def update_plq_from_3row(self,plq,cols,i,x_bsz,y_bsz,psi=None):
+    def update_plq_from_3row(self,plq,cols,i,x_bsz,y_bsz,psi=None,direction='col'):
         psi = self.psi if psi is None else psi
-        cols,lenvs = self.get_all_lenvs(cols,jmax=self.Ly-y_bsz-1,inplace=False)
-        cols,renvs = self.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+        Ly = self.Ly if direction=='col' else self.Lx
+        cols,lenvs = self.get_all_envs(cols,1,stop=Ly-y_bsz,inplace=False,direction=direction)
+        cols,renvs = self.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False,direction=direction)
         for j in range(self.Ly - y_bsz +1): 
             try:
-                plq[(i,j),(x_bsz,y_bsz)] = self._get_plq(j,y_bsz,cols,lenvs,renvs) 
+                plq[(i,j),(x_bsz,y_bsz)] = self._get_plq(j,y_bsz,cols,lenvs,renvs,direction=direction) 
             except (AttributeError,TypeError): # lenv/renv is None
                 return plq
         return plq
-    def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None):
+    def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
+        Lx = self.Lx if direction=='row' else self.Ly
         try:
-            tn = self.get_mid_env(i,config,psi=psi)
+            tn = self.get_mid_env(i,config,psi=psi,direction=direction)
             for ix in range(1,x_bsz):
-                tn.add_tensor_network(self.get_mid_env(i+ix,config,psi=psi),virtual=False)
+                tn.add_tensor_network(self.get_mid_env(i+ix,config,psi=psi,direction=direction),virtual=False)
             if i>0:
                 other = tn 
-                tn = cache_bot[config[:i*self.Ly]].copy()
+                tn = cache_bot[self.cache_key(config,i-1,direction,1)].copy()
                 tn.add_tensor_network(other,virtual=False)
-            if i+x_bsz<self.Lx:
-                tn.add_tensor_network(cache_top[config[(i+x_bsz)*self.Ly:]],virtual=False)
+            if i+x_bsz<Lx:
+                tn.add_tensor_network(cache_top[self.cache_key(config,i+x_bsz,direction,-1)],virtual=False)
         except AttributeError:
             tn = None
         return tn 
-    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None):
+    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None,direction='row'):
         #if self.compute_bot and self.compute_top:
         #    raise ValueError
+        if direction=='row':
+            Lx = self.Lx
+            direction_ = 'col'
+        else:
+            Lx = self.Ly
+            direction_ = 'row'
         imin = 0 if imin is None else imin
-        imax = self.Lx-x_bsz if imax is None else imax
+        imax = Lx-x_bsz if imax is None else imax
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
         plq = dict()
         for i in range(imin,imax+1):
-            tn = self.build_3row_tn(config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top)
+            cols = self.build_3row_tn(config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top,direction=direction)
             #exit()
-            if tn is not None:
-                plq = self.update_plq_from_3row(plq,tn,i,x_bsz,y_bsz,psi=psi)
+            if cols is not None:
+                plq = self.update_plq_from_3row(plq,cols,i,x_bsz,y_bsz,psi=psi,direction=direction_)
         return plq
     def _unsigned_amplitude_from_benvs(self,bot,top):
         try:
@@ -332,7 +399,7 @@ class AmplitudeFactory(AmplitudeFactory_):
         except AttributeError:
             return None
     def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True): 
-        # always contract into the middle
+        # always contract rows into the middle
         rix1,rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
         env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,rix1=rix1,rix2=rix2)
         if env_bot is None and env_top is None:
@@ -341,20 +408,13 @@ class AmplitudeFactory(AmplitudeFactory_):
         if to_numpy:
             cx = 0. if cx is None else tensor2backend(cx,'numpy')
         return cx  
-##################################################################################################
-# compress col methods  
-##################################################################################################
 ################################################################################
 # for hamiltonian
 ################################################################################
-    def _get_bot(self,imin,config,cache_bot=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
-        return bot
-    def _get_top(self,imax,config,cache_top=None):
-        cache_top = self.cache_top if cache_top is None else cache_top
-        top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
-        return top
+    def _get_bot(self,imin,config,cache_bot=None,direction='row'):
+        return self.get_env_prev(config,imin,1,cache=cache_bot,direction=direction)
+    def _get_top(self,imax,config,cache_top=None,direction='row'):
+        return self.get_env_prev(config,imax,-1,cache=cache_top,direction=direction)
     def _get_boundary_mps_deterministic(self,config,imin,imax,cache_bot=None,cache_top=None):
         cache_bot = self.cache_bot if cache_bot is None else cache_bot
         cache_top = self.cache_top if cache_top is None else cache_top
@@ -373,14 +433,14 @@ class AmplitudeFactory(AmplitudeFactory_):
         bot_term = None if bot is None else bot.copy()
         for i in range(imin,self.rix1+1):
             row = self.get_mid_env(i,config)
-            bot_term = self.get_bot_env(i,row,bot_term,config,cache=cache_bot)
+            bot_term = self.get_benv(i,row,bot_term,config,1,cache=cache_bot)
         if bot_term is None:
             return None
 
         top_term = None if top is None else top.copy()
         for i in range(imax,self.rix2-1,-1):
             row = self.get_mid_env(i,config)
-            top_term = self.get_top_env(i,row,top_term,config,cache=cache_top)
+            top_term = self.get_benv(i,row,top_term,config,-1,cache=cache_top)
         if top_term is None:
             return None
         return self._unsigned_amplitude_from_benvs(bot_term,top_term)

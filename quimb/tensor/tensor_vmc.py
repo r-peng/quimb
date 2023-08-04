@@ -1011,7 +1011,6 @@ class DenseSampler:
 
         plocal = [] 
         for config in configs:
-            #print('sampler',config)
             config = self.amplitude_factory.parse_config(config)
             plocal.append(self.amplitude_factory.prob(config))
         plocal = np.array(plocal)
