@@ -41,8 +41,7 @@ class AmplitudeFactory(AmplitudeFactory_):
         self.compress_opts = compress_opts
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
-        if self.deterministic:
-            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+        self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         if blks is None:
             blks = [self.sites]
@@ -228,14 +227,8 @@ class AmplitudeFactory(AmplitudeFactory_):
             row = self.get_mid_env(i,config,append=append,psi=psi,direction=direction)
             env_prev = self.get_benv(i,row,env_prev,config,step,cache=cache,direction=direction)
         return env_prev
-    def get_all_bot_envs(self,config,psi=None,cache=None,imin=None,imax=None,append='',direction='row'):
-        stop = None if imax is None else imax+1
-        return self._get_all_benvs(config,1,psi=psi,cache=cache,start=imin,stop=stop,append=append,direction=direction)
-    def get_all_top_envs(self,config,psi=None,cache=None,imin=None,imax=None,append='',direction='row'):
-        stop = None if imin is None else imin-1
-        return self._get_all_benvs(config,-1,psi=psi,cache=cache,start=imax,stop=stop,append=append,direction=direction)
     def get_all_benvs(self,config,psi=None,cache_bot=None,cache_top=None,x_bsz=1,
-                      compute_bot=True,compute_top=True,rix1=None,rix2=None,direction='row'):
+                      compute_bot=True,compute_top=True,imax=None,imin=None,direction='row'):
         psi = self.psi if psi is None else psi
         cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
         cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
@@ -244,12 +237,11 @@ class AmplitudeFactory(AmplitudeFactory_):
         env_bot = None
         env_top = None
         if compute_bot: 
-            stop = Lx-x_bsz if rix1 is None else rix1+1 
+            stop = Lx-x_bsz if imax is None else imax+1 
             env_bot = self._get_all_benvs(config,1,psi=psi,cache=cache_bot,stop=stop,direction=direction)
         if compute_top:
-            stop = x_bsz-1 if rix2 is None else rix2-1
+            stop = x_bsz-1 if imin is None else imin-1
             env_top = self._get_all_benvs(config,-1,psi=psi,cache=cache_top,stop=stop,direction=direction)
-        #print(imin,imax)
         return env_bot,env_top
     def _contract_cols(self,cols,js,direction='col'):
         col_tag = self.col_tag if direction=='col' else self.row_tag
@@ -279,12 +271,6 @@ class AmplitudeFactory(AmplitudeFactory_):
             except (ValueError,IndexError):
                 return cols,envs
         return cols,envs
-    def get_all_lenvs(self,cols,jmax=None,inplace=False,direction='col'):
-        stop = None if jmax is None else jmax+1
-        return self.get_all_envs(cols,1,stop=stop,inplace=inplace,direction=direction)
-    def get_all_renvs(self,cols,jmin=None,inplace=False,direction='col'):
-        stop = None if jmin is None else jmin-1
-        return self.get_all_envs(cols,-1,stop=stop,inplace=inplace,direction=direction)
     def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
         # lenv from col, renv from renv
         if direction=='col':
@@ -371,8 +357,6 @@ class AmplitudeFactory(AmplitudeFactory_):
             tn = None
         return tn 
     def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None,direction='row'):
-        #if self.compute_bot and self.compute_top:
-        #    raise ValueError
         if direction=='row':
             Lx = self.Lx
             direction_ = 'col'
@@ -391,66 +375,33 @@ class AmplitudeFactory(AmplitudeFactory_):
             if cols is not None:
                 plq = self.update_plq_from_3row(plq,cols,i,x_bsz,y_bsz,psi=psi,direction=direction_)
         return plq
-    def _unsigned_amplitude_from_benvs(self,bot,top):
-        try:
-            tn = bot.copy()
-            tn.add_tensor_network(top,virtual=False)
-            return safe_contract(tn)
-        except AttributeError:
-            return None
     def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True): 
         # always contract rows into the middle
-        rix1,rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,rix1=rix1,rix2=rix2)
+        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=self.rix1,imin=self.rix2)
+
         if env_bot is None and env_top is None:
-            return 0.
-        cx = self._unsigned_amplitude_from_benvs(env_bot,env_top)
+            cx = 0. if to_numpy else None
+            return cx 
+
+        try:
+            tn = env_bot.copy()
+            tn.add_tensor_network(env_top,virtual=False)
+            cx = safe_contract(tn)
+        except AttributeError:
+            cx = 0. if to_numpy else None
+            return cx 
+
         if to_numpy:
-            cx = 0. if cx is None else tensor2backend(cx,'numpy')
+            cx = tensor2backend(cx,'numpy')
         return cx  
 ################################################################################
 # for hamiltonian
 ################################################################################
-    def _get_bot(self,imin,config,cache_bot=None,direction='row'):
-        return self.get_env_prev(config,imin,1,cache=cache_bot,direction=direction)
-    def _get_top(self,imax,config,cache_top=None,direction='row'):
-        return self.get_env_prev(config,imax,-1,cache=cache_top,direction=direction)
-    def _get_boundary_mps_deterministic(self,config,imin,imax,cache_bot=None,cache_top=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
-        imin = min(self.rix1+1,imin) 
-        imax = max(self.rix2-1,imax) 
-        self.get_all_bot_envs(config,cache=cache_bot,imax=imin-1)
-        self.get_all_top_envs(config,cache=cache_top,imin=imax+1)
-        bot = self._get_bot(imin,config,cache_bot=cache_bot)
-        top = self._get_top(imax,config,cache_top=cache_top)
-        return bot,top
-    def _unsigned_amplitude_deterministic(self,config,imin,imax,bot,top,cache_bot=None,cache_top=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
-        imin = min(self.rix1+1,imin) 
-        imax = max(self.rix2-1,imax) 
-        bot_term = None if bot is None else bot.copy()
-        for i in range(imin,self.rix1+1):
-            row = self.get_mid_env(i,config)
-            bot_term = self.get_benv(i,row,bot_term,config,1,cache=cache_bot)
-        if bot_term is None:
-            return None
-
-        top_term = None if top is None else top.copy()
-        for i in range(imax,self.rix2-1,-1):
-            row = self.get_mid_env(i,config)
-            top_term = self.get_benv(i,row,top_term,config,-1,cache=cache_top)
-        if top_term is None:
-            return None
-        return self._unsigned_amplitude_from_benvs(bot_term,top_term)
-    def pair_energy_deterministic(self,config,site1,site2,top,bot,model,cache_bot=None,cache_top=None):
+    def pair_energy_deterministic(self,config,site1,site2,model,cache_bot=None,cache_top=None):
         ix1,ix2 = [model.flatten(site) for site in (site1,site2)]
         i1,i2 = config[ix1],config[ix2]
         if not model.pair_valid(i1,i2): # term vanishes 
             return None 
-        imin = min(self.rix1+1,site1[0],site2[0]) 
-        imax = max(self.rix2-1,site1[0],site2[0]) 
         ex = [] 
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * model.pair_coeff(site1,site2)
         for i1_new,i2_new,coeff in model.pair_terms(i1,i2):
@@ -460,85 +411,67 @@ class AmplitudeFactory(AmplitudeFactory_):
             config_new = tuple(config_new)
             sign_new = self.config_sign(config_new)
 
-            cx_new = self._unsigned_amplitude_deterministic(config_new,imin,imax,bot,top,cache_bot=cache_bot,cache_top=cache_top)
+            cx_new = self.unsigned_amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
             if cx_new is None:
                 continue
             ex.append(coeff * sign_new * cx_new)
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-####################################################################################
 ###################################################################
 # ham
 ###################################################################
 from .tensor_vmc import Hamiltonian as Hamiltonian_
 class Hamiltonian(Hamiltonian_):
-    def batch_pair_energies_from_plq(self,batch_idx,config):
+    def batch_pair_energies_from_plq(self,batch_idx,config,direction='row'):
         af = self.amplitude_factory 
         bix,tix,plq_types,pairs = self.model.batched_pairs[batch_idx]
         cache_bot,cache_top = dict(),dict()
-        af.get_all_bot_envs(config,cache=cache_bot,imax=bix)
-        af.get_all_top_envs(config,cache=cache_top,imin=tix)
+        af._get_all_benvs(config,1,cache=cache_bot,stop=bix+1,direction=direction)
+        af._get_all_benvs(config,-1,cache=cache_top,stop=tix-1,direction=direction)
 
         # form plqs
         plq = dict()
         for imin,imax,x_bsz,y_bsz in plq_types:
-            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
+            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction))
 
         # compute energy numerator 
         ex,cx = self._pair_energies_from_plq(plq,pairs,config,af=af)
         return ex,cx,plq
-    def pair_energies_from_plq(self,config): 
+    def pair_energies_from_plq(self,config,direction='row'): 
         af = self.amplitude_factory  
         x_bsz_min = min([x_bsz for x_bsz,_ in self.model.plq_sz])
-        af.get_all_benvs(config,x_bsz=x_bsz_min)
+        af.get_all_benvs(config,x_bsz=x_bsz_min,direction=direction)
 
         plq = dict()
         for x_bsz,y_bsz in self.model.plq_sz:
-            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz))
+            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,direction=direction))
 
         ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config,af=af)
         return ex,cx,plq
     def pair_energy_deterministic(self,config,site1,site2):
         af = self.amplitude_factory 
-        ix1,ix2 = [self.model.flatten(*site) for site in (site1,site2)]
-        i1,i2 = config[ix1],config[ix2]
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return None 
-
         cache_top = dict()
         cache_bot = dict()
-        imin = min(site1[0],site2[0])
-        imax = max(site1[0],site2[0])
-        bot,top = af._get_boundary_mps_deterministic(config,imin,imax,cache_bot=cache_bot,cache_top=cache_top)
-
-        ex = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model,cache_bot=cache_bot,cache_top=cache_top)
+        ex = af.pair_energy_deterministic(config,site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
         return {(site1,site2):ex} 
     def batch_pair_energies_deterministic(self,config,batch_imin,batch_imax):
         af = self.amplitude_factory
         cache_top = dict()
         cache_bot = dict()
-        bot,top = af._get_boundary_mps_deterministic(config,batch_imin,batch_imax,cache_bot=cache_bot,cache_top=cache_top)
 
         ex = dict() 
         for site1,site2 in self.model.batched_pairs[batch_imin,batch_imax]:
-            eij = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model,cache_bot=cache_bot,cache_top=cache_top)
+            eij = af.pair_energy_deterministic(config,site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
     def pair_energies_deterministic(self,config):
         af = self.amplitude_factory
-        #print('called')
-        #exit()
         af.get_all_benvs(config)
         ex = dict() 
         for (site1,site2) in self.model.pairs:
-            imin = min(af.rix1+1,site1[0],site2[0]) 
-            imax = max(af.rix2-1,site1[0],site2[0]) 
-            bot = af._get_bot(imin,config)  
-            top = af._get_top(imax,config)  
-
-            eij = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model)
+            eij = af.pair_energy_deterministic(config,site1,site2,self.model)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
@@ -936,7 +869,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
         try:
-            cols,renvs = af.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+            cols,renvs = af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz + 1): 
@@ -952,7 +885,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
         try:
-            cols,lenvs = af.get_all_lenvs(cols,jmax=self.Ly-1-y_bsz,inplace=False)
+            cols,lenvs = af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
@@ -968,7 +901,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_row_forward(self,x_bsz,y_bsz):
         af = self.amplitude_factory
         af.cache_bot = dict()
-        af.get_all_top_envs(af.parse_config(self.config),imin=x_bsz)
+        af._get_all_benvs(af.parse_config(self.config),-1,stop=x_bsz-1)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
@@ -978,11 +911,11 @@ class ExchangeSampler(ExchangeSampler_):
             tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af.get_all_bot_envs(af.parse_config(self.config),imin=i,imax=i+x_bsz-1)
+            af._get_all_benvs(af.parse_config(self.config),1,start=i,stop=i+x_bsz)
     def sweep_row_backward(self,x_bsz,y_bsz):
         af = self.amplitude_factory
         af.cache_top = dict()
-        af.get_all_bot_envs(af.parse_config(self.config),imax=self.Lx-1-x_bsz)
+        af._get_all_benvs(af.parse_config(self.config),1,stop=self.Lx-x_bsz)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
@@ -992,7 +925,7 @@ class ExchangeSampler(ExchangeSampler_):
             tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af.get_all_top_envs(af.parse_config(self.config),imin=i,imax=i+x_bsz-1)
+            af._get_all_benvs(af.parse_config(self.config),-1,stop=i-1,start=i+x_bsz-1)
     def get_bsz(self):
         if self.scheme=='hv':
             bsz = [(1,2),(2,1)][::self.rng.choice([1,-1])]
@@ -1014,11 +947,7 @@ class ExchangeSampler(ExchangeSampler_):
             config_sites,config_new = self._new_pair(site1,site2)
             if config_sites is None:
                 continue
-            imin = min(site1[0],site2[0]) 
-            imax = max(site1[0],site2[0]) 
-            config = af.parse_config(config_new)
-            bot,top = af._get_boundary_mps_deterministic(config,imin,imax)
-            cy = af._unsigned_amplitude_deterministic(config,imin,imax,bot,top)
+            cy = af.unsigned_amplitude(af.parse_config(config_new))
             if cy is None:
                 continue
             py = tensor2backend(cy ** 2,'numpy')
