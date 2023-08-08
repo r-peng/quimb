@@ -16,13 +16,28 @@ def set_options(pbc=False,deterministic=False,symmetry='u1',flat=True):
     this._FLAT = flat 
     from ..tensor_2d_vmc import set_options
     set_options(pbc=pbc,deterministic=deterministic)
-from ..tensor_2d_vmc import flatten,flat2site 
+
+from ..tensor_2d_vmc import (
+    flatten,flat2site,
+    AmplitudeFactory2D,
+    Model2D,
+    ExchangeSampler2D,
+)
+from .fermion_vmc import (
+    FermionAmplitudeFactory,
+    FermionModel,
+    pn_map,
+    get_data_map,
+    FermionExchangeSampler,
+)
 from .fermion_core import FermionTensor,FermionTensorNetwork
+class FermionModel2D(FermionModel,Model2D):
+    pass 
+class FermionExchangeSampler2D(FermionExchangeSampler,ExchangeSampler2D):
+    pass
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-from ..tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory2D
-from .fermion_vmc import AmplitudeFactory as FermionAmplitudeFactory
 def compute_fpeps_parity(fs,start,stop):
     if start==stop:
         return 0
@@ -36,7 +51,7 @@ def get_parity_cum(fpeps):
         start,stop = i*fpeps.Ly,(i+1)*fpeps.Ly
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
-class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D): 
+class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D): 
     def __init__(self,psi,blks=None,spinless=False,backend='numpy',**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
@@ -57,8 +72,7 @@ class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D):
         self.compress_opts = compress_opts
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
-        if self.deterministic:
-            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+        self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         self.parity_cum = get_parity_cum(psi)
 
@@ -81,20 +95,12 @@ class AmplitudeFactory(FermionAmplitudeFactory,AmplitudeFactory2D):
         parity_cum = np.cumsum(parity[:-1])
         parity_cum += self.parity_cum 
         return (-1)**(np.dot(parity[1:],parity_cum) % 2)
-    def get_all_lenvs(self,cols,jmax=None,inplace=False):
+    def get_all_envs(self,cols,step,stop=None,inplace=False,direction='col'):
         cols.reorder('col',inplace=True)
-        return super().get_all_lenvs(cols,jmax=jmax,inplace=inplace)
-    def get_all_renvs(self,cols,jmin=None,inplace=False):
-        cols.reorder('col',inplace=True)
-        return super().get_all_renvs(cols,jmin=jmin,inplace=inplace)
+        return super().get_all_envs(cols,step,stop=stop,inplace=inplace,direction=direction)
 
 from pyblock3.algebra.fermion_ops import H1
-from ..tensor_2d_vmc import Model as Model2D
-from .fermion_vmc import Model as FermionModel
-from .fermion_vmc import pn_map
-class Model(FermionModel,Model2D):
-    pass 
-class Hubbard(Model):
+class Hubbard(FermionModel2D):
     def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
         super().__init__(Lx,Ly,nbatch=nbatch)
         self.t,self.u = t,u
@@ -142,7 +148,7 @@ class Hubbard(Model):
             return [(0,3,sign),(3,0,sign)]
 class FDKineticO2(Hubbard):
     def __init__(self,N,L,**kwargs):
-        self.eps = L/(N+1e-15) if pbc else L/(N+1.)
+        self.eps = L/(N+1e-15) if _PBC else L/(N+1.)
 
         t = .5 / self.eps**2
         self.l = 2. / self.eps**2
@@ -156,19 +162,19 @@ class FDKineticO2(Hubbard):
             for j in range(self.Ly):
                 ix1 = self.flatten(i,j)
                 h[ix1,ix1] = self.l
-                if i+1<self.Lx or self.pbc:
-                    ix2 = self.flatten((i+1)%self.Lx,j) 
+                if i+1<self.Lx or _PBC:
+                    ix2 = self.flatten(((i+1)%self.Lx,j))
                     h[ix1,ix2] = -self.t
                     h[ix2,ix1] = -self.t
-                if j+1<self.Ly or self.pbc:
-                    ix2 = self.flatten(i,(j+1)%self.Ly) 
+                if j+1<self.Ly or _PBC:
+                    ix2 = self.flatten((i,(j+1)%self.Ly))
                     h[ix1,ix2] = -self.t
                     h[ix2,ix1] = -self.t
         return h
-class FDKineticO4(Model):
+class FDKineticO4(FermionModel2D):
     def __init__(self,N,L,**kwargs):
         super().__init__(N,N,**kwargs)
-        self.eps = L/(N+1e-15) if pbc else L/(N+1.)
+        self.eps = L/(N+1e-15) if _PBC else L/(N+1.)
         self.t1 = 16./(24.*self.eps**2)
         self.t2 = 1./(24.*self.eps**2)
         self.li = 60./(24.*self.eps**2) 
@@ -176,7 +182,7 @@ class FDKineticO4(Model):
         self.lc = 58./(24.*self.eps**2) 
     
         self.pairs = self.pairs_nn() + self.pairs_nn(d=2)
-        if self.deterministic:
+        if _DETERMINISTIC:
             self.batch_deterministic()
         else:
             self.batch_plq_nn(d=2)
@@ -224,24 +230,24 @@ class FDKineticO4(Model):
         h = np.zeros((nsite,)*2)
         for i in range(self.Lx):
              for j in range(self.Ly):
-                 ix1 = self.flatten(i,j)
-                 if i+1<self.Lx or self.pbc:
-                     ix2 = self.flatten((i+1)%self.Lx,j) 
+                 ix1 = self.flatten((i,j))
+                 if i+1<self.Lx or _PBC:
+                     ix2 = self.flatten(((i+1)%self.Lx,j))
                      h[ix1,ix2] = -self.t1
                      h[ix2,ix1] = -self.t1
-                 if j+1<self.Ly or self.pbc:
-                     ix2 = self.flatten(i,(j+1)%self.Ly) 
+                 if j+1<self.Ly or _PBC:
+                     ix2 = self.flatten((i,(j+1)%self.Ly))
                      h[ix1,ix2] = -self.t1
                      h[ix2,ix1] = -self.t1
-                 if i+2<self.Lx or self.pbc:
-                     ix2 = self.flatten((i+2)%self.Lx,j) 
+                 if i+2<self.Lx or _PBC:
+                     ix2 = self.flatten(((i+2)%self.Lx,j))
                      h[ix1,ix2] = self.t2
                      h[ix2,ix1] = self.t2
-                 if j+2<self.Ly or self.pbc:
-                     ix2 = self.flatten(i,(j+2)%self.Ly) 
+                 if j+2<self.Ly or _PBC:
+                     ix2 = self.flatten((i,(j+2)%self.Ly))
                      h[ix1,ix2] = self.t2
                      h[ix2,ix1] = self.t2
-                 if self.pbc:
+                 if _PBC:
                      h[ix1,ix1] = self.li
                  else:
                      if i in (0,self.Lx-1) and j in (0,self.Ly-1):
@@ -251,15 +257,14 @@ class FDKineticO4(Model):
                      else:
                          h[ix1,ix1] = self.li
         return h
-def coulomb(config,Lx,Ly,eps,spinless):
+def coulomb_obc(config,Lx,Ly,eps,spinless):
     pn = config2pn(config,0,len(config),spinless)
     e = 0.
-    for ix1 in range(len(config)):
-        n1 = pn[ix1]
+    for ix1,n1 in enumerate(pn):
         if n1==0:
             continue
         i1,j1 = flat2site(ix1,Lx,Ly)
-        for ix2 in range(ix1+1,len(config)):
+        for ix2 in range(ix1+1,len(pn)):
             n2 = pn[ix2]
             if n2==0:
                 continue
@@ -267,6 +272,9 @@ def coulomb(config,Lx,Ly,eps,spinless):
             dist = np.sqrt((i1-i2)**2+(j1-j2)**2)
             e += n1 * n2 / dist    
     return e / eps
+def coulomb_pbc(config,Lx,Ly,spinless):
+    pn = config2pn(config,0,len(config),spinless)
+    e = 0.
 class UEGO2(FDKineticO2):
     def compute_local_energy_eigen(self,config):
         ke = super().compute_local_energy_eigen(config)
@@ -291,13 +299,6 @@ class DensityMatrix:
         return 0.,0.,None,None,0. 
     def _print(self,fname,data):
         print(data)
-####################################################################################
-# sampler 
-####################################################################################
-from ..tensor_2d_vmc import ExchangeSampler as ExchangeSampler2D
-from .fermion_vmc import ExchangeSampler as FermionExchangeSampler
-class ExchangeSampler(FermionExchangeSampler,ExchangeSampler2D):
-    pass
 pattern_map = {'u':'+','r':'+','d':'-','l':'-','p':'+'}
 def get_patterns(Lx,Ly,shape='urdlp'):
     patterns = dict()
@@ -329,7 +330,9 @@ def get_vaccum(Lx,Ly,shape='urdlp',symmetry='u1',flat=True,spinless=False):
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)
     return ftn
-def create_particle(fpeps,site,spin,spinless=False):
+def create_particle(fpeps,site,spin,spinless=False,data_map=None):
+    if data_map is None:
+        data_map = get_data_map(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
     if spinless:
         cre = data_map['cre'].copy()
     else:
@@ -341,19 +344,20 @@ def create_particle(fpeps,site,spin,spinless=False):
     return fpeps
 def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,spinless=False):
     fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,spinless=spinless)
+    data_map = get_data_map(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
     if spinless: 
         for ix,ci in enumerate(config):
             site = flat2site(ix,Ly)
             if ci==1:
-                fpeps = create_particle(fpeps,site,None,spinless=spinless)
+                fpeps = create_particle(fpeps,site,None,spinless=spinless,data_map=data_map)
     else:
         for ix,ci in enumerate(config):
             site = flat2site(ix,Ly)
             if ci==1:
-                fpeps = create_particle(fpeps,site,'a',spinless=spinless)
+                fpeps = create_particle(fpeps,site,'a',spinless=spinless,data_map=data_map)
             if ci==2:
-                fpeps = create_particle(fpeps,site,'b',spinless=spinless)
+                fpeps = create_particle(fpeps,site,'b',spinless=spinless,data_map=data_map)
             if ci==3:
-                fpeps = create_particle(fpeps,site,'b',spinless=spinless)
-                fpeps = create_particle(fpeps,site,'a',spinless=spinless)
+                fpeps = create_particle(fpeps,site,'b',spinless=spinless,data_map=data_map)
+                fpeps = create_particle(fpeps,site,'a',spinless=spinless,data_map=data_map)
     return fpeps

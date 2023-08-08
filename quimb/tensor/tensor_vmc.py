@@ -1108,26 +1108,11 @@ def safe_contract(tn):
         return None
     return data
 def contraction_error(cx,multiply=True):
-    def _contraction_error(cx):
-        if isinstance(cx,dict):
-            if len(cx)==0:
-                return 0.,0.
-            cx = np.array(list(cx.values()))
-            max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
-            return mean_,np.fabs((max_-min_)/mean_)
-        else:
-            return cx,0.
-
-    if isinstance(cx,dict):
-        return _contraction_error(cx)
-    if isinstance(cx,list):
-        cx_,err = np.zeros(3),np.zeros(3)
-        for ix in range(3): 
-            cx_[ix],err[ix] = _contraction_error(cx[ix])
-        if multiply:
-            cx_ = np.prod(cx_)
-        return cx_,np.amax(err)
-    return cx,0.
+    if len(cx)==0:
+        return 0.,0.
+    cx = np.array(list(cx.values()))
+    max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
+    return mean_,np.fabs((max_-min_)/mean_)
 def list2dict(ls):
     if isinstance(ls,dict):
         return ls
@@ -1377,35 +1362,13 @@ class AmplitudeFactory:
         if ex is None:
             return None
         return model.pair_coeff(*where) * ex 
-    def parse_hessian_from_plq(self,Hvx,vx,ex,eu,cx):
-        vx = self.dict2vec(vx)
-        cx,err = contraction_error(cx) 
-        return cx,ex+eu,vx,Hvx/cx+eu*vx,err
-    def parse_hessian_deterministic(self,Hvx,vx,ex,eu,cx):
-        return cx,ex/cx+eu,vx,Hvx/cx+eu*vx,0.
-    def parse_energy_deterministic(self,ex,cx,to_numpy=True):
-        ex = sum(ex.values())/cx
-        if to_numpy:
-            ex = tensor2backend(ex,'numpy')
-        return ex,cx
-    def parse_energy_from_plq(self,ex,cx):
-        if len(cx)==0:
-            return 0.
-        ex = sum([eij/cx[where] for where,eij in ex.items()])
-        return tensor2backend(ex,'numpy')
-    def parse_derivative(self,ex,cx=None):
+    def compute_derivative(self,ex):
         if len(ex)==0:
-            return 0.,0.,np.zeros(self.nparam)
+            return 0.,np.zeros(self.nparam)
         ex_num = sum(ex.values())
         ex_num.backward()
         Hvx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
-        if cx is None:
-            ex = None
-        elif isinstance(cx,dict):
-            ex = self.parse_energy_from_plq(ex,cx)
-        else:
-            ex = self.parse_energy_deterministic(ex,cx)
-        return ex,tensor2backend(ex_num,'numpy'),self.dict2vec(Hvx)  
+        return tensor2backend(ex_num,'numpy'),self.dict2vec(Hvx)  
     def get_grad_deterministic(self,config,unsigned=False):
         self.wfn2backend(backend='torch',requires_grad=True)
         cache_top = dict()
@@ -1414,7 +1377,7 @@ class AmplitudeFactory:
         if cx is None:
             vx = np.zeros(self.nparam)
         else:
-            _,cx,vx = self.parse_derivative({0:cx})
+            cx,vx = self.compute_derivative({0:cx})
             vx /= cx
             sign = 1. if unsigned else self.config_sign(config)
             cx *= sign
@@ -1461,58 +1424,55 @@ class Hamiltonian:
                     continue
                 ex[where] = eij
         return ex,cx
-    def batch_hessian_from_plq(self,batch_idx,config): # only used for Hessian
+    def batch_hessian_from_plq(self,config,batch_key): # only used for Hessian
         af = self.amplitude_factory
         af.wfn2backend(backend='torch',requires_grad=True)
         self.model.gate2backend('torch')
-        ex,cx,plq = self.batch_pair_energies_from_plq(batch_idx,config)
+        ex,cx,vx = self.batch_pair_energies_from_plq(config,batch_key,new_cache=True)
 
-        ex,_,Hvx = af.parse_derivative(ex,cx=cx)
-        vx = af.get_grad_from_plq(plq,to_vec=False) 
-        vx = list2dict(vx)
-        cx = list2dict(cx)
+        _,Hvx = af.compute_derivative(ex)
+        ex = tensor2backend(sum([eij/cx[where] for where,eij in ex.items()]),'numpy')
+
         af.wfn2backend()
         self.model.gate2backend(af.backend)
         return ex,Hvx,cx,vx
     def compute_local_energy_hessian_from_plq(self,config): 
         ex,Hvx = 0.,0.
         cx,vx = dict(),dict()
-        for batch_idx in self.model.batched_pairs:
-            ex_,Hvx_,cx_,vx_ = self.batch_hessian_from_plq(batch_idx,config)  
+        for batch_key in self.model.batched_pairs:
+            ex_,Hvx_,cx_,vx_ = self.batch_hessian_from_plq(config,batch_key)  
             ex += ex_
             Hvx += Hvx_
             cx.update(cx_)
             vx.update(vx_)
-        eu = self.model.compute_local_energy_eigen(config)
-        return self.amplitude_factory.parse_hessian_from_plq(Hvx,vx,ex,eu,cx)
-    def compute_local_energy_gradient_from_plq(self,config,compute_v=True):
-        ex,cx,plq = self.pair_energies_from_plq(config)
+        vx = self.amplitude_factory.dict2vec(vx)
+        cx,err = contraction_error(cx) 
 
-        af = self.amplitude_factory
-        ex = af.parse_energy_from_plq(ex,cx)
         eu = self.model.compute_local_energy_eigen(config)
         ex += eu
-
-        if not compute_v:
-            cx,err = contraction_error(cx)
-            return cx,ex,None,None,err 
-        vx = af.get_grad_from_plq(plq)  
+        Hvx = Hvx / cx + eu * vx
+        return cx,ex,vx,Hvx,err 
+    def compute_local_energy_gradient_from_plq(self,config,compute_v=True):
+        ex,cx,vx = dict(),dict(),dict()
+        for batch_key in self.model.batched_pairs:
+            ex_,cx_,vx_ = self.batch_pair_energies_from_plq(config,batch_key,compute_v=compute_v)  
+            ex.update(ex_)
+            cx.update(cx_)
+            vx.update(vx_)
+        eu = self.model.compute_local_energy_eigen(config)
+        ex = sum([eij/cx[where] for where,eij in ex.items()]) + eu
         cx,err = contraction_error(cx)
+        if not compute_v:
+            return cx,ex,None,None,err 
+        vx = self.amplitude_factory.dict2vec(vx)  
         return cx,ex,vx,None,err
-    def batch_hessian_deterministic(self,config,batch_imin,batch_imax):
+    def batch_hessian_deterministic(self,config,batch_key):
         af = self.amplitude_factory
         af.wfn2backend(backend='torch',requires_grad=True)
-        ex = self.batch_pair_energies_deterministic(config,batch_imin,batch_imax)
-        _,ex,Hvx = af.parse_derivative(ex)
+        ex = self.batch_pair_energies_deterministic(config,batch_key,new_cache=True)
+        ex,Hvx = af.compute_derivative(ex)
         af.wfn2backend()
         return ex,Hvx
-    def pair_hessian_deterministic(self,config,site1,site2):
-        af = self.amplitude_factory
-        af.wfn2backend(backend='torch',requires_grad=True)
-        ex = self.pair_energy_deterministic(config,site1,site2)
-        _,ex,Hvx = af.parse_derivative(ex)
-        af.wfn2backend()
-        return ex,Hvx 
     def compute_local_energy_hessian_deterministic(self,config):
         af = self.amplitude_factory
         cx,vx = af.get_grad_deterministic(config)
@@ -1520,35 +1480,28 @@ class Hamiltonian:
         ex = 0. 
         Hvx = 0.
         for key in self.model.batched_pairs:
-            if key=='pbc':
-                continue
-            imin,imax = key
-            ex_,Hvx_ = self.batch_hessian_deterministic(config,imin,imax) 
+            ex_,Hvx_ = self.batch_hessian_deterministic(config,key) 
             ex += ex_
             Hvx += Hvx_
-        if af.pbc:
-            for site1,site2 in self.batched_pairs['pbc']:
-                ex_,Hvx_ = self.pair_hessian_deterministic(self,config,site1,site2)
-                ex += ex_
-                Hvx += Hvx_
-         
         eu = self.model.compute_local_energy_eigen(config)
-        return af.parse_hessian_deterministic(Hvx,vx,ex,eu,cx)
+        ex = ex / cx + eu 
+        Hvx = Hvx / cx + eu * vx
+        return cx,ex,vx,Hvx,0. 
     def compute_local_energy_gradient_deterministic(self,config,compute_v=True):
         af = self.amplitude_factory
-        ex = self.pair_energies_deterministic(config)
+        ex = dict() 
+        for key in self.model.batched_pairs:
+            ex_ = self.batch_pair_energies_deterministic(config,key)
+            ex.update(ex_)
+
         if compute_v:
             cx,vx = af.get_grad_deterministic(config)
         else:
-            cx = af.unsigned_amplitude(config)
-            sign = af.config_sign(config)
-            cx *= sign
+            cx = af.unsigned_amplitude(config) * af.config_sign(config)
             vx = None
-        if cx is None:
-            return 0.,0.,vx,None,0.
-        ex,cx = af.parse_energy_deterministic(ex,cx) 
+
         eu = self.model.compute_local_energy_eigen(config)
-        ex += eu
+        ex = sum(ex.values()) / cx + eu 
         return cx,ex,vx,None,0.
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         config = self.amplitude_factory.parse_config(config)

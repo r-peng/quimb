@@ -12,13 +12,17 @@ from .tensor_vmc import (
     tensor2backend,
     safe_contract,
     contraction_error,
+    Hamiltonian,
+    Model,
+    get_gate2,
+    _add_gate,
 )
-from .tensor_2d_vmc import AmplitudeFactory as AmplitudeFactory_
+from .tensor_2d_vmc import AmplitudeFactory2D,ExchangeSampler2D 
 def set_options(pbc=False,deterministic=False,backend='numpy'):
     this._PBC = pbc
     from .tensor_2d_vmc import set_options
     set_options(pbc=pbc)
-class AmplitudeFactory(AmplitudeFactory_):
+class AmplitudeFactory1D(AmplitudeFactory2D):
     def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',**compress_opts):
         self.L = psi.L
         self.Ly = psi.L
@@ -78,8 +82,8 @@ class AmplitudeFactory(AmplitudeFactory_):
         plq = dict()
         if self.pbc:
             plq[self.L-1,self.L] = tn.copy()
-        cols,lenvs = self.get_all_lenvs(cols,jmax=self.Ly-bsz-1,inplace=False)
-        cols,renvs = self.get_all_renvs(cols,jmin=bsz,inplace=False)
+        cols,lenvs = self.get_all_envs(cols,1,stop=self.Ly-bsz,inplace=False)
+        cols,renvs = self.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
         for j in range(self.L-bsz+1):
             plq[j,bsz] = self._get_plq(j,bsz,cols,lenvs,renvs)
         return plq 
@@ -94,11 +98,8 @@ class AmplitudeFactory(AmplitudeFactory_):
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
-from .tensor_vmc import Hamiltonian as Hamiltonian_
-class Hamiltonian(Hamiltonian_):
-    def batch_pair_energies_from_plq(self,batch_idx,config):
-        return self.pair_energies_from_plq(config)
-    def pair_energies_from_plq(self,config):
+class Hamiltonian1D(Hamiltonian):
+    def batch_pair_energies_from_plq(self,config,batch_key,new_cache=None,compute_v=True,to_vec=False):
         af = self.amplitude_factory  
         # form plqs
         plq = dict()
@@ -107,14 +108,17 @@ class Hamiltonian(Hamiltonian_):
 
         # compute energy numerator 
         ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config,af=af)
-        return ex,cx,plq
+        if compute_v:
+            vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
+        else:
+            vx = None if to_vec else dict()
+        return ex,cx,vx
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         if compute_Hv:
             return self.compute_local_energy_hessian_from_plq(config)
         else:
             return self.compute_local_energy_gradient_from_plq(config,compute_v=compute_v)
-from .tensor_vmc import Model as Model_
-class Model(Model_):
+class Model1D(Model):
     def __init__(self,L):
         self.L = L
         self.nsite = L
@@ -133,8 +137,7 @@ class Model(Model_):
                     where = j,(j+d)%self.L
                     ls.append(where)
         return ls
-from .tensor_vmc import get_gate2,_add_gate
-class J1J2(Model): 
+class J1J2(Model1D): 
     def __init__(self,J1,J2,L):
         super().__init__(L)
         self.J1,self.J2 = J1,J2
@@ -171,8 +174,7 @@ class J1J2(Model):
         return .25 * (e[0]*self.J1 + e[1]*self.J2) 
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
-from .tensor_2d_vmc import ExchangeSampler as ExchangeSampler_
-class ExchangeSampler(ExchangeSampler_):
+class ExchangeSampler1D(ExchangeSampler2D):
     def __init__(self,L,seed=None,burn_in=0):
         self.L = L
         self.nsite = L
@@ -188,7 +190,7 @@ class ExchangeSampler(ExchangeSampler_):
         return i
     def sweep_col_forward(self,cols,bsz):
         af = self.amplitude_factory
-        cols,renvs = af.get_all_renvs(cols,jmin=bsz,inplace=False)
+        cols,renvs = af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
         for j in range(self.L - bsz + 1): 
             plq = af._get_plq_forward(j,bsz,cols,renvs)
             _,cols = self._update_pair(j,j+1,plq,cols) 
@@ -198,7 +200,7 @@ class ExchangeSampler(ExchangeSampler_):
                 return
     def sweep_col_backward(self,cols,bsz):
         af = self.amplitude_factory
-        cols,lenvs = af.get_all_lenvs(cols,jmax=self.L-1-bsz,inplace=False)
+        cols,lenvs = af.get_all_envs(cols,1,stop=self.L-bsz,inplace=False)
         for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
             plq = af._get_plq_backward(j,bsz,cols,lenvs)
             _,cols = self._update_pair(j,j+1,plq,cols) 
@@ -239,8 +241,8 @@ def compute_energy(mps,terms,order,pbc=False):
     bsz = max([abs(i-j)+1 for i,j in terms.keys()])
     set_options(pbc=pbc)
     af = AmplitudeFactory(mps) 
-    _,lenvs = af.get_all_lenvs(norm,jmax=mps.L-bsz-1,inplace=False) 
-    _,renvs = af.get_all_renvs(norm,jmin=bsz,inplace=False)
+    _,lenvs = af.get_all_envs(norm,1,stop=mps.L-bsz,inplace=False) 
+    _,renvs = af.get_all_envs(norm,-1,stop=bsz-1,inplace=False)
     n = lenvs[bsz-1].copy()
     n.add_tensor_network(renvs[bsz],virtual=False)
     n = n.contract()

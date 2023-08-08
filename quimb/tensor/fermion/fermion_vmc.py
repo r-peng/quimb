@@ -1,15 +1,24 @@
 import numpy as np
 import itertools
-from ..tensor_vmc import DenseSampler as DenseSampler_ 
-class DenseSampler(DenseSampler_):
+class FermionModel:
+    def gate2backend(self,backend):
+        self.gate = tensor2backend(self.gate,backend)
+from ..tensor_vmc import (
+    safe_contract,
+    DenseSampler,
+    ExchangeSampler,
+)
+class FermionDenseSampler(DenseSampler):
     def __init__(self,nsite,nelec,spinless=False,**kwargs):
         self.nelec = nelec
         self.spinless = spinless
         nspin = (nelec,) if spinless else None
         super().__init__(nsite,nspin,**kwargs)
-    def get_all_configs(self):
+    def get_all_configs(self,fix_sector=True):
         if self.spinless:
-            return super().get_all_configs()
+            return super().get_all_configs(fix_sector=fix_sector)
+        if not fix_sector:
+            return list(itertools.product((0,1,2,3),repeat=self.nsite)) 
         return self.get_all_configs_u11()
     def get_all_configs_u11(self):
         assert isinstance(self.nelec,tuple)
@@ -47,8 +56,7 @@ class DenseSampler(DenseSampler_):
             config_a,config_b = config[:self.nsite],config[self.nsite:]
             configs[ix] = tuple(config_a + config_b * 2)
         return configs
-from ..tensor_vmc import ExchangeSampler as ExchangeSampler_
-class ExchangeSampler(ExchangeSampler_):
+class FermionExchangeSampler(ExchangeSampler):
     def propose_new_pair(self,i1,i2):
         if self.amplitude_factory.spinless:
             return i2,i1
@@ -219,7 +227,6 @@ def tensor2backend(data,backend,requires_grad=False):
             print(data)
             raise TypeError
     return data
-from ..tensor_vmc import safe_contract
 def _add_gate(tn,gate,order,where,site_ind,site_tag,contract=True):
     # reindex
     kixs = [site_ind(site) for site in where]
@@ -239,7 +246,7 @@ def _add_gate(tn,gate,order,where,site_ind,site_tag,contract=True):
     if not contract:
         return tn  
     return safe_contract(tn)
-class AmplitudeFactory:
+class FermionAmplitudeFactory:
     def write_tn_to_disc(self,tn,fname):
         return write_ftn_to_disc(tn,fname,provided_filename=True)
     def get_constructors(self,psi):
@@ -295,6 +302,3 @@ class AmplitudeFactory:
             self._tensor_compress_bond(T2,T1,absorb=absorb)
     def _add_gate(self,tn,gate,order,where,contract=True):
         return _add_gate(tn.copy(),gate,order,where,self.site_ind,self.site_tag,contract=contract)
-class Model:
-    def gate2backend(self,backend):
-        self.gate = tensor2backend(self.gate,backend)

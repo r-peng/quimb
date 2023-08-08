@@ -12,8 +12,11 @@ from .tensor_vmc import (
     tensor2backend,
     safe_contract,
     contraction_error,
+    AmplitudeFactory,
+    Hamiltonian,
+    Model,
+    ExchangeSampler,
 )
-from .tensor_vmc import AmplitudeFactory as AmplitudeFactory_
 def set_options(pbc=False,deterministic=False):
     this._PBC = pbc
     this._DETERMINISTIC = deterministic 
@@ -24,7 +27,7 @@ def flat2site(ix,Ly): # ix in row order
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
-class AmplitudeFactory(AmplitudeFactory_):
+class AmplitudeFactory2D(AmplitudeFactory):
     def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
@@ -41,8 +44,7 @@ class AmplitudeFactory(AmplitudeFactory_):
         self.compress_opts = compress_opts
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
-        if self.deterministic:
-            self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+        self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         if blks is None:
             blks = [self.sites]
@@ -54,6 +56,7 @@ class AmplitudeFactory(AmplitudeFactory_):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
+##### wfn methods #####
     def site_tag(self,site):
         return self.psi.site_tag(*site)
     def site_tags(self,site):
@@ -62,10 +65,27 @@ class AmplitudeFactory(AmplitudeFactory_):
         return self.psi.site_ind(*site)
     def col_tag(self,col):
         return self.psi.col_tag(col)
+    def row_tag(self,row):
+        return self.psi.row_tag(row)
     def plq_sites(self,plq_key):
         (i0,j0),(x_bsz,y_bsz) = plq_key
         sites = list(itertools.product(range(i0,i0+x_bsz),range(j0,j0+y_bsz)))
         return sites
+    def get_cache(self,direction,step):
+        if direction=='row':
+            cache = self.cache_bot if step==1 else self.cache_top
+        else:
+            cache = self.cache_left if step==1 else self.cache_right
+        return cache
+    def cache_key(self,config,i,direction,step):
+        if direction=='row':
+            if step==1: # bottom env
+                return config[:(i+1)*self.Ly] 
+            else: # top env
+                return config[i*self.Ly:]
+        else: 
+            cols = range(i+1) if step==1 else range(i,self.Ly)
+            return tuple([config[slc] for slc in [slice(col,self.nsite,self.Ly) for col in cols]])
     def _new_cache(self,config,cache_bot,cache_top):
         cache_bot_new = dict()
         for i in range(self.rix1+1):
@@ -83,298 +103,305 @@ class AmplitudeFactory(AmplitudeFactory_):
 
         self.cache_bot = dict()
         self.cache_top = dict()
-##################################################################################################
-# contraction methods                                          
-##################################################################################################
-    def get_mid_env(self,i,config,append='',psi=None):
+        self.cache_left = dict()
+        self.cache_right = dict()
+##### compress row methods  #####
+    def get_mid_env(self,i,config,append='',psi=None,direction='row'):
         psi = self.psi if psi is None else psi 
-        row = psi.select(psi.row_tag(i),virtual=False)
-        key = config[i*self.Ly:(i+1)*self.Ly]
+        if direction=='row':
+            row_tag = self.row_tag
+            Ly = self.Ly
+            slc = slice(i*self.Ly,(i+1)*self.Ly,1) 
+        else:
+            row_tag = self.col_tag
+            Ly = self.Lx
+            slc = slice(i,self.nsite,self.Ly) 
+        row = psi.select(row_tag(i),virtual=False)
+        key = config[slc]
         # compute mid env for row i
-        for j in range(self.Ly-1,-1,-1):
-            row.add_tensor(self.get_bra_tsr(key[j],(i,j),append=append),virtual=True)
+        for j in range(Ly-1,-1,-1):
+            site = (i,j) if direction=='row' else (j,i)
+            row.add_tensor(self.get_bra_tsr(key[j],site,append=append),virtual=True)
         return row
-    def contract_mid_env(self,i,row):
+    def contract_mid_env(self,i,row,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
         try: 
-            for j in range(self.Ly-1,-1,-1):
-                row.contract_tags(row.site_tag(i,j),inplace=True)
+            for j in range(Ly-1,-1,-1):
+                site = (i,j) if direction=='row' else (j,i)
+                row.contract_tags(self.site_tag(site),inplace=True)
         except (ValueError,IndexError):
             row = None 
         return row
-    def compress_row_pbc(self,tn,i):
-        for j in range(self.Ly): # compress between j,j+1
-            tn.compress_between(tn.site_tag(i,j),tn.site_tag(i,(j+1)%self.Ly),
+    def compress_row_pbc(self,tn,i,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
+        for j in range(Ly): # compress between j,j+1
+            if direction=='row':
+                site1,site2 = (i,j),(i,(j+1)%Ly) 
+            else:
+                site1,site2 = (j,i),((j+1)%Ly,i) 
+            tn.compress_between(self.site_tag(site1),self.site_tag(site2),
                                 **self.compress_opts)
         return tn
-    def compress_row_obc(self,tn,i):
-        tn.canonize_row(i,sweep='left')
-        for j in range(self.Ly-1):
-            self.tensor_compress_bond(tn[i,j],tn[i,j+1],absorb='right')        
-        return tn
-    def contract_boundary_single(self,tn,i,iprev):
-        for j in range(self.Ly):
-            tag1,tag2 = tn.site_tag(iprev,j),tn.site_tag(i,j)
-            tn.contract_((tag1,tag2),which='any')
-        if _PBC:
-            return self.compress_row_pbc(tn,i)
+    def compress_row_obc(self,tn,i,direction='row'):
+        if direction=='row':
+            tn.canonize_row(i,sweep='left')
+            Ly = self.Ly
         else:
-            return self.compress_row_obc(tn,i)
-    def get_bot_env(self,i,row,env_prev,config,cache=None):
-        # contract mid env for row i with prev bot env 
-        key = config[:(i+1)*row.Ly]
-        cache = self.cache_bot if cache is None else cache
+            tn.canonize_column(i,sweep='up')
+            Ly = self.Lx
+        for j in range(Ly-1):
+            if direction=='row':
+                site1,site2 = (i,j),(i,j+1) 
+            else:
+                site1,site2 = (j,i),(j+1,i) 
+            self.tensor_compress_bond(tn[site1],tn[site2],absorb='right')        
+        return tn
+    def contract_boundary_single(self,tn,i,iprev,direction='row'):
+        Ly = self.Ly if direction=='row' else self.Lx
+        for j in range(Ly):
+            if direction=='row':
+                sites = (iprev,j),(i,j) 
+            else:
+                sites = (j,iprev),(j,i) 
+            tn.contract_([self.site_tag(site) for site in sites],which='any')
+        if _PBC:
+            return self.compress_row_pbc(tn,i,direction=direction)
+        else:
+            return self.compress_row_obc(tn,i,direction=direction)
+    def get_benv(self,i,row,env_prev,config,step,cache=None,direction='row'):
+        cache = self.get_cache(direction,step) if cache is None else cache 
+        key = self.cache_key(config,i,direction,step)
         if key in cache: # reusable
             return cache[key]
-        row = self.contract_mid_env(i,row)
-        if i==0:
+        row = self.contract_mid_env(i,row,direction=direction)
+
+        # is terminal
+        if step==1 and i==0:
             cache[key] = row
             return row
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==-1 and i==Lx-1:
+            cache[key] = row
+            return row
+
+        # contraction fails
         if row is None:
             cache[key] = row
             return row
         if env_prev is None:
             cache[key] = None 
             return None
-        tn = env_prev.copy()
-        tn.add_tensor_network(row,virtual=False)
+
+        if step==1:
+            tn = env_prev.copy()
+            tn.add_tensor_network(row,virtual=False)
+        else:
+            tn = row
+            tn.add_tensor_network(env_prev,virtual=False)
         try:
-            tn = self.contract_boundary_single(tn,i,i-1)
+            tn = self.contract_boundary_single(tn,i,i-step,direction=direction)
         except (ValueError,IndexError):
             tn = None
         cache[key] = tn
         return tn 
-    def get_all_bot_envs(self,config,psi=None,cache=None,imin=None,imax=None,append=''):
-        imin = 0 if imin is None else imin
-        imax = self.Lx-2 if imax is None else imax
+    def get_env_prev(self,config,i,step,cache=None,direction='row'):
+        if step==1 and i==0:
+            return None 
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==-1 and i==Lx-1:
+            return None
+        cache = self.get_cache(direction,step) if cache is None else cache 
+        key = self.cache_key(config,i-step,direction,step)
+        return cache[key]
+    def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
         psi = self.psi if psi is None else psi
-        cache = self.cache_bot if cache is None else cache
-        env_prev = None if imin==0 else cache[config[:imin*self.Ly]] 
-        for i in range(imin,imax+1):
-            row = self.get_mid_env(i,config,append=append,psi=psi)
-            env_prev = self.get_bot_env(i,row,env_prev,config,cache=cache)
-        return env_prev
-    def get_top_env(self,i,row,env_prev,config,cache=None):
-        # contract mid env for row i with prev top env 
-        key = config[i*row.Ly:]
-        cache = self.cache_top if cache is None else cache
-        if key in cache: # reusable
-            return cache[key]
-        row = self.contract_mid_env(i,row)
-        if i==row.Lx-1:
-            cache[key] = row
-            return row
-        if row is None:
-            cache[key] = row
-            return row
-        if env_prev is None:
-            cache[key] = None 
-            return None
-        tn = row
-        tn.add_tensor_network(env_prev,virtual=False)
-        try:
-            tn = self.contract_boundary_single(tn,i,i+1)
-        except (ValueError,IndexError):
-            tn = None
-        cache[key] = tn
-        return tn 
-    def get_all_top_envs(self,config,psi=None,cache=None,imin=None,imax=None,append=''):
-        imin = 1 if imin is None else imin
-        imax = self.Lx - 1 if imax is None else imax
-        psi = self.psi if psi is None else psi 
-        cache = self.cache_top if cache is None else cache
-        env_prev = None if imax==self.Lx-1 else cache[config[(imax+1)*self.Ly:]]
-        for i in range(imax,imin-1,-1):
-             row = self.get_mid_env(i,config,append=append,psi=psi)
-             env_prev = self.get_top_env(i,row,env_prev,config,cache=cache)
+        cache = self.get_cache(direction,step) if cache is None else cache 
+
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==1:
+            start = 0 if start is None else start
+            stop = Lx-1 if stop is None else stop
+        else:
+            start = Lx-1 if start is None else start
+            stop = 0 if stop is None else stop 
+        env_prev = self.get_env_prev(config,start,step,cache=cache,direction=direction)
+        for i in range(start,stop,step):
+            row = self.get_mid_env(i,config,append=append,psi=psi,direction=direction)
+            env_prev = self.get_benv(i,row,env_prev,config,step,cache=cache,direction=direction)
         return env_prev
     def get_all_benvs(self,config,psi=None,cache_bot=None,cache_top=None,x_bsz=1,
-                      compute_bot=True,compute_top=True,rix1=None,rix2=None):
+                      compute_bot=True,compute_top=True,imax=None,imin=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
+        Lx = self.Lx if direction=='row' else self.Ly
 
         env_bot = None
         env_top = None
         if compute_bot: 
-            imax = self.Lx-1-x_bsz if rix1 is None else rix1 
-            env_bot = self.get_all_bot_envs(config,psi=psi,cache=cache_bot,imax=imax)
+            stop = Lx-x_bsz if imax is None else imax+1 
+            env_bot = self._get_all_benvs(config,1,psi=psi,cache=cache_bot,stop=stop,direction=direction)
         if compute_top:
-            imin = x_bsz if rix2 is None else rix2 
-            env_top = self.get_all_top_envs(config,psi=psi,cache=cache_top,imin=imin)
-        #print(imin,imax)
+            stop = x_bsz-1 if imin is None else imin-1
+            env_top = self._get_all_benvs(config,-1,psi=psi,cache=cache_top,stop=stop,direction=direction)
         return env_bot,env_top
-    def _contract_cols(self,cols,js):
-        tags = [self.col_tag(j) for j in js]
+    def _contract_cols(self,cols,js,direction='col'):
+        col_tag = self.col_tag if direction=='col' else self.row_tag
+        tags = [col_tag(j) for j in js]
         cols ^= tags
         return cols
-    def get_all_lenvs(self,cols,jmax=None,inplace=False):
+    def get_all_envs(self,cols,step,stop=None,inplace=False,direction='col'):
         tmp = cols if inplace else cols.copy()
-        jmax = self.Ly-2 if jmax is None else jmax
-        first_col = self.col_tag(0)
-        lenvs = [None] * self.Ly
-        for j in range(jmax+1): 
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        if step==1:
+            start = 0
+            stop = Ly - 1 if stop is None else stop
+        else:
+            start = Ly - 1
+            stop = 0 if stop is None else stop
+        first_col = col_tag(start)
+        envs = [None] * Ly
+        for j in range(start,stop,step): 
             try:
-                tmp = self._contract_cols(tmp,(0,j))
-                lenvs[j] = tmp.select(first_col,virtual=False)
+                tmp = self._contract_cols(tmp,(start,j),direction=direction)
+                envs[j] = tmp.select(first_col,virtual=False)
             except (ValueError,IndexError):
-                return cols,lenvs
-        return cols,lenvs
-    def get_all_renvs(self,cols,jmin=None,inplace=False):
-        tmp = cols if inplace else cols.copy()
-        jmin = 1 if jmin is None else jmin
-        last_col = self.col_tag(self.Ly-1)
-        renvs = [None] * self.Ly
-        for j in range(self.Ly-1,jmin-1,-1): 
-            try:
-                tmp = self._contract_cols(tmp,(j,self.Ly-1))
-                renvs[j] = tmp.select(last_col,virtual=False)
-            except (ValueError,IndexError):
-                return cols,renvs
-        return cols,renvs
-    def _get_plq_forward(self,j,y_bsz,cols,renvs):
+                return cols,envs
+        return cols,envs
+    def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
         # lenv from col, renv from renv
-        first_col = self.col_tag(0)
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)]
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        first_col = col_tag(0)
+        tags = [col_tag(j+ix) for ix in range(y_bsz)]
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = cols.select(first_col,virtual=False)
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(renvs[j+y_bsz],virtual=False)
         plq.view_like_(cols)
         return plq
-    def _get_plq_backward(self,j,y_bsz,cols,lenvs):
+    def _get_plq_backward(self,j,y_bsz,cols,lenvs,direction='col'):
         # lenv from lenv, renv from cols
-        last_col = self.col_tag(self.Ly-1)
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)] 
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        last_col = col_tag(Ly-1)
+        tags = [col_tag(j+ix) for ix in range(y_bsz)] 
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = lenvs[j-1]
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(cols.select(last_col,virtual=False),virtual=False)
         plq.view_like_(cols)
         return plq
-    def _get_plq(self,j,y_bsz,cols,lenvs,renvs):
+    def _get_plq(self,j,y_bsz,cols,lenvs,renvs,direction='col'):
         # lenvs from lenvs, renvs from renvs
-        tags = [self.col_tag(j+ix) for ix in range(y_bsz)]
+        if direction=='col':
+            Ly = self.Ly 
+            col_tag = self.col_tag
+        else:
+            Ly = self.Lx
+            col_tag = self.row_tag
+        tags = [col_tag(j+ix) for ix in range(y_bsz)]
         plq = cols.select(tags,which='any',virtual=False)
         if j>0:
             other = plq
             plq = lenvs[j-1]
             plq.add_tensor_network(other,virtual=False)
-        if j<self.Ly - y_bsz:
+        if j<Ly - y_bsz:
             plq.add_tensor_network(renvs[j+y_bsz],virtual=False)
         plq.view_like_(cols)
         return plq
-    def update_plq_from_3row(self,plq,cols,i,x_bsz,y_bsz,psi=None):
+    def update_plq_from_3row(self,plq,cols,i,x_bsz,y_bsz,psi=None,direction='col'):
         psi = self.psi if psi is None else psi
-        cols,lenvs = self.get_all_lenvs(cols,jmax=self.Ly-y_bsz-1,inplace=False)
-        cols,renvs = self.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+        Ly = self.Ly if direction=='col' else self.Lx
+        cols,lenvs = self.get_all_envs(cols,1,stop=Ly-y_bsz,inplace=False,direction=direction)
+        cols,renvs = self.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False,direction=direction)
         for j in range(self.Ly - y_bsz +1): 
             try:
-                plq[(i,j),(x_bsz,y_bsz)] = self._get_plq(j,y_bsz,cols,lenvs,renvs) 
+                plq[(i,j),(x_bsz,y_bsz)] = self._get_plq(j,y_bsz,cols,lenvs,renvs,direction=direction) 
             except (AttributeError,TypeError): # lenv/renv is None
                 return plq
         return plq
-    def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None):
+    def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
+        Lx = self.Lx if direction=='row' else self.Ly
         try:
-            tn = self.get_mid_env(i,config,psi=psi)
+            tn = self.get_mid_env(i,config,psi=psi,direction=direction)
             for ix in range(1,x_bsz):
-                tn.add_tensor_network(self.get_mid_env(i+ix,config,psi=psi),virtual=False)
+                tn.add_tensor_network(self.get_mid_env(i+ix,config,psi=psi,direction=direction),virtual=False)
             if i>0:
                 other = tn 
-                tn = cache_bot[config[:i*self.Ly]].copy()
+                tn = cache_bot[self.cache_key(config,i-1,direction,1)].copy()
                 tn.add_tensor_network(other,virtual=False)
-            if i+x_bsz<self.Lx:
-                tn.add_tensor_network(cache_top[config[(i+x_bsz)*self.Ly:]],virtual=False)
+            if i+x_bsz<Lx:
+                tn.add_tensor_network(cache_top[self.cache_key(config,i+x_bsz,direction,-1)],virtual=False)
         except AttributeError:
             tn = None
         return tn 
-    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None):
-        #if self.compute_bot and self.compute_top:
-        #    raise ValueError
+    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None,direction='row'):
+        if direction=='row':
+            Lx = self.Lx
+            direction_ = 'col'
+        else:
+            Lx = self.Ly
+            direction_ = 'row'
         imin = 0 if imin is None else imin
-        imax = self.Lx-x_bsz if imax is None else imax
+        imax = Lx-x_bsz if imax is None else imax
         psi = self.psi if psi is None else psi
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
+        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
         plq = dict()
         for i in range(imin,imax+1):
-            tn = self.build_3row_tn(config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top)
+            cols = self.build_3row_tn(config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top,direction=direction)
             #exit()
-            if tn is not None:
-                plq = self.update_plq_from_3row(plq,tn,i,x_bsz,y_bsz,psi=psi)
+            if cols is not None:
+                plq = self.update_plq_from_3row(plq,cols,i,x_bsz,y_bsz,psi=psi,direction=direction_)
         return plq
-    def _unsigned_amplitude_from_benvs(self,bot,top):
-        try:
-            tn = bot.copy()
-            tn.add_tensor_network(top,virtual=False)
-            return safe_contract(tn)
-        except AttributeError:
-            return None
     def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True): 
-        # always contract into the middle
-        rix1,rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,rix1=rix1,rix2=rix2)
-        if env_bot is None and env_top is None:
-            return 0.
-        cx = self._unsigned_amplitude_from_benvs(env_bot,env_top)
-        if to_numpy:
-            cx = 0. if cx is None else tensor2backend(cx,'numpy')
-        return cx  
-################################################################################
-# for hamiltonian
-################################################################################
-    def _get_bot(self,imin,config,cache_bot=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        bot = None if imin==0 else cache_bot[config[:imin*self.Ly]]
-        return bot
-    def _get_top(self,imax,config,cache_top=None):
-        cache_top = self.cache_top if cache_top is None else cache_top
-        top = None if imax==self.Lx-1 else cache_top[config[(imax+1)*self.Ly:]]
-        return top
-    def _get_boundary_mps_deterministic(self,config,imin,imax,cache_bot=None,cache_top=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
-        imin = min(self.rix1+1,imin) 
-        imax = max(self.rix2-1,imax) 
-        self.get_all_bot_envs(config,cache=cache_bot,imax=imin-1)
-        self.get_all_top_envs(config,cache=cache_top,imin=imax+1)
-        bot = self._get_bot(imin,config,cache_bot=cache_bot)
-        top = self._get_top(imax,config,cache_top=cache_top)
-        return bot,top
-    def _unsigned_amplitude_deterministic(self,config,imin,imax,bot,top,cache_bot=None,cache_top=None):
-        cache_bot = self.cache_bot if cache_bot is None else cache_bot
-        cache_top = self.cache_top if cache_top is None else cache_top
-        imin = min(self.rix1+1,imin) 
-        imax = max(self.rix2-1,imax) 
-        bot_term = None if bot is None else bot.copy()
-        for i in range(imin,self.rix1+1):
-            row = self.get_mid_env(i,config)
-            bot_term = self.get_bot_env(i,row,bot_term,config,cache=cache_bot)
-        if bot_term is None:
-            return None
+        # always contract rows into the middle
+        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=self.rix1,imin=self.rix2)
 
-        top_term = None if top is None else top.copy()
-        for i in range(imax,self.rix2-1,-1):
-            row = self.get_mid_env(i,config)
-            top_term = self.get_top_env(i,row,top_term,config,cache=cache_top)
-        if top_term is None:
-            return None
-        return self._unsigned_amplitude_from_benvs(bot_term,top_term)
-    def pair_energy_deterministic(self,config,site1,site2,top,bot,model,cache_bot=None,cache_top=None):
+        if env_bot is None and env_top is None:
+            cx = 0. if to_numpy else None
+            return cx 
+
+        try:
+            tn = env_bot.copy()
+            tn.add_tensor_network(env_top,virtual=False)
+            cx = safe_contract(tn)
+        except AttributeError:
+            cx = 0. if to_numpy else None
+            return cx 
+
+        if to_numpy:
+            cx = tensor2backend(cx,'numpy')
+        return cx  
+##### hamiltonian methods #######
+    def pair_energy_deterministic(self,config,site1,site2,model,cache_bot=None,cache_top=None):
         ix1,ix2 = [model.flatten(site) for site in (site1,site2)]
         i1,i2 = config[ix1],config[ix2]
         if not model.pair_valid(i1,i2): # term vanishes 
             return None 
-        imin = min(self.rix1+1,site1[0],site2[0]) 
-        imax = max(self.rix2-1,site1[0],site2[0]) 
         ex = [] 
         coeff_comm = self.intermediate_sign(config,ix1,ix2) * model.pair_coeff(site1,site2)
         for i1_new,i2_new,coeff in model.pair_terms(i1,i2):
@@ -384,93 +411,52 @@ class AmplitudeFactory(AmplitudeFactory_):
             config_new = tuple(config_new)
             sign_new = self.config_sign(config_new)
 
-            cx_new = self._unsigned_amplitude_deterministic(config_new,imin,imax,bot,top,cache_bot=cache_bot,cache_top=cache_top)
+            cx_new = self.unsigned_amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
             if cx_new is None:
                 continue
             ex.append(coeff * sign_new * cx_new)
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-####################################################################################
 ###################################################################
 # ham
 ###################################################################
-from .tensor_vmc import Hamiltonian as Hamiltonian_
-class Hamiltonian(Hamiltonian_):
-    def batch_pair_energies_from_plq(self,batch_idx,config):
+class Hamiltonian2D(Hamiltonian):
+    def batch_pair_energies_from_plq(self,config,batch_key,new_cache=False,compute_v=True,to_vec=False):
         af = self.amplitude_factory 
-        bix,tix,plq_types,pairs = self.model.batched_pairs[batch_idx]
-        cache_bot,cache_top = dict(),dict()
-        af.get_all_bot_envs(config,cache=cache_bot,imax=bix)
-        af.get_all_top_envs(config,cache=cache_top,imin=tix)
+        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        cache_bot = dict() if new_cache else None
+        cache_top = dict() if new_cache else None
+        af._get_all_benvs(config,1,cache=cache_bot,stop=bix+1,direction=direction)
+        af._get_all_benvs(config,-1,cache=cache_top,stop=tix-1,direction=direction)
 
         # form plqs
         plq = dict()
         for imin,imax,x_bsz,y_bsz in plq_types:
-            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
+            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction))
 
         # compute energy numerator 
         ex,cx = self._pair_energies_from_plq(plq,pairs,config,af=af)
-        return ex,cx,plq
-    def pair_energies_from_plq(self,config): 
-        af = self.amplitude_factory  
-        x_bsz_min = min([x_bsz for x_bsz,_ in self.model.plq_sz])
-        af.get_all_benvs(config,x_bsz=x_bsz_min)
-
-        plq = dict()
-        for x_bsz,y_bsz in self.model.plq_sz:
-            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz))
-
-        ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config,af=af)
-        return ex,cx,plq
-    def pair_energy_deterministic(self,config,site1,site2):
-        af = self.amplitude_factory 
-        ix1,ix2 = [self.model.flatten(*site) for site in (site1,site2)]
-        i1,i2 = config[ix1],config[ix2]
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return None 
-
-        cache_top = dict()
-        cache_bot = dict()
-        imin = min(site1[0],site2[0])
-        imax = max(site1[0],site2[0])
-        bot,top = af._get_boundary_mps_deterministic(config,imin,imax,cache_bot=cache_bot,cache_top=cache_top)
-
-        ex = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model,cache_bot=cache_bot,cache_top=cache_top)
-        return {(site1,site2):ex} 
-    def batch_pair_energies_deterministic(self,config,batch_imin,batch_imax):
+        if compute_v:
+            vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
+        else:
+            vx = None if to_vec else dict()
+        return ex,cx,vx
+    def batch_pair_energies_deterministic(self,config,batch_key,new_cache=False):
         af = self.amplitude_factory
-        cache_top = dict()
-        cache_bot = dict()
-        bot,top = af._get_boundary_mps_deterministic(config,batch_imin,batch_imax,cache_bot=cache_bot,cache_top=cache_top)
+        cache_bot = dict() if new_cache else None
+        cache_top = dict() if new_cache else None
 
         ex = dict() 
-        for site1,site2 in self.model.batched_pairs[batch_imin,batch_imax]:
-            eij = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model,cache_bot=cache_bot,cache_top=cache_top)
-            if eij is not None:
-                ex[site1,site2] = eij
-        return ex
-    def pair_energies_deterministic(self,config):
-        af = self.amplitude_factory
-        #print('called')
-        #exit()
-        af.get_all_benvs(config)
-        ex = dict() 
-        for (site1,site2) in self.model.pairs:
-            imin = min(af.rix1+1,site1[0],site2[0]) 
-            imax = max(af.rix2-1,site1[0],site2[0]) 
-            bot = af._get_bot(imin,config)  
-            top = af._get_top(imax,config)  
-
-            eij = af.pair_energy_deterministic(config,site1,site2,top,bot,self.model)
+        for site1,site2 in self.model.batched_pairs[batch_key]:
+            eij = af.pair_energy_deterministic(config,site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
 ####################################################################
 # models
 ####################################################################
-from .tensor_vmc import Model as Model_
-class Model(Model_):
+class Model2D(Model):
     def __init__(self,Lx,Ly,nbatch=1):
         self.Lx,self.Ly = Lx,Ly
         self.nsite = Lx * Ly
@@ -509,11 +495,11 @@ class Model(Model_):
                     ls.append(where)
                 else:
                     if _PBC:
-                        ix1,ix2 = self.flatten(i,j),self.flatten((i+1)%self.Lx,(j+1)%self.Ly)
+                        ix1,ix2 = self.flatten((i,j)),self.flatten(((i+1)%self.Lx,(j+1)%self.Ly))
                         where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
                         ls.append(where)
                         
-                        ix1,ix2 = self.flatten(i,(j+1)%self.Ly),self.flatten((i+1)%self.Lx,j)
+                        ix1,ix2 = self.flatten((i,(j+1)%self.Ly)),self.flatten(((i+1)%self.Lx,j))
                         where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
                         ls.append(where)
         return ls
@@ -590,15 +576,15 @@ class Model(Model_):
                     if i+ix<self.Lx:
                         where = (i,j),(i+ix,j)
                         pairs.append(where)
-        self.pairs = []
+        #self.pairs = []
         for batch_idx in self.batched_pairs:
             rows,pairs = self.batched_pairs[batch_idx]
             imin,imax = min(rows),max(rows)
             bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix 
             plq_types = (imin,imax,1,d+1), (imin,imax-d,d+1,1),# i0_min,i0_max,x_bsz,y_bsz
-            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs 
+            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' 
             self.pairs += pairs
-        self.plq_sz = (1,d+1),(d+1,1)
+        #self.plq_sz = (1,d+1),(d+1,1)
         if RANK==0:
             print('nbatch=',len(self.batched_pairs))
     def batch_plq_diag(self):
@@ -629,10 +615,10 @@ class Model(Model_):
             imin,imax = min(rows),max(rows)
             plq_types = (imin,imax-1,2,2),
             bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
-            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs # bot_ix,top_ix,pairs 
-        self.plq_sz = (2,2),
+            self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' # bot_ix,top_ix,pairs 
+        #self.plq_sz = (2,2),
 from .tensor_vmc import get_gate2
-class Heisenberg(Model): 
+class Heisenberg(Model2D): 
     def __init__(self,J,h,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         try:
@@ -682,7 +668,7 @@ class Heisenberg(Model):
             return [(1-i1,1-i2,.25*(self.Jx+self.Jy))]
         else:
             return [(1-i1,1-i2,.25*(self.Jx-self.Jy))]
-class J1J2(Model): # prototypical next nn model
+class J1J2(Model2D): # prototypical next nn model
     def __init__(self,J1,J2,Lx,Ly,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.J1,self.J2 = J1,J2
@@ -748,48 +734,47 @@ class J1J2(Model): # prototypical next nn model
         return .25 * (e1 * self.J1 + e2 * self.J2) 
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
-class SpinDensity(Hamiltonian):
-    def __init__(self,Lx,Ly):
-        self.Lx,self.Ly = Lx,Ly 
-        self.data = np.zeros((Lx,Ly))
-        self.n = 0.
-    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
-        self.n += 1.
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                self.data[i,j] += (-1) ** config[self.flatten(i,j)]
-        return 0.,0.,None,None,0. 
-    def _print(self,fname,data):
-        print(fname)
-        print(data)
-class Mz(Hamiltonian):
-    def __init__(self,Lx,Ly):
-        self.Lx,self.Ly = Lx,Ly 
-        self.nsites = Lx * Ly
-        self.data = np.zeros(1)
-        self.n = 0.
-    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
-        self.n += 1.
-
-        data = 0.
-        for ix1 in range(self.nsites):
-            s1 = (-1) ** config[ix1]
-            site1 = self.flat2site(ix1)
-            for ix2 in range(ix1+1,self.nsites):
-                s2 = (-1) ** config[ix2]
-                site2 = self.flat2site(ix2)
-                  
-                dx,dy = site1[0]-site2[0],site1[1]-site2[1]
-                data += s1 * s2 * (-1)**(dx+dy)
-        self.data += data / self.nsites**2
-        return 0.,0.,None,None,0. 
-    def _print(self,fname,data):
-        print(f'fname={fname},data={data[0]}') 
+#class SpinDensity(Hamiltonian):
+#    def __init__(self,Lx,Ly):
+#        self.Lx,self.Ly = Lx,Ly 
+#        self.data = np.zeros((Lx,Ly))
+#        self.n = 0.
+#    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+#        self.n += 1.
+#        for i in range(self.Lx):
+#            for j in range(self.Ly):
+#                self.data[i,j] += (-1) ** config[self.flatten(i,j)]
+#        return 0.,0.,None,None,0. 
+#    def _print(self,fname,data):
+#        print(fname)
+#        print(data)
+#class Mz(Hamiltonian):
+#    def __init__(self,Lx,Ly):
+#        self.Lx,self.Ly = Lx,Ly 
+#        self.nsites = Lx * Ly
+#        self.data = np.zeros(1)
+#        self.n = 0.
+#    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+#        self.n += 1.
+#
+#        data = 0.
+#        for ix1 in range(self.nsites):
+#            s1 = (-1) ** config[ix1]
+#            site1 = self.flat2site(ix1)
+#            for ix2 in range(ix1+1,self.nsites):
+#                s2 = (-1) ** config[ix2]
+#                site2 = self.flat2site(ix2)
+#                  
+#                dx,dy = site1[0]-site2[0],site1[1]-site2[1]
+#                data += s1 * s2 * (-1)**(dx+dy)
+#        self.data += data / self.nsites**2
+#        return 0.,0.,None,None,0. 
+#    def _print(self,fname,data):
+#        print(f'fname={fname},data={data[0]}') 
 ####################################################################################
 # sampler 
 ####################################################################################
-from .tensor_vmc import ExchangeSampler as ExchangeSampler_
-class ExchangeSampler(ExchangeSampler_):
+class ExchangeSampler2D(ExchangeSampler):
     def __init__(self,Lx,Ly,seed=None,burn_in=0,scheme='hv'):
         self.Lx, self.Ly = Lx,Ly
         self.nsite = Lx * Ly
@@ -860,7 +845,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
         try:
-            cols,renvs = af.get_all_renvs(cols,jmin=y_bsz,inplace=False)
+            cols,renvs = af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz + 1): 
@@ -876,7 +861,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
         af = self.amplitude_factory
         try:
-            cols,lenvs = af.get_all_lenvs(cols,jmax=self.Ly-1-y_bsz,inplace=False)
+            cols,lenvs = af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
@@ -892,7 +877,7 @@ class ExchangeSampler(ExchangeSampler_):
     def sweep_row_forward(self,x_bsz,y_bsz):
         af = self.amplitude_factory
         af.cache_bot = dict()
-        af.get_all_top_envs(af.parse_config(self.config),imin=x_bsz)
+        af._get_all_benvs(af.parse_config(self.config),-1,stop=x_bsz-1)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
@@ -902,11 +887,11 @@ class ExchangeSampler(ExchangeSampler_):
             tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af.get_all_bot_envs(af.parse_config(self.config),imin=i,imax=i+x_bsz-1)
+            af._get_all_benvs(af.parse_config(self.config),1,start=i,stop=i+x_bsz)
     def sweep_row_backward(self,x_bsz,y_bsz):
         af = self.amplitude_factory
         af.cache_top = dict()
-        af.get_all_bot_envs(af.parse_config(self.config),imax=self.Lx-1-x_bsz)
+        af._get_all_benvs(af.parse_config(self.config),1,stop=self.Lx-x_bsz)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
@@ -916,7 +901,7 @@ class ExchangeSampler(ExchangeSampler_):
             tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af.get_all_top_envs(af.parse_config(self.config),imin=i,imax=i+x_bsz-1)
+            af._get_all_benvs(af.parse_config(self.config),-1,stop=i-1,start=i+x_bsz-1)
     def get_bsz(self):
         if self.scheme=='hv':
             bsz = [(1,2),(2,1)][::self.rng.choice([1,-1])]
@@ -938,11 +923,7 @@ class ExchangeSampler(ExchangeSampler_):
             config_sites,config_new = self._new_pair(site1,site2)
             if config_sites is None:
                 continue
-            imin = min(site1[0],site2[0]) 
-            imax = max(site1[0],site2[0]) 
-            config = af.parse_config(config_new)
-            bot,top = af._get_boundary_mps_deterministic(config,imin,imax)
-            cy = af._unsigned_amplitude_deterministic(config,imin,imax,bot,top)
+            cy = af.unsigned_amplitude(af.parse_config(config_new))
             if cy is None:
                 continue
             py = tensor2backend(cy ** 2,'numpy')
