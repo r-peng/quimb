@@ -240,7 +240,7 @@ def compute_energy(mps,terms,order,pbc=False):
     norm,_,bra = mps.make_norm(return_all=True)
     bsz = max([abs(i-j)+1 for i,j in terms.keys()])
     set_options(pbc=pbc)
-    af = AmplitudeFactory(mps) 
+    af = AmplitudeFactory1D(mps) 
     _,lenvs = af.get_all_envs(norm,1,stop=mps.L-bsz,inplace=False) 
     _,renvs = af.get_all_envs(norm,-1,stop=bsz-1,inplace=False)
     n = lenvs[bsz-1].copy()

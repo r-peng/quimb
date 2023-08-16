@@ -216,7 +216,7 @@ class ProductHamiltonian2D(ProductHamiltonian,Hamiltonian2D):
     #        ex[ix] = ex_ix
     #    return ex
 from ..tensor_2d import PEPS
-def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=True):
+def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
     if isinstance(coeffs,np.ndarray):
         assert len(coeffs)==4
         coeffs = {(i,j):coeffs for i,j in itertools.product(range(Lx),range(Ly))}
@@ -231,10 +231,9 @@ def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=True):
                 shape.pop()
             shape = tuple(shape) + (4,)
 
-            data = np.ones(shape)
+            data = eps * np.random.rand(*shape)
             for ix in range(4):
                 data[(0,)*(len(shape)-1)+(ix,)] = coeffs[i,j][ix] 
-            data += eps * np.random.rand(*shape)
             if normalize:
                 data /= np.linalg.norm(data)
             row.append(data)
