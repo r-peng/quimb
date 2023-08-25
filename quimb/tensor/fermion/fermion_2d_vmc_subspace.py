@@ -146,7 +146,7 @@ class ProductHamiltonian2D(ProductHamiltonian,Hamiltonian2D):
         if compute_v:
             vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
         else:
-            vx = None if to_vec else dict() 
+            vx = None if to_vec else [dict(),dict(),dict()]
         return ex,cx,vx
     #def pair_energies_from_plq(self,config,direction='row'): 
     #    af = self.amplitude_factory 
