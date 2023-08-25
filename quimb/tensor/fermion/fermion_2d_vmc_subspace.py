@@ -59,6 +59,7 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
             self.block_dict += [(start+shift,stop+shift) for start,stop in self.psi[ix].block_dict]
 
         self.Lx,self.Ly = self.psi[0].Lx,self.psi[0].Ly
+        self.sites = self.psi[0].sites
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
         self.backend = backend
@@ -120,8 +121,7 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
             cache_top_ = self.psi[ix].cache_top if cache_top is None else cache_top[ix]
             cache_bot_ = self.psi[ix].cache_bot if cache_bot is None else cache_bot[ix]
             cx[ix] = self.psi[ix].unsigned_amplitude(config[ix],cache_bot=cache_bot_,cache_top=cache_top_,to_numpy=to_numpy)
-        cx = np.prod(cx)
-        return cx
+        return cx[0] * cx[1] * cx[2]
 class ProductHamiltonian2D(ProductHamiltonian,Hamiltonian2D):
     def batch_pair_energies_from_plq(self,batch_key,config,new_cache=False,compute_v=True,to_vec=False): # only used for Hessian
         af = self.amplitude_factory 

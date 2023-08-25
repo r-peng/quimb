@@ -290,6 +290,7 @@ class FermionAmplitudeFactory:
         ket = tn[self.site_tag(site),'KET']
         tid = ket.get_fermion_info()[0]
         ket = tn._pop_tensor(tid,remove_from_fermion_space='end')
+        #ket = tn._pop_tensor(tid,remove_from_fermion_space=True)
         g = tn.contract(output_inds=ket.inds[::-1])
         return g.data.dagger 
     def tensor_compress_bond(self,T1,T2,absorb='right'):

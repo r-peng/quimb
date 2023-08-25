@@ -302,7 +302,7 @@ class CoulombOBC(Model2D):
             for ix2 in range(ix1+1,self.nsite):
                 i2,j2 = self.flat2site(ix2) 
                 dist = np.sqrt((i1-i2)**2+(j1-j2)**2+1e-15) * self.eps
-                eri[ix1,ix1,ix2,ix2] = 1./dist
+                eri[ix1,ix1,ix2,ix2] = eri[ix2,ix2,ix2,ix1] = 1./dist
         return eri
 class CoulombPBC(Model2D):
     def __init__(self,N,L,M,spinless=False): # N is FD parameter 

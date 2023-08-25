@@ -388,13 +388,13 @@ class AmplitudeFactory2D(AmplitudeFactory):
         try:
             tn = env_bot.copy()
             tn.add_tensor_network(env_top,virtual=False)
-            cx = safe_contract(tn)
         except AttributeError:
             cx = 0. if to_numpy else None
             return cx 
 
+        cx = safe_contract(tn)
         if to_numpy:
-            cx = tensor2backend(cx,'numpy')
+            cx = 0. if cx is None else tensor2backend(cx,'numpy')
         return cx  
 ##### hamiltonian methods #######
     def pair_energy_deterministic(self,config,site1,site2,model,cache_bot=None,cache_top=None):
