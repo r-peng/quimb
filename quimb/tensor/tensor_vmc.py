@@ -123,7 +123,10 @@ class TNVMC: # stochastic sampling
     ):
         # parse ham
         self.ham = ham
-        self.nsite = ham.model.nsite
+        try:
+            self.nsite = ham.nsite
+        except:
+            self.nsite = ham.model.nsite
 
         # parse sampler
         self.sampler = sampler
@@ -870,6 +873,7 @@ class TNVMC: # stochastic sampling
         print(f'\tpredict={dEm},actual={(dE,err)}')
         return (dE < 0.) 
     def measure(self,fname=None):
+        self.ham.amplitude_factory = self.sampler.amplitude_factory
         self.sample(compute_v=False,compute_Hv=False)
 
         sendbuf = np.array([self.ham.n])

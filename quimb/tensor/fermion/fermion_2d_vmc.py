@@ -359,18 +359,20 @@ class UEGO4(FDKineticO4):
         v = self.coulomb.coulomb(config)
         return ke + v
 class DensityMatrix:
-    def __init__(self,Lx,Ly,spinless=False):
+    def __init__(self,Lx,Ly):
         self.Lx,self.Ly = Lx,Ly 
         self.pairs = [] 
         self.data = np.zeros((Lx,Ly))
         self.n = 0.
-        self.spinless = spinless
-    def compute_local_energy(self,config,amplitude_factory,compute_v=False,compute_Hv=False):
+        self.nsite = Lx * Ly
+    def flat2site(self,i,j):
+        return i*self.Ly+j
+    def compute_local_energy(self,config,compute_v=False,compute_Hv=False):
         self.n += 1.
-        pn = config2pn(config,0,len(config)) 
+        pn = self.amplitude_factory.config2pn(config,0,len(config)) 
         for i in range(self.Lx):
             for j in range(self.Ly):
-                self.data[i,j] += pn[self.flatten(i,j)]
+                self.data[i,j] += pn[self.flat2site(i,j)]
         return 0.,0.,None,None,0. 
     def _print(self,fname,data):
         print(data)

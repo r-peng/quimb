@@ -408,7 +408,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             config_new = list(config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
-            config_new = tuple(config_new)
+            config_new = self.parse_config(tuple(config_new))
             sign_new = self.config_sign(config_new)
 
             cx_new = self.unsigned_amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)

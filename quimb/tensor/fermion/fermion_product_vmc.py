@@ -9,6 +9,10 @@ from ..tensor_vmc import (
     AmplitudeFactory,
     Hamiltonian,
 )
+from mpi4py import MPI
+COMM = MPI.COMM_WORLD
+SIZE = COMM.Get_size()
+RANK = COMM.Get_rank()
 def _contraction_error(cx,multiply=True):
     cx_,err = np.zeros(3),np.zeros(3)
     for ix in range(3): 
@@ -44,7 +48,22 @@ class JastrowAmplitudeFactory(AmplitudeFactory):
             tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
             cx[ix] = safe_contract(tn_new)
         return cx 
+    def config_sign(self,config_a,config_b):
+        #config_a = np.array(config_a) 
+        #config_b = np.array(config_b) 
+        ##print(config_a,config_b)
 
+        #cum_sum = np.cumsum(config_b[:-1])
+        ##print(cum_sum)
+        ##return (-1)**(np.dot(config_a[1:],cum_sum[::-1])%2)
+        #sign1 = (-1)**(np.dot(config_a[1:],cum_sum[::-1])%2)
+
+        #cum_sum = np.cumsum(config_a[1:])
+        #sign2 = (-1)**(np.dot(config_b[:-1],cum_sum[::-1])%2)
+        ##print(cum_sum)
+        ##print(sign1,sign2)
+        #assert sign
+        return 1
 def config_to_ab(config):
     #print('parse',config)
     config_a = [None] * len(config)
@@ -57,7 +76,7 @@ def config_to_ab(config):
     return tuple(config_a),tuple(config_b)
 def config_from_ab(config_a,config_b):
     map_ = {(0,0):0,(1,0):1,(0,1):2,(1,1):3}
-    return tuple([map_[config_a[ix],config_b[ix]] for ix in len(config_a)])
+    return tuple([map_[config_a[ix],config_b[ix]] for ix in range(len(config_a))])
 def parse_config(config):
     #if len(config)==2:
     #    config_a,config_b = config
@@ -90,7 +109,9 @@ class ProductAmplitudeFactory:
         plq_new = [None] * 3
         py = np.zeros(3)
         for ix in range(3):
-            plq_new[ix],py[ix] = self.psi[ix]._new_prob_from_plq(plq[ix],sites,cis[ix])
+            plq_new[ix],py_ix = self.psi[ix]._new_prob_from_plq(plq[ix],sites,cis[ix])
+            if py_ix is not None:
+                py[ix] = py_ix
         return plq_new,np.prod(py)
     def replace_sites(self,tn,sites,cis):
         return [af.replace_sites(tn_,sites,cis_) for af,tn_,cis_ in zip(self.psi,tn,cis)]
@@ -100,8 +121,9 @@ class ProductAmplitudeFactory:
         return parse_config(config)
     def config_sign(self,config):
         sign = np.ones(3)
-        for ix in range(3):
+        for ix in range(2):
             sign[ix] = self.psi[ix].config_sign(config[ix])
+        sign[2] = self.psi[2].config_sign(config[0],config[1])
         return sign 
     def get_grad_from_plq(self,plq,to_vec=True):
         vx = [self.psi[ix].get_grad_from_plq(plq[ix],to_vec=to_vec) for ix in range(3)]

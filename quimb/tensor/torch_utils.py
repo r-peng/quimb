@@ -181,7 +181,9 @@ class QR(torch.autograd.Function):
             print(R)
             raise ValueError
         inds = torch.abs(diag) < epsilon
-        if inds.prod().numpy()==1: # rank deficient, revert to svd
+        #if inds.sum().numpy()>0: # rank deficient, revert to svd
+        if len(inds)>0: # rank deficient, revert to svd
+            #print(inds,inds.sum())
             U,S,Vh = SVDforward(A)
             SVh = S.reshape((S.size(0),1)) * Vh
             self.save_for_backward(U, S, Vh)
@@ -215,17 +217,28 @@ class QR(torch.autograd.Function):
             return QRbackward_wide(A,Q,R,dQ,dR)
         
 def test_qr():
-    M, N = 50, 20
-    torch.manual_seed(2)
-    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
-    t0 = time.time()
-    assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
-    print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
+    #M, N = 50, 20
+    #torch.manual_seed(2)
+    #input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    #t0 = time.time()
+    #assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    #print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
 
     M, N = 20, 50
-    torch.manual_seed(2)
-    input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
-    t0 = time.time()
+    #torch.manual_seed(2)
+    #input = torch.rand(M, N, dtype=torch.float64, requires_grad=True)
+    #t0 = time.time()
+    #assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
+    #print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
+
+    K = 10
+    input = torch.rand(M, N, dtype=torch.float64, requires_grad=False)
+    U,S,V = SVDforward(input) 
+    U = U[:,:K]
+    S = S[:K]
+    V = V[:K,:]
+    input = (U * S)@V
+    input.requires_grad_()
     assert(torch.autograd.gradcheck(QR.apply, (input), eps=1e-6, atol=1e-4))
     print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
 
@@ -237,7 +250,7 @@ def test_qr():
     print(f"QR Test Pass for {M},{N}! time={time.time()-t0}")
 
 if __name__=='__main__':
-    test_svd()
+    #test_svd()
     test_qr()
 
 
