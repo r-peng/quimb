@@ -975,6 +975,58 @@ class TNVMC: # stochastic sampling
             Hvsum = self.Hv.sum(axis=0)
             COMM.send([e,vsum,evsum,Hvsum],dest=0)
         COMM.Barrier()
+    def hessLM(self,solve_dense=None):
+        solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=True,solve_dense=solve_dense)
+        self.extract_H(solve_full=True,solve_dense=solve_dense)
+        if solve_dense:
+            self._dense_hessLM()
+        else:
+            self._iterative_hessLM()
+    def _dense_hessLM(self):
+        if RANK>0:
+            return 
+        hess = self.H - self.E * self.S
+        w = np.linalg.eigvals(hess)
+        idx = np.argsort(w.real)
+        print(w.real[idx][-1],w.imag[idx][-1])
+    def _eig_iterative(self,A,symm):
+        self.terminate = np.array([0])
+        deltas = np.zeros(self.nparam,dtype=self.dtype)
+        sh = self.nparam 
+        w = None
+        if RANK==0:
+            t0 = time.time()
+            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
+            if symm:
+                w,_ = spla.eigsh(LinOp,k=1,tol=CG_TOL,maxiter=MAXITER)
+            else: 
+                w,_ = spla.eigs(LinOp,k=1,tol=CG_TOL,maxiter=MAXITER)
+            self.terminate[0] = 1
+            COMM.Bcast(self.terminate,root=0)
+        else:
+            nit = 0
+            while self.terminate[0]==0:
+                nit += 1
+                A(deltas)
+            if RANK==1:
+                print('niter=',nit)
+        return w 
+    def _iterative_hessLM(self):
+        E = self.E if RANK==0 else 0
+        def A(x):
+            if self.terminate[0]==1:
+                return 0
+            Hx = self.H(x)
+            if self.terminate[0]==1:
+                return 0
+            Sx = self.S(x)
+            if self.terminate[0]==1:
+                return 0
+            return Hx - E * Sx 
+        w = self._eig_iterative(A,False)
+        if RANK==0:
+            print(w.real,w.imag)
 ##############################################################################################
 # sampler
 #############################################################################################
