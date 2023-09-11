@@ -975,33 +975,29 @@ class TNVMC: # stochastic sampling
             Hvsum = self.Hv.sum(axis=0)
             COMM.send([e,vsum,evsum,Hvsum],dest=0)
         COMM.Barrier()
-    def hessLM(self,solve_dense=None):
+    def hessSVD(self,solve_dense=None):
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         self.extract_S(solve_full=True,solve_dense=solve_dense)
         self.extract_H(solve_full=True,solve_dense=solve_dense)
         if solve_dense:
-            self._dense_hessLM()
+            self._dense_hessSVD()
         else:
-            self._iterative_hessLM()
-    def _dense_hessLM(self):
+            self._iterative_hessSVD()
+    def _dense_hessSVD(self):
         if RANK>0:
             return 
         hess = self.H - self.E * self.S
-        w = np.linalg.eigvals(hess)
-        idx = np.argsort(w.real)
-        print(w.real[idx][-1],w.imag[idx][-1])
-    def _eig_iterative(self,A,symm):
+        _,w,_ = spla.svds(hess,k=1,tol=CG_TOL,maxiter=MAXITER)
+        print(np.amax(w))
+    def _eigh_iterative(self,A):
         self.terminate = np.array([0])
-        deltas = np.zeros(self.nparam,dtype=self.dtype)
-        sh = self.nparam 
+        sh = self.nparam
+        deltas = np.zeros(sh,dtype=self.dtype)
         w = None
         if RANK==0:
             t0 = time.time()
-            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
-            if symm:
-                w,_ = spla.eigsh(LinOp,k=1,tol=CG_TOL,maxiter=MAXITER)
-            else: 
-                w,_ = spla.eigs(LinOp,k=1,tol=CG_TOL,maxiter=MAXITER)
+            A = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
+            w,_ = spla.eigsh(A,k=1,tol=CG_TOL,maxiter=MAXITER)
             self.terminate[0] = 1
             COMM.Bcast(self.terminate,root=0)
         else:
@@ -1012,9 +1008,33 @@ class TNVMC: # stochastic sampling
             if RANK==1:
                 print('niter=',nit)
         return w 
-    def _iterative_hessLM(self):
+    def _iterative_hessSVD(self,bare=False):
         E = self.E if RANK==0 else 0
-        def A(x):
+        # rmatvec
+        self.xH1 = np.zeros(self.nparam,dtype=self.dtype)
+        if RANK==0:
+            def _rmatvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                xH1 = np.zeros_like(self.xH1)
+                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
+                return self.xH1 / self.n \
+                     - np.dot(x,self.vmean) * self.Hvmean \
+                     - np.dot(x,self.g) * self.vmean
+        else:
+            def _rmatvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
+                    return 0 
+                COMM.Bcast(x,root=0)
+                if self.exact_sampling:
+                    xH1 = np.dot(self.f * np.dot(self.v,x),self.Hv)
+                else:
+                    xH1 = np.dot(np.dot(self.v,x),self.Hv)
+                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
+                return x 
+
+        def matvec(x):
             if self.terminate[0]==1:
                 return 0
             Hx = self.H(x)
@@ -1024,9 +1044,21 @@ class TNVMC: # stochastic sampling
             if self.terminate[0]==1:
                 return 0
             return Hx - E * Sx 
-        w = self._eig_iterative(A,False)
+        def rmatvec(x):
+            if self.terminate[0]==1:
+                return 0
+            xH = _rmatvec(x)
+            if self.terminate[0]==1:
+                return 0
+            xS = self.S(x)
+            if self.terminate[0]==1:
+                return 0
+            return xH - E * xS 
+        def MM(x):
+            return matvec(rmatvec(x))
+        w = self._eigh_iterative(MM)
         if RANK==0:
-            print(w.real,w.imag)
+            print(w,np.sqrt(w))
 ##############################################################################################
 # sampler
 #############################################################################################
