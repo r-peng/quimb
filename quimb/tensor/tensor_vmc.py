@@ -975,21 +975,35 @@ class TNVMC: # stochastic sampling
             Hvsum = self.Hv.sum(axis=0)
             COMM.send([e,vsum,evsum,Hvsum],dest=0)
         COMM.Barrier()
-    def hessSVD(self,solve_dense=None):
+    def _hess(self,solve_dense=None,mode='eig',gen=True,lin=True):
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         self.extract_S(solve_full=True,solve_dense=solve_dense)
         self.extract_H(solve_full=True,solve_dense=solve_dense)
         if solve_dense:
-            self._dense_hessSVD()
+            self._dense_hess(mode=mode,gen=gen,lin=lin)
         else:
             self._iterative_hessSVD()
-    def _dense_hessSVD(self):
+    def _dense_hess(self,mode='eig',gen=True,lin=True):
         if RANK>0:
             return 
-        hess = self.H - self.E * self.S
-        _,w,_ = spla.svds(hess,k=1,tol=CG_TOL,maxiter=MAXITER)
-        print(np.amax(w))
-    def _eigh_iterative(self,A):
+        A = self.H - self.E * self.S
+        gen = True if lin else gen
+        if mode=='svd':
+            A = A + (self.S + self.cond1 * np.eye(self.nparam))/self.rate2
+            _,w,_ = spla.svds(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+        elif mode=='eig':
+            M = None if not gen else self.S #+ self.cond1 * np.eye(self.nparam)
+            if lin:
+                #A = np.block([[np.zeros((1,1)),self.g.reshape(1,self.nparam)],
+                A = np.block([[np.ones((1,1))*self.E,self.g.reshape(1,self.nparam)],
+                              [self.g.reshape(self.nparam,1),A]]) 
+                M = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
+                              [np.zeros((self.nparam,1)),M]]) 
+            w,_ = spla.eigs(A,k=1,M=M,tol=CG_TOL,maxiter=MAXITER)
+        else:
+            raise NotImplementedError
+        print(w)
+    def _eig_iterative(self,A,M=None,symm=False):
         self.terminate = np.array([0])
         sh = self.nparam
         deltas = np.zeros(sh,dtype=self.dtype)
@@ -997,7 +1011,10 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             t0 = time.time()
             A = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
-            w,_ = spla.eigsh(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+            if M is not None:
+                M = spla.LinearOperator((sh,sh),matvec=M,dtype=self.dtype)
+            eig = spla.eigsh if symm else spla.eigs 
+            w,_ = eig(A,k=1,tol=CG_TOL,maxiter=MAXITER)
             self.terminate[0] = 1
             COMM.Bcast(self.terminate,root=0)
         else:
@@ -1043,7 +1060,7 @@ class TNVMC: # stochastic sampling
             Sx = self.S(x)
             if self.terminate[0]==1:
                 return 0
-            return Hx - E * Sx 
+            return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
         def rmatvec(x):
             if self.terminate[0]==1:
                 return 0
@@ -1053,10 +1070,10 @@ class TNVMC: # stochastic sampling
             xS = self.S(x)
             if self.terminate[0]==1:
                 return 0
-            return xH - E * xS 
+            return xH + (1./self.rate2 - E) * xS + self.cond1 / self.rate2 * x
         def MM(x):
             return matvec(rmatvec(x))
-        w = self._eigh_iterative(MM)
+        w = self._eig_iterative(MM,symm=True)
         if RANK==0:
             print(w,np.sqrt(w))
 ##############################################################################################
