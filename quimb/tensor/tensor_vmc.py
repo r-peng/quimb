@@ -16,6 +16,26 @@ MAXITER = 100
 ##################################################################################################
 # VMC utils
 ##################################################################################################
+def __rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
+    sh = len(g)
+    hess = H - E * S 
+    eps = eps0
+
+    w,U = np.linalg.eigh(S)
+    #print(w)
+    w = w[w>eps]
+    U = U[:,-len(w):]
+    print(len(w),np.linalg.norm(np.eye(len(w))-np.dot(U.T,U)))
+
+    hess = np.dot(U.T,np.dot(hess,U))
+    g = np.dot(U.T,g)
+    R = np.diag(w)
+    deltas = np.linalg.solve(hess + R/eps,g)
+    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
+
+    deltas = np.dot(U,deltas) 
+    wmin = w[0]
+    return deltas,dE,wmin,eps
 def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     sh = len(g)
     # hessian 
@@ -980,29 +1000,31 @@ class TNVMC: # stochastic sampling
         self.extract_S(solve_full=True,solve_dense=solve_dense)
         self.extract_H(solve_full=True,solve_dense=solve_dense)
         if solve_dense:
-            self._dense_hess(mode=mode,gen=gen,lin=lin)
+            return self._dense_hess(mode=mode,gen=gen,lin=lin)
         else:
-            self._iterative_hessSVD()
+            return self._iterative_hessSVD()
     def _dense_hess(self,mode='eig',gen=True,lin=True):
         if RANK>0:
             return 
         A = self.H - self.E * self.S
+        #A = self.S
         gen = True if lin else gen
         if mode=='svd':
-            A = A + (self.S + self.cond1 * np.eye(self.nparam))/self.rate2
-            _,w,_ = spla.svds(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+            #A = A + (self.S + self.cond1 * np.eye(self.nparam))/self.rate2
+            #_,w,_ = spla.svds(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+            _,w,_ = np.linalg.svd(A,hermitian=True)
         elif mode=='eig':
-            M = None if not gen else self.S #+ self.cond1 * np.eye(self.nparam)
+            M = None if not gen else self.S + self.cond1 * np.eye(self.nparam)
             if lin:
-                #A = np.block([[np.zeros((1,1)),self.g.reshape(1,self.nparam)],
-                A = np.block([[np.ones((1,1))*self.E,self.g.reshape(1,self.nparam)],
+                A = np.block([[np.zeros((1,1)),self.g.reshape(1,self.nparam)],
                               [self.g.reshape(self.nparam,1),A]]) 
                 M = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
                               [np.zeros((self.nparam,1)),M]]) 
-            w,_ = spla.eigs(A,k=1,M=M,tol=CG_TOL,maxiter=MAXITER)
+            #w,_ = spla.eigsh(A,k=1,M=M,tol=CG_TOL,maxiter=MAXITER)
+            w,_ = scipy.linalg.eigh(A,b=M)
         else:
             raise NotImplementedError
-        print(w)
+        return w
     def _eig_iterative(self,A,M=None,symm=False):
         self.terminate = np.array([0])
         sh = self.nparam
