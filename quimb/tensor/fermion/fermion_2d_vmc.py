@@ -105,7 +105,7 @@ class Hubbard(FermionModel2D):
     def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
         super().__init__(Lx,Ly,nbatch=nbatch)
         self.t,self.u = t,u
-        self.gate = H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
+        self.gate = {None:H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)}
         self.order = 'b1,b2,k1,k2'
         self.spinless = spinless
 
@@ -369,7 +369,7 @@ class DensityMatrix:
         return i*self.Ly+j
     def compute_local_energy(self,config,compute_v=False,compute_Hv=False):
         self.n += 1.
-        pn = self.amplitude_factory.config2pn(config,0,len(config)) 
+        pn = self.af.config2pn(config,0,len(config)) 
         for i in range(self.Lx):
             for j in range(self.Ly):
                 self.data[i,j] += pn[self.flat2site(i,j)]

@@ -12,7 +12,6 @@ from .tensor_vmc import (
     tensor2backend,
     safe_contract,
     contraction_error,
-    Hamiltonian,
     Model,
     get_gate2,
     _add_gate,
@@ -98,22 +97,21 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
-class Hamiltonian1D(Hamiltonian):
-    def batch_pair_energies_from_plq(self,config,batch_key,new_cache=None,compute_v=True,to_vec=False):
-        af = self.amplitude_factory  
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=None,compute_v=True,to_vec=False):
         # form plqs
         plq = dict()
         for bsz in self.model.plq_sz:
-            plq.update(af.get_plq(config,bsz))
+            plq.update(self.get_plq(self.config,bsz))
 
         # compute energy numerator 
-        ex,cx = self._pair_energies_from_plq(plq,self.model.pairs,config,af=af)
+        ex,cx = self._pair_energies_from_plq(plq,pairs,config)
         if compute_v:
-            vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
+            vx = self.get_grad_from_plq(plq,to_vec=to_vec) 
         else:
             vx = None if to_vec else dict()
         return ex,cx,vx
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
+        self.config = config
         if compute_Hv:
             return self.compute_local_energy_hessian_from_plq(config)
         else:

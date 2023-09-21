@@ -13,7 +13,6 @@ from .tensor_vmc import (
     safe_contract,
     contraction_error,
     AmplitudeFactory,
-    Hamiltonian,
     Model,
     ExchangeSampler,
 )
@@ -57,6 +56,9 @@ class AmplitudeFactory2D(AmplitudeFactory):
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
 ##### wfn methods #####
+    def flatten(self,site):
+        i,j = site
+        return flatten(i,j,self.Ly) 
     def site_tag(self,site):
         return self.psi.site_tag(*site)
     def site_tags(self,site):
@@ -398,7 +400,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         return cx  
 ##### hamiltonian methods #######
     def pair_energy_deterministic(self,config,site1,site2,model,cache_bot=None,cache_top=None):
-        ix1,ix2 = [model.flatten(site) for site in (site1,site2)]
+        ix1,ix2 = [self.flatten(site) for site in (site1,site2)]
         i1,i2 = config[ix1],config[ix2]
         if not model.pair_valid(i1,i2): # term vanishes 
             return None 
@@ -418,38 +420,32 @@ class AmplitudeFactory2D(AmplitudeFactory):
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-###################################################################
-# ham
-###################################################################
-class Hamiltonian2D(Hamiltonian):
-    def batch_pair_energies_from_plq(self,config,batch_key,new_cache=False,compute_v=True,to_vec=False):
-        af = self.amplitude_factory 
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=False,compute_v=True,to_vec=False):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
-        af._get_all_benvs(config,1,cache=cache_bot,stop=bix+1,direction=direction)
-        af._get_all_benvs(config,-1,cache=cache_top,stop=tix-1,direction=direction)
+        self._get_all_benvs(self.config,1,cache=cache_bot,stop=bix+1,direction=direction)
+        self._get_all_benvs(self.config,-1,cache=cache_top,stop=tix-1,direction=direction)
 
         # form plqs
         plq = dict()
         for imin,imax,x_bsz,y_bsz in plq_types:
-            plq.update(af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction))
+            plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction))
 
         # compute energy numerator 
-        ex,cx = self._pair_energies_from_plq(plq,pairs,config,af=af)
+        ex,cx = self.pair_energies_from_plq(plq,pairs)
         if compute_v:
-            vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
+            vx = self.get_grad_from_plq(plq,to_vec=to_vec) 
         else:
             vx = None if to_vec else dict()
         return ex,cx,vx
-    def batch_pair_energies_deterministic(self,config,batch_key,new_cache=False):
-        af = self.amplitude_factory
+    def batch_pair_energies_deterministic(self,batch_key,new_cache=False):
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
 
         ex = dict() 
         for site1,site2 in self.model.batched_pairs[batch_key]:
-            eij = af.pair_energy_deterministic(config,site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
+            eij = self.pair_energy_deterministic(site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
@@ -783,7 +779,7 @@ class ExchangeSampler2D(ExchangeSampler):
         self.exact = False
         self.dense = False
         self.burn_in = burn_in 
-        self.amplitude_factory = None
+        self.af = None
         self.scheme = scheme
     def flatten(self,site):
         i,j = site
@@ -805,8 +801,8 @@ class ExchangeSampler2D(ExchangeSampler):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return plq,cols
-        config_sites = self.amplitude_factory.parse_config(config_sites)
-        plq_new,py = self.amplitude_factory._new_prob_from_plq(plq,(site1,site2),config_sites)
+        config_sites = self.af.parse_config(config_sites)
+        plq_new,py = self.af._new_prob_from_plq(plq,(site1,site2),config_sites)
         if py is None:
             return plq,cols
         try:
@@ -818,7 +814,7 @@ class ExchangeSampler2D(ExchangeSampler):
         # accept, update px & config & env_m
         self.px = py
         self.config = config_new
-        cols = self.amplitude_factory.replace_sites(cols,(site1,site2),config_sites)
+        cols = self.af.replace_sites(cols,(site1,site2),config_sites)
         return plq_new,cols 
     def get_pairs(self,i,j,x_bsz,y_bsz):
         if (x_bsz,y_bsz)==(1,2):
@@ -843,65 +839,61 @@ class ExchangeSampler2D(ExchangeSampler):
             plq,cols = self._update_pair(site1,site2,plq,cols) 
         return cols
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
-        af = self.amplitude_factory
         try:
-            cols,renvs = af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
+            cols,renvs = self.af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz + 1): 
             try:
-                plq = af._get_plq_forward(j,y_bsz,cols,renvs)
+                plq = self.af._get_plq_forward(j,y_bsz,cols,renvs)
             except AttributeError:
                 return
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             try:
-                cols = af._contract_cols(cols,(0,j))
+                cols = self.af._contract_cols(cols,(0,j))
             except (ValueError,IndexError):
                 return
     def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
-        af = self.amplitude_factory
         try:
-            cols,lenvs = af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
+            cols,lenvs = self.af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
         except AttributeError:
             return
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
             try:
-                plq = af._get_plq_backward(j,y_bsz,cols,lenvs)
+                plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
             except AttributeError:
                 return
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             try:
-                cols = af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
+                cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
             except (ValueError,IndexError):
                 return
     def sweep_row_forward(self,x_bsz,y_bsz):
-        af = self.amplitude_factory
-        af.cache_bot = dict()
-        af._get_all_benvs(af.parse_config(self.config),-1,stop=x_bsz-1)
+        self.af.cache_bot = dict()
+        self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=x_bsz-1)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz
         for i in range(imax+1):
-            tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
+            tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af._get_all_benvs(af.parse_config(self.config),1,start=i,stop=i+x_bsz)
+            self.af._get_all_benvs(self.af.parse_config(self.config),1,start=i,stop=i+x_bsz)
     def sweep_row_backward(self,x_bsz,y_bsz):
-        af = self.amplitude_factory
-        af.cache_top = dict()
-        af._get_all_benvs(af.parse_config(self.config),1,stop=self.Lx-x_bsz)
+        self.af.cache_top = dict()
+        self.af._get_all_benvs(self.af.parse_config(self.config),1,stop=self.Lx-x_bsz)
 
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz
         for i in range(imax,-1,-1):
-            tn = af.build_3row_tn(af.parse_config(self.config),i,x_bsz)
+            tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
             sweep_col(i,tn,x_bsz,y_bsz)
 
-            af._get_all_benvs(af.parse_config(self.config),-1,stop=i-1,start=i+x_bsz-1)
+            self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=i-1,start=i+x_bsz-1)
     def get_bsz(self):
         if self.scheme=='hv':
             bsz = [(1,2),(2,1)][::self.rng.choice([1,-1])]
@@ -917,13 +909,12 @@ class ExchangeSampler2D(ExchangeSampler):
                         1:self.sweep_row_backward}[self.rng.choice([0,1])] 
             sweep_fn(x_bsz,y_bsz) 
     def update_plq_deterministic(self,i,j,x_bsz,y_bsz):
-        af = self.amplitude_factory
         pairs = self.get_pairs(i,j,x_bsz,y_bsz)
         for (site1,site2) in pairs:
             config_sites,config_new = self._new_pair(site1,site2)
             if config_sites is None:
                 continue
-            cy = af.unsigned_amplitude(af.parse_config(config_new))
+            cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
             if cy is None:
                 continue
             py = tensor2backend(cy ** 2,'numpy')
@@ -945,8 +936,7 @@ class ExchangeSampler2D(ExchangeSampler):
             sweep_col = range(0,jmax+1) if cdir==1 else range(jmax,-1,-1)
             for i,j in itertools.product(sweep_row,sweep_col):
                 self.update_plq_deterministic(i,j,x_bsz,y_bsz)
-        af = self.amplitude_factory
-        af.update_cache(af.parse_config(self.config))
+        self.af.update_cache(af.parse_config(self.config))
 
 def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):
     arrays = []

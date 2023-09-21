@@ -22,10 +22,9 @@ from .fermion_2d_vmc import FermionAmplitudeFactory2D
 from .fermion_product_vmc import (
     TNJastrow,
     ProductAmplitudeFactory,
-    ProductHamiltonian,
 )
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
-    def __init__(self,af,blks=None,backend='numpy',**compress_opts):
+    def __init__(self,af):
         self.af = af 
         self.get_sections()
 
@@ -103,32 +102,6 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
         #print(self.config_sign(config))
         #exit()
         return np.prod(cx)
-class ProductHamiltonian2D(ProductHamiltonian,Hamiltonian2D):
-    def batch_pair_energies_from_plq(self,batch_key,config,new_cache=False,compute_v=True,to_vec=False): # only used for Hessian
-        af = self.amplitude_factory 
-        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
-        cache_bot = [dict() for _ in range(self.naf)] if new_cache else None
-        cache_top = [dict() for _ in range(self.naf)] if new_cache else None
-        af._get_all_benvs(config,1,cache=cache_bot,stop=bix+1,direction=direction)
-        af._get_all_benvs(config,-1,cache=cache_top,stop=tix-1,direction=direction)
-
-        # form plqs
-        plq = [dict(),dict(),dict()]  
-        for imin,imax,x_bsz,y_bsz in plq_types:
-            plq_new = af.get_plq_from_benvs(config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction)
-            for ix in range(3):
-                plq[ix].update(plq_new[ix])
-
-        # compute energy numerator 
-        ex = [None] * 3
-        cx = [None] * 3
-        for ix in range(3):
-            ex[ix],cx[ix] = self._pair_energies_from_plq(plq[ix],pairs,config[ix],af=af.psi[ix])
-        if compute_v:
-            vx = af.get_grad_from_plq(plq,to_vec=to_vec) 
-        else:
-            vx = None if to_vec else [dict(),dict(),dict()]
-        return ex,cx,vx
     #def pair_energies_from_plq(self,config,direction='row'): 
     #    af = self.amplitude_factory 
     #    x_bsz_min = min([x_bsz for x_bsz,_ in self.model.plq_sz])
@@ -164,20 +137,20 @@ class ProductHamiltonian2D(ProductHamiltonian,Hamiltonian2D):
     #        ex_ix = af.psi[ix].pair_energy_deterministic(config[ix],site1,site2,top[ix],bot[ix],self.model,cache_bot=cache_bot[ix],cache_top=cache_top[ix])
     #        ex[ix] = {(site1,site2):ex_ix}
     #    return ex
-    def batch_pair_energies_deterministic(self,config,batch_key,new_cache=False):
-        af = self.amplitude_factory
-        cache_bot = [dict(),dict(),dict()] if new_cache else None
-        cache_top = [dict(),dict(),dict()] if new_cache else None
+    #def batch_pair_energies_deterministic(self,config,batch_key,new_cache=False):
+    #    af = self.amplitude_factory
+    #    cache_bot = [dict(),dict(),dict()] if new_cache else None
+    #    cache_top = [dict(),dict(),dict()] if new_cache else None
 
-        ex = [None] * 3
-        for ix in range(3):
-            ex_ix = dict() 
-            for site1,site2 in self.model.batched_pairs[batch_key]:
-                eij = af.psi[ix].pair_energy_deterministic(config[ix],site1,site2,self.model,cache_bot=cache_bot[ix],cache_top=cache_top[ix])
-                if eij is not None:
-                    ex_ix[site1,site2] = eij
-            ex[ix] = ex_ix
-        return ex
+    #    ex = [None] * 3
+    #    for ix in range(3):
+    #        ex_ix = dict() 
+    #        for site1,site2 in self.model.batched_pairs[batch_key]:
+    #            eij = af.psi[ix].pair_energy_deterministic(config[ix],site1,site2,self.model,cache_bot=cache_bot[ix],cache_top=cache_top[ix])
+    #            if eij is not None:
+    #                ex_ix[site1,site2] = eij
+    #        ex[ix] = ex_ix
+    #    return ex
     #def pair_energies_deterministic(self,config):
     #    af = self.amplitude_factory
     #    af.get_all_benvs(config)
@@ -220,7 +193,7 @@ def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
-class JastrowAmplitudeFactory2D(JastrowAmplitudeFactory,AmplitudeFactory2D):
+class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
     def pair_energy_deterministic(self,config,site1,site2,model,cache_top=None,cache_bot=None):
         ix1,ix2 = model.flatten(site1),model.flatten(site2)
         i1,i2 = config[ix1],config[ix2]
