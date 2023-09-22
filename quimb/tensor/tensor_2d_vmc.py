@@ -55,6 +55,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
+        self.spin = None
 ##### wfn methods #####
     def flatten(self,site):
         i,j = site
@@ -399,15 +400,15 @@ class AmplitudeFactory2D(AmplitudeFactory):
             cx = 0. if cx is None else tensor2backend(cx,'numpy')
         return cx  
 ##### hamiltonian methods #######
-    def pair_energy_deterministic(self,config,site1,site2,model,cache_bot=None,cache_top=None):
+    def pair_energy_deterministic(self,site1,site2,cache_bot=None,cache_top=None):
         ix1,ix2 = [self.flatten(site) for site in (site1,site2)]
-        i1,i2 = config[ix1],config[ix2]
-        if not model.pair_valid(i1,i2): # term vanishes 
+        i1,i2 = self.config[ix1],self.config[ix2]
+        if not self.model.pair_valid(i1,i2): # term vanishes 
             return None 
         ex = [] 
-        coeff_comm = self.intermediate_sign(config,ix1,ix2) * model.pair_coeff(site1,site2)
-        for i1_new,i2_new,coeff in model.pair_terms(i1,i2):
-            config_new = list(config)
+        coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(site1,site2)
+        for i1_new,i2_new,coeff in self.model.pair_terms(i1,i2):
+            config_new = list(self.config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
             config_new = self.parse_config(tuple(config_new))
@@ -420,7 +421,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         if len(ex)==0:
             return None
         return sum(ex) * coeff_comm
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=False,compute_v=True,to_vec=False):
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=False):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
@@ -434,18 +435,14 @@ class AmplitudeFactory2D(AmplitudeFactory):
 
         # compute energy numerator 
         ex,cx = self.pair_energies_from_plq(plq,pairs)
-        if compute_v:
-            vx = self.get_grad_from_plq(plq,to_vec=to_vec) 
-        else:
-            vx = None if to_vec else dict()
-        return ex,cx,vx
+        return ex,cx,plq
     def batch_pair_energies_deterministic(self,batch_key,new_cache=False):
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
 
         ex = dict() 
         for site1,site2 in self.model.batched_pairs[batch_key]:
-            eij = self.pair_energy_deterministic(site1,site2,self.model,cache_bot=cache_bot,cache_top=cache_top)
+            eij = self.pair_energy_deterministic(site1,site2,cache_bot=cache_bot,cache_top=cache_top)
             if eij is not None:
                 ex[site1,site2] = eij
         return ex
@@ -801,7 +798,7 @@ class ExchangeSampler2D(ExchangeSampler):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return plq,cols
-        config_sites = self.af.parse_config(config_sites)
+        self.af.config_new = config_new
         plq_new,py = self.af._new_prob_from_plq(plq,(site1,site2),config_sites)
         if py is None:
             return plq,cols

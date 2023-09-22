@@ -1469,13 +1469,16 @@ class AmplitudeFactory:
         if cy is None:
             return plq_new,None
         return plq_new,tensor2backend(cy**2,'numpy') 
-    def compute_derivative(self,ex):
+    def extract_grad(self):
+        vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
+        return self.dict2vec(vx)
+    def propagate(self,ex):
         if len(ex)==0:
             return 0.,np.zeros(self.nparam)
         ex_num = sum(ex.values())
         ex_num.backward()
-        Hvx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
-        return tensor2backend(ex_num,'numpy'),self.dict2vec(Hvx)  
+        Hvx = self.extract_grad()
+        return tensor2backend(ex_num,'numpy'),Hvx 
     def get_grad_deterministic(self,config,unsigned=False):
         self.wfn2backend(backend='torch',requires_grad=True)
         cache_top = dict()
@@ -1484,38 +1487,37 @@ class AmplitudeFactory:
         if cx is None:
             vx = np.zeros(self.nparam)
         else:
-            cx,vx = self.compute_derivative({0:cx})
+            cx,vx = self.propagate({0:cx})
             vx /= cx
             sign = 1. if unsigned else self.config_sign(config)
             cx *= sign
         self.wfn2backend()
         return cx,vx
-    def get_grad_from_plq(self,plq,to_vec=True):
-        vx = dict()
+    def get_grad_from_plq(self,plq):
         for plq_key,tn in plq.items():
-            cij = tensor2backend(safe_contract(tn.copy()),'numpy')
-            if cij is None:
-                continue
+            cij = self.cx[plq_key]
             sites = self.plq_sites(plq_key)
             for site in sites:
-                if site in vx:
+                if site in self.vx:
                     continue
-                vx[site] = self.site_grad(tn.copy(),site)/cij
-        if to_vec:
-            vx = self.dict2vec(vx)
-        return vx
+                self.vx[site] = self.tensor2backend(self.site_grad(tn.copy(),site)/cij,'numpy')
+        return self.vx
 ##### ham methods #####
-    def _add_gate(self,tn,where,gate,contract=True):
-        return _add_gate(tn,gate,self.model.order,where,self.site_ind,self.site_tag,contract=contract)
+    def _add_gate(self,tn,where,contract=True):
+        return _add_gate(tn,self.model.gate,self.model.order,where,
+                         self.site_ind,self.site_tag,contract=contract)
     def update_pair_energy_from_plq(self,tn,where,ex):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return ex 
-        for tag,gate in self.model.gate.items():
-            ex_ij = self._add_gate(tn.copy(),where,gate,contract=True)
-            if ex_ij is not None:
-                ex[where,tag] = self.model.pair_coeff(*where) * ex_ij
+        if self.model.pair_valid(i1,i2):
+            ex_ij = self._add_gate(tn,where,contract=True)
+            if ex_ij is None:
+                ex_ij = 0
+            else:
+                ex_ij *= self.model.pair_coeff(*where)
+        else:
+            ex_ij = 0
+        ex[where,self.spin] = ex_ij
         return ex 
     def pair_energies_from_plq(self,plq,pairs):
         ex = dict()
@@ -1524,105 +1526,98 @@ class AmplitudeFactory:
             key = self.model.pair_key(*where)
 
             tn = plq.get(key,None) 
-            if tn is not None:
-                cij = tensor2backend(safe_contract(tn.copy()),'numpy')
-                if cij is None:
-                    continue
-                cx[where] = cij
-
-                ex = self.update_pair_energy_from_plq(tn,where,ex) 
+            if tn is None:
+                continue
+            ex = self.update_pair_energy_from_plq(tn.copy(),where,ex) 
+            cij = safe_contract(tn.copy())
+            cx[where] = cij,key
         return ex,cx
-    def batch_hessian_from_plq(self,batch_key): # only used for Hessian
-        self.wfn2backend(backend='torch',requires_grad=True)
-        self.model.gate2backend('torch')
-        ex,cx,vx = self.batch_pair_energies_from_plq(batch_key,new_cache=True)
+    def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): 
+        if compute_Hv:
+            self.wfn2backend(backend='torch',requires_grad=True)
+            self.model.gate2backend('torch')
+        ex_num,cx,plq = self.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
 
-        _,Hvx = self.compute_derivative(ex)
-        ex = tensor2backend(sum([eij/cx[where] for (where,_),eij in ex.items()]),'numpy')
+        if compute_Hv:
+            _,Hvx = self.propagate(ex_num)
+        else:
+            Hvx = 0.
 
-        self.wfn2backend()
-        self.model.gate2backend(self.backend)
-        return ex,Hvx,cx,vx
-    def compute_local_energy_hessian_from_plq(self): 
+        ex = 0.
+        for (where,_),eij in ex_num.items():
+            cij,plq_key = cx[where]
+            cij = tensor2backend(cij,'numpy')
+            ex += eij/cij
+            self.cx[plq_key] = cij
+        ex = tensor2backend(ex,'numpy')
+        if compute_v:
+            self.get_grad_from_plq(plq) 
+        if compute_Hv:
+            self.wfn2backend()
+            self.model.gate2backend(self.backend)
+        return ex,Hvx
+    def compute_local_quantities_from_plq(self,compute_v,compute_Hv):
         ex,Hvx = 0.,0.
-        cx,vx = dict(),dict()
+        self.cx,self.vx = dict(),dict()
         for batch_key in self.model.batched_pairs:
-            ex_,Hvx_,cx_,vx_ = self.batch_hessian_from_plq(batch_key)  
+            ex_,Hvx_ = self.batch_quantities_from_plq(batch_key,compute_v,compute_Hv)  
             ex += ex_
             Hvx += Hvx_
-            cx.update(cx_)
-            vx.update(vx_)
-        vx = self.dict2vec(vx)
-        cx,err = contraction_error(cx) 
+        if compute_v:
+            vx = self.dict2vec(self.vx)
+        else:
+            vx = None
+        cx,err = contraction_error(self.cx) 
 
         eu = self.model.compute_local_energy_eigen(self.config)
         ex += eu
-        Hvx = Hvx / cx + eu * vx
+        if compute_Hv:
+            Hvx = Hvx / cx + eu * vx
+        else:
+            Hvx = None
+        self.vx = None
+        self.cx = None
         return cx,ex,vx,Hvx,err 
-    def compute_local_energy_gradient_from_plq(self,compute_v=True):
-        ex,cx,vx = dict(),dict(),dict()
-        for batch_key in self.model.batched_pairs:
-            ex_,cx_,vx_ = self.batch_pair_energies_from_plq(batch_key,compute_v=compute_v)  
-            ex.update(ex_)
-            cx.update(cx_)
-            vx.update(vx_)
-        eu = self.model.compute_local_energy_eigen(self.config)
-        ex = sum([eij/cx[where] for (where,_),eij in ex.items()]) + eu
-        cx,err = contraction_error(cx)
-        if not compute_v:
-            return cx,ex,None,None,err 
-        vx = self.dict2vec(vx)  
-        return cx,ex,vx,None,err
-    def batch_hessian_deterministic(self,batch_key):
-        self.wfn2backend(backend='torch',requires_grad=True)
-        ex = self.batch_pair_energies_deterministic(batch_key,new_cache=True)
-        ex,Hvx = self.compute_derivative(ex)
-        self.wfn2backend()
+    def batch_quantities_deterministic(self,batch_key,compute_Hv):
+        if compute_Hv:
+            self.wfn2backend(backend='torch',requires_grad=True)
+        ex = self.batch_pair_energies_deterministic(batch_key,new_cache=compute_Hv)
+        if compute_Hv:
+            ex,Hvx = self.propagate(ex)
+            self.wfn2backend()
+        else:
+            ex = 0. if len(ex)==0 else sum(ex.values()) 
+            Hvx = 0.
         return ex,Hvx
-    def compute_local_energy_hessian_deterministic(self):
-        cx,vx = self.get_grad_deterministic(self.config)
-
-        ex = 0. 
-        Hvx = 0.
-        for key in self.model.batched_pairs:
-            ex_,Hvx_ = self.batch_hessian_deterministic(key) 
-            ex += ex_
-            Hvx += Hvx_
-        eu = self.model.compute_local_energy_eigen(self.config)
-        ex = ex / cx + eu 
-        Hvx = Hvx / cx + eu * vx
-        return cx,ex,vx,Hvx,0. 
-    def compute_local_energy_gradient_deterministic(self,compute_v=True):
-        ex = dict() 
-        for key in self.model.batched_pairs:
-            ex_ = self.batch_pair_energies_deterministic(key)
-            ex.update(ex_)
-
+    def compute_local_quantities_deterministic(self,compute_v,compute_Hv):
         if compute_v:
             cx,vx = self.get_grad_deterministic(self.config)
         else:
             cx = self.unsigned_amplitude(self.config) * self.config_sign(self.config)
             vx = None
 
+        ex = 0. 
+        Hvx = 0.
+        for key in self.model.batched_pairs:
+            ex_,Hvx_ = self.batch_quantities_deterministic(key,compute_Hv) 
+            ex += ex_
+            Hvx += Hvx_
         eu = self.model.compute_local_energy_eigen(self.config)
-        ex = sum(ex.values()) / cx + eu 
-        return cx,ex,vx,None,0.
+        ex = ex / cx + eu 
+        if compute_Hv: 
+            Hvx = Hvx / cx + eu * vx
+        else:
+            Hvx = None 
+        return cx,ex,vx,Hvx,0. 
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         self.config = config
         if self.deterministic:
-            if compute_Hv:
-                return self.compute_local_energy_hessian_deterministic()
-            else:
-                return self.compute_local_energy_gradient_deterministic(compute_v=compute_v)
+            return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
         else:
-            if compute_Hv:
-                return self.compute_local_energy_hessian_from_plq()
-            else:
-                return self.compute_local_energy_gradient_from_plq(compute_v=compute_v)
+            return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
 class Model:
     def gate2backend(self,backend):
-        for tag in self.gate:
-            self.gate[tag] = tensor2backend(self.gate[tag],backend)
+        self.gate = tensor2backend(self.gate,backend)
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5

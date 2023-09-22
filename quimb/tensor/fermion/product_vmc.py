@@ -12,20 +12,15 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-def _contraction_error(cx,multiply=True):
-    n = len(cx)
-    cx_,err = np.zeros(n),np.zeros(n)
-    for ix in range(n): 
-        cx_[ix],err[ix] = contraction_error(cx[ix])
-    if multiply:
-        cx_ = np.prod(cx_)
-    return cx_,np.amax(err)
 def config_to_ab(config):
     config = np.array(config)
     return tuple(config % 2), tuple(config // 2)
 def config_from_ab(config_a,config_b):
     return tuple(np.array(config_a) + np.array(config_b) * 2)
 class ProductAmplitudeFactory:
+    def parse_config(self,config):
+        ca,cb = config_to_ab(config)
+        return [{'a':ca,'b':cb,None:config}[af.spin] for af in self.af]
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         for af in self.af:
@@ -52,122 +47,130 @@ class ProductAmplitudeFactory:
             cx[ix],vx[ix] = af.get_grad_deterministic(config[ix],unsigned=unsigned)
         return np.array(cx),np.concatenate(vx)
     def _new_prob_from_plq(self,plq,sites,cis):
-        py = [None] * 3
-        plq_new = [None] * 3 
-        for af,plq_,cis_ in zip(self.af,plq,cis):
-            try:
-                plq_new_,py_ = af._new_prob_from_plq(plq_,sites,cis_)
-            
-            if py_ is not None:
-                py.append(py_)
-                plq_new.append(plq_new_)
+        py = [None] * self.naf 
+        plq_new = [None] * self.naf
+        cis = self.parse_config(cis)
+        config_new = self.parse_config(self.config_new)
+        for ix,af in enumerate(self.af):
+            if af.is_tn:
+                plq_new[ix],py[ix] = af._new_prob_from_plq(plq[ix],sites,cis[ix])
             else:
-                py.append(0.)
-                plq_new.append(None)
+                py[ix] = af.prob(config_new[ix])
+            if py[ix] is None:
+                return plq_new,0. 
         return plq_new,np.prod(np.array(py))
-    def replace_sites(self,tn,sites,cis):
-        for 
-        return [af.replace_sites(tn_,sites,cis_) for af,tn_,cis_ in zip(self.af,tn,cis)]
+    def prob(self,config):
+        try:
+            p = np.array([af.prob(config[ix]) for ix,af in enumerate(self.af)])
+            return np.prod(p)
+        except ValueError:
+            return 0.
 ##### ham methods #####
     def config_sign(self,config):
         sign = [] 
         for af,config_ in zip(self.af,config):
             sign.append(af.config_sign(config_))
         return np.array(sign) 
-    def get_grad_from_plq(self,plq,to_vec=True):
-        vx = [af.get_grad_from_plq(plq_,to_vec=to_vec) for af,plq_ in zip(self.af,plq)]
-        if to_vec:
-            vx = np.concatenate(vx)
-        return vx
-    def compute_hessian(self,ex_num):
-        Hvx = [] 
-        for af in self.af:
-            Hvx_ = {site:af.tensor_grad(af.psi[af.site_tag(site)].data) for site in af.sites}
-            Hvx.append(af.dict2vec(Hvx_)) 
+    def propagate(self,ex_num):
+        ex_num.backward()
+        Hvx = [af.extract_grad() for af in self.af] 
         return np.concatenate(Hvx) 
-
-    def parse_energy_numerator(self,ex):
+    def parse_energy_numerator(self,ex,cx):
         keys = set()
         for ex_ in ex:
-            keys.union(set(ex_.keys()))
+            keys.update(set(ex_.keys()))
         enum = 0.
         for key in keys:
             term = 1.
-            for ex_ in ex:
+            for ix,ex_ in enumerate(ex):
                 if key in ex_:
-                    ex_term = ex_.pop(key) 
-                    term *= ex_term 
+                    term *= ex_[key] 
+                else:
+                    term *= cx[ix][key[0]][0]
             enum += term
         return enum
-    def parse_energy_ratio(self,ex,cx):
-        keys = set()
-        for ex_ in ex:
-            keys.union(set(ex_.keys()))
-        eloc = 0.
-        for key in keys:
-            term = 1.
-            for ex_,cx_ in zip(ex,cx):
-                if key in ex_:
-                    ex_term = ex_.pop(key) 
-                    term *= ex_term / cx_[key[0]]
-            eloc += term
-        return tensor2backend(eloc,'numpy')
-    def batch_hessian_from_plq(self,batch_key): # only used for Hessian
-        ex = [None] * self.naf
+    def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): # only used for Hessian
+        ex_num = [None] * self.naf
         cx = [None] * self.naf
-        vx = [None] * self.naf 
+        plq = [None] * self.naf
         for ix,af in enumerate(self.af):
-            af.wfn2backend(backend='torch',requires_grad=True)
-            af.model.gate2backend('torch')
-            ex[ix],cx[ix],vx[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=True)
+            if compute_Hv:
+                af.wfn2backend(backend='torch',requires_grad=True)
+                af.model.gate2backend('torch')
+            ex_num[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
 
-        ex_num = self.parse_energy_numerator(ex,_sum=False)
-        Hvx = af.compute_hessian(ex_num)
-        ex = self.parse_energy_ratio(ex,cx,_sum=False)
-        af.wfn2backend()
-        self.model.gate2backend(af.backend)
-        return ex,Hvx,cx,vx
-    def compute_local_energy_hessian_from_plq(self): 
-        cx = [dict() for _ in range(self.naf)]
-        vx = [dict() for _ in range(self.naf)]
+        if compute_Hv:
+            ex = self.parse_energy_numerator(ex_num,cx)
+            Hvx = self.propagate(ex)
+        else:
+            Hvx = 0.
+
+        keys = set()
+        for eix in ex_num:
+            keys.update(set(eix.keys()))
+        ex = 0.
+        for (where,spin) in keys:
+            term = 1.
+            for ix,eix in enumerate(ex_num):
+                cij,plq_key = cx[ix][where]
+                if plq_key in self.af[ix].cx:
+                    cij = self.af[ix].cx[plq_key]
+                else:
+                    cij = tensor2backend(cij,'numpy')
+                    self.af[ix].cx[plq_key] = cij
+                if (where,spin) in eix:
+                    term *= eix[where,spin] / cij 
+            ex += term
+        ex = tensor2backend(ex,'numpy')
+        if compute_v: 
+            for ix,af in enumerate(self.af):
+                af.get_grad_from_plq(plq[ix])
+        if compute_Hv: 
+            self.wfn2backend()
+            self.model.gate2backend(self.backend)
+        return ex,Hvx
+    def contraction_error(self,multiply=True):
+        cx,err = np.zeros(self.naf),np.zeros(self.naf)
+        for ix,af in enumerate(self.af): 
+            cx[ix],err[ix] = contraction_error(af.cx)
+        if multiply:
+            cx = np.prod(cx)
+        return cx,np.amax(err)
+    def compute_local_quantities_from_plq(self,compute_v,compute_Hv): 
+        for af in self.af:
+            af.cx = dict()
+            if af.is_tn:
+                af.vx = dict()
         ex,Hvx = 0.,0.
         for batch_key in self.model.batched_pairs:
-            ex_,Hvx_,cx_,vx_ = self.batch_hessian_from_plq(config,batch_key)  
+            ex_,Hvx_ = self.batch_quantities_from_plq(batch_key,compute_v,compute_Hv)  
             ex += ex_
             Hvx += Hvx_
-            for ix in range(af.naf):
-                cx[ix].update(cx_[ix])
-                vx[ix].update(vx_[ix])
-        eu = self.model.compute_local_energy_eigen(config)
-        cx,err = _contraction_error(cx,multiply=False) 
-
-        vx = np.concatenate([af.dict2vec(vx_) for af,vx_ in zip(self.af,vx)])
-
-        ex = np.sum(ex) + eu
-        Hvx = Hvx / cx + eu * vx
-        cx = np.prod(cx)
-        return cx,ex,vx,Hvx,err 
-    def compute_local_energy_gradient_from_plq(self,compute_v=True):
-        ex = [dict() for _ in range(self.naf)]
-        cx = [dict() for _ in range(self.naf)]
-        vx = [dict() for _ in range(self.naf)]
-        for batch_key in self.model.batched_pairs:
-            for ix,af in enumerate(self,af):
-                ex_,cx_,vx_ = af.batch_pair_energies_from_plq(batch_key,compute_v=compute_v)  
-                ex[ix].update(ex_)
-                cx[ix].update(cx_)
-                vx[ix].update(vx_)
-
-        ex = self.parse_energy_ratio(ex,cx)
-        eu = self.model.compute_local_energy_eigen(config)
+        cx,err = self.contraction_error() 
+        eu = self.model.compute_local_energy_eigen(self.config)
         ex += eu
 
-        cx,err = _contraction_error(cx)
-        if not compute_v:
-            return cx,ex,None,None,err 
-        af = self.amplitude_factory
-        vx = np.concatenate([af_.dict2vec(vx_) for af_,vx_ in zip(af.af,vx)])
-        return cx,ex,vx,None,err
+        if compute_v:
+            vx = [None] * self.naf
+            for ix,af in enumerate(self.af):
+                if af.is_tn:
+                    vx[ix] = af.dict2vec(af.vx)
+                else:
+                    vx[ix] = af.vx
+            vx = np.concatenate(vx)
+        else:
+            vx = None
+
+        if compute_Hv:
+            Hvx = Hvx / cx + eu * vx
+        else:
+            Hvx = None
+        return cx,ex,vx,Hvx,err 
+    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
+        self.config = config 
+        for af,config_ in zip(self.af,self.parse_config(config)):
+            af.config = config_ 
+        return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
     #def batch_hessian_deterministic(self,config,batch_key):
     #    af = self.amplitude_factory
     #    af.wfn2backend(backend='torch',requires_grad=True)
@@ -230,7 +233,7 @@ class TNJastrow(AmplitudeFactory):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
         if not self.model.pair_valid(i1,i2): # term vanishes 
-            return None 
+            return ex 
         for spin in ('a','b'):
             i1_new,i2_new = self.pair_terms(i1,i2,spin)
             if i1_new is None:

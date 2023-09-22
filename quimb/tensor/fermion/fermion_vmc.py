@@ -2,13 +2,16 @@ import numpy as np
 import itertools
 class FermionModel:
     def gate2backend(self,backend):
-        for tag in self.gate:
-            self.gate[tag] = tensor2backend(self.gate[tag],backend)
+        self.gate = tensor2backend(self.gate,backend)
 from ..tensor_vmc import (
     safe_contract,
     DenseSampler,
     ExchangeSampler,
 )
+from mpi4py import MPI
+COMM = MPI.COMM_WORLD
+SIZE = COMM.Get_size()
+RANK = COMM.Get_rank()
 class FermionDenseSampler(DenseSampler):
     def __init__(self,nsite,nelec,spinless=False,**kwargs):
         self.nelec = nelec
@@ -302,5 +305,6 @@ class FermionAmplitudeFactory:
         else:
             absorb = {'left':'right','right':'left'}[absorb]
             self._tensor_compress_bond(T2,T1,absorb=absorb)
-    def _add_gate(self,tn,where,gate,contract=True):
-        return _add_gate(tn,gate,self.model.order,where,self.site_ind,self.site_tag,contract=contract)
+    def _add_gate(self,tn,where,contract=True):
+        return _add_gate(tn,self.model.gate.copy(),self.model.order,
+                         where,self.site_ind,self.site_tag,contract=contract)

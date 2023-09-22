@@ -17,22 +17,23 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False):
     from .fermion_2d_vmc import set_options as set_options
     return set_options(symmetry=symmetry,flat=flat,pbc=pbc,deterministic=deterministic)
 
-from ..tensor_2d_vmc import AmplitudeFactory2D,Hamiltonian2D 
-from .fermion_2d_vmc import FermionAmplitudeFactory2D
-from .fermion_product_vmc import (
+from .product_vmc import (
     TNJastrow,
     ProductAmplitudeFactory,
 )
-class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
+#class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
+class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
     def __init__(self,af):
         self.af = af 
         self.get_sections()
 
         self.Lx,self.Ly = self.af[0].Lx,self.af[0].Ly
         self.sites = self.af[0].sites
+        self.model = self.af[0].model
+        self.nsite = self.af[0].nsite
+
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
-        self.backend = backend
         self.spinless = False
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 ##### wfn methods #####
@@ -193,6 +194,7 @@ def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
+from ..tensor_2d_vmc import AmplitudeFactory2D 
 class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
     def pair_energy_deterministic(self,config,site1,site2,model,cache_top=None,cache_bot=None):
         ix1,ix2 = model.flatten(site1),model.flatten(site2)

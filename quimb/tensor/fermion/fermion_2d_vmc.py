@@ -87,7 +87,7 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
-
+        self.spin = None
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):
@@ -105,7 +105,7 @@ class Hubbard(FermionModel2D):
     def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
         super().__init__(Lx,Ly,nbatch=nbatch)
         self.t,self.u = t,u
-        self.gate = {None:H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)}
+        self.gate = H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
         self.order = 'b1,b2,k1,k2'
         self.spinless = spinless
 
