@@ -49,7 +49,6 @@ class ProductAmplitudeFactory:
     def _new_prob_from_plq(self,plq,sites,cis):
         py = [None] * self.naf 
         plq_new = [None] * self.naf
-        cis = self.parse_config(cis)
         config_new = self.parse_config(self.config_new)
         for ix,af in enumerate(self.af):
             if af.is_tn:
@@ -65,6 +64,12 @@ class ProductAmplitudeFactory:
             return np.prod(p)
         except ValueError:
             return 0.
+    def replace_sites(self,tn,sites,cis):
+        for ix,af in enumerate(self.af):
+            if not af.is_tn:
+                continue
+            tn[ix] = af.replace_sites(tn[ix],sites,cis[ix])
+        return tn 
 ##### ham methods #####
     def config_sign(self,config):
         sign = [] 

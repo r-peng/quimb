@@ -798,6 +798,7 @@ class ExchangeSampler2D(ExchangeSampler):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return plq,cols
+        config_sites = self.af.parse_config(config_sites)
         self.af.config_new = config_new
         plq_new,py = self.af._new_prob_from_plq(plq,(site1,site2),config_sites)
         if py is None:
