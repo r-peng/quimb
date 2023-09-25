@@ -88,6 +88,7 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
         self.spin = None
+        self.is_tn = True
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):

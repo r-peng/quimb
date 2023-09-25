@@ -56,6 +56,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
         self.spin = None
+        self.is_tn = True
 ##### wfn methods #####
     def flatten(self,site):
         i,j = site

@@ -91,7 +91,10 @@ class ProductAmplitudeFactory:
                 if key in ex_:
                     term *= ex_[key] 
                 else:
-                    term *= cx[ix][key[0]][0]
+                    if isinstance(cx[ix],dict):
+                        term *= cx[ix][key[0]][0]
+                    else:
+                        term *= cx[ix]
             enum += term
         return enum
     def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): # only used for Hessian
@@ -117,7 +120,10 @@ class ProductAmplitudeFactory:
         for (where,spin) in keys:
             term = 1.
             for ix,eix in enumerate(ex_num):
-                cij,plq_key = cx[ix][where]
+                if isinstance(cx[ix],dict):
+                    cij,plq_key = cx[ix][where]
+                else:
+                    cij,plq_key = cx[ix],None
                 if plq_key in self.af[ix].cx:
                     cij = self.af[ix].cx[plq_key]
                 else:
@@ -219,34 +225,111 @@ class ProductAmplitudeFactory:
 #######################################################################
 # some jastrow forms
 #######################################################################
+def pair_terms(i1,i2,spin):
+    if spin=='a':
+        map_ = {(0,1):(1,0),(1,0):(0,1),
+                (2,3):(3,2),(3,2):(2,3),
+                (0,3):(1,2),(3,0):(2,1),
+                (1,2):(0,3),(2,1):(3,0)}
+    elif spin=='b':
+        map_ = {(0,2):(2,0),(2,0):(0,2),
+                (1,3):(3,1),(3,1):(1,3),
+                (0,3):(2,1),(3,0):(1,2),
+                (1,2):(3,0),(2,1):(0,3)}
+    else:
+        raise ValueError
+    return map_.get((i1,i2),(None,)*2)
 class TNJastrow(AmplitudeFactory):
-    def pair_terms(self,i1,i2,spin):
-        if spin=='a':
-            map_ = {(0,1):(1,0),(1,0):(0,1),
-                    (2,3):(3,2),(3,2):(2,3),
-                    (0,3):(1,2),(3,0):(2,1),
-                    (1,2):(0,3),(2,1):(3,0)}
-        elif spin=='b':
-            map_ = {(0,2):(2,0),(2,0):(0,2),
-                    (1,3):(3,1),(3,1):(1,3),
-                    (0,3):(2,1),(3,0):(1,2),
-                    (1,2):(3,0),(2,1):(0,3)}
-        else:
-            raise ValueError
-        return map_.get((i1,i2),(None,)*2)
     def update_pair_energy_from_plq(self,tn,where,ex):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return ex 
-        for spin in ('a','b'):
-            i1_new,i2_new = self.pair_terms(i1,i2,spin)
-            if i1_new is None:
-                continue
-            tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
-            ex_ij = safe_contract(tn_new)
-            if ex_ij is not None:
+        if self.model.pair_valid(i1,i2): # term vanishes 
+            for spin in ('a','b'):
+                i1_new,i2_new = pair_terms(i1,i2,spin)
+                if i1_new is None:
+                    ex_ij = 0
+                else:
+                    tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
+                    ex_ij = safe_contract(tn_new)
+                    if ex_ij is None:
+                        ex_ij = 0
                 ex[where,spin] = ex_ij 
+        else:
+            for spin in ('a','b'):
+                ex[where,spin] = 0
         return ex 
-    def config_sign(self,config_a,config_b):
-        return 1
+import autoray as ar
+import torch
+import h5py
+class RBM(AmplitudeFactory):
+    def __init__(self,a,b,w,backend='numpy'):
+        self.a = a 
+        self.b = b
+        self.w = w
+        self.nv = len(a)
+        self.nh = len(b)
+        self.nparam = a.size + b.size + w.size
+        self.block_dict = [(0,self.nparam)]
+        self.spin = None
+        self.is_tn = False
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+        ar.set_backend(tsr)
+        self.a,self.b,self.w = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) \
+                                for tsr in [self.a,self.b,self.w]]
+    def get_x(self):
+        ls = [tensor2backend(tsr,'numpy') for tsr in [self.a,self.b,self.w]]
+        ls[-1] = ls[-1].flatten()
+        return np.concatenate(ls)
+    def update(self,x,fname=None,root=0):
+        x = x.split([self.nv,self.nv+self.nh])
+        self.a = x[0]
+        self.b = x[1]
+        self.w = x[2].reshape(self.nv,self.nh)
+        if RANK==root:
+            if fname is not None:
+                f = h5py.File(fname+'.hdf5','w')
+                f.create_dataset('a',self.a) 
+                f.create_dataset('b',self.b) 
+                f.create_dataset('w',self.w) 
+                f.close()
+        self.wfn2backend()
+    def extract_grad(self):
+        ls = [tensor2backend(self.tsr_grad(tsr),'numpy') for tsr in [self.a,self.b,self.w]] 
+        ls[-1] = ls[-1].flatten()
+        return np.concatenate(ls)
+    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+        ca,cb = config_to_ab(config) 
+        c = np.array(ca+cb)
+        if isinstance(self.a,torch.Tensor):
+            c = tensor2backend(c,backend='torch')
+            jnp = torch
+        else:
+            jnp = np
+        c = jnp.exp(jnp.dot(self.a,c)) * jnp.prod(2*jnp.cosh(jnp.matmul(c,self.w) + self.b))
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+        return c 
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
+        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        cx = self.unsigned_amplitude(self.config,to_numpy=False)
+        ex = dict()
+        for where in pairs:
+            ix1,ix2 = [self.flatten(site) for site in where]
+            i1,i2 = self.config[ix1],self.config[ix2]
+            if self.model.pair_valid(i1,i2): # term vanishes 
+                for spin in ('a','b'):
+                    i1_new,i2_new = pair_terms(i1,i2,spin)
+                    if i1_new is None:
+                        cx_new = 0 
+                    else:
+                        config_new = list(self.config)
+                        config_new[ix1] = i1_new
+                        config_new[ix2] = i2_new 
+                        cx_new = self.unsigned_amplitude(config_new,to_numpy=False) 
+                    ex[where,spin] = cx_new        
+            else:
+                for spin in ('a','b'):
+                    ex[where,spin] = 0
+        return ex,cx
