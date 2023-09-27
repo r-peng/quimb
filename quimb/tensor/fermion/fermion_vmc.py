@@ -2,7 +2,7 @@ import numpy as np
 import itertools
 class FermionModel:
     def gate2backend(self,backend):
-        self.gate = tensor2backend(self.gate,backend)
+        self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}
 from ..tensor_vmc import (
     safe_contract,
     DenseSampler,
@@ -305,6 +305,5 @@ class FermionAmplitudeFactory:
         else:
             absorb = {'left':'right','right':'left'}[absorb]
             self._tensor_compress_bond(T2,T1,absorb=absorb)
-    def _add_gate(self,tn,where,contract=True):
-        return _add_gate(tn,self.model.gate.copy(),self.model.order,
-                         where,self.site_ind,self.site_tag,contract=contract)
+    def _add_gate(self,tn,gate,order,where):
+        return _add_gate(tn,gate.copy(),order,where,self.site_ind,self.site_tag,contract=True)

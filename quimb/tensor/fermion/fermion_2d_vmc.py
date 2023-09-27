@@ -5,7 +5,6 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 import sys
 this = sys.modules[__name__]
@@ -87,7 +86,6 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
-        self.spin = None
         self.is_tn = True
     def config_sign(self,config):
         parity = [None] * self.Lx
@@ -103,11 +101,31 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
 
 from pyblock3.algebra.fermion_ops import H1
 class Hubbard(FermionModel2D):
-    def __init__(self,t,u,Lx,Ly,spinless=False,nbatch=1):
+    def __init__(self,t,u,Lx,Ly,spinless=False,spin=None,sep=False,nbatch=1):
         super().__init__(Lx,Ly,nbatch=nbatch)
         self.t,self.u = t,u
-        self.gate = H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
-        self.order = 'b1,b2,k1,k2'
+        #self.gate = {spin:(H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless),'b1,b2,k1,k2')}
+        data_map = get_data_map(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless) 
+        order = 'b1,k1,b2,k2'
+        if spinless:
+            cre = data_map['cre'].copy() 
+            ann = data_map['ann'].copy() 
+            h1 = np.tensordot(cre,ann,axes=([],[]))
+            h1 = h1 + h1.transpose((2,3,0,1))
+            h1.shape = (2,)*4
+            self.gate = {spin:(h1,order)}
+        else:
+            h1 = []
+            for spin in ('a','b'):
+                cre = data_map[f'cre_{spin}'].copy() 
+                ann = data_map[f'ann_{spin}'].copy() 
+                h1.append(np.tensordot(cre,ann,axes=([],[])))
+                h1[-1] = h1[-1] + h1[-1].transpose((2,3,0,1))
+                h1[-1].shape = (4,)*4
+            if sep:
+                self.gate = {'a':(h1[0],order),'b':(h1[1],order)}
+            else:
+                self.gate = {None:((h1[0]+h1[1]),order)}
         self.spinless = spinless
 
         self.pairs = self.pairs_nn()

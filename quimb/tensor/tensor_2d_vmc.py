@@ -4,7 +4,6 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
 import sys
 this = sys.modules[__name__]
@@ -55,7 +54,6 @@ class AmplitudeFactory2D(AmplitudeFactory):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
-        self.spin = None
         self.is_tn = True
 ##### wfn methods #####
     def flatten(self,site):
@@ -663,12 +661,10 @@ class Heisenberg(Model2D):
         else:
             return [(1-i1,1-i2,.25*(self.Jx-self.Jy))]
 class J1J2(Model2D): # prototypical next nn model
-    def __init__(self,J1,J2,Lx,Ly,**kwargs):
-        super().__init__(Lx,Ly,**kwargs)
+    def __init__(self,J1,J2,Lx,Ly,nbatch=1):
+        super().__init__(Lx,Ly,nbatch=nbatch)
         self.J1,self.J2 = J1,J2
-
-        self.gate = get_gate2((1.,1.,0.))
-        self.order = 'b1,k1,b2,k2'
+        self.gate = {None:(get_gate2((1.,1.,0.)),'b1,k1,b2,k2')}
 
         self.pairs = self.pairs_nn() + self.pairs_diag() # list of all pairs, for SR
         if _DETERMINISTIC:
@@ -801,13 +797,10 @@ class ExchangeSampler2D(ExchangeSampler):
             return plq,cols
         config_sites = self.af.parse_config(config_sites)
         self.af.config_new = config_new
-        plq_new,py = self.af._new_prob_from_plq(plq,(site1,site2),config_sites)
+        plq_new,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites)
         if py is None:
             return plq,cols
-        try:
-            acceptance = py / self.px
-        except ZeroDivisionError:
-            acceptance = 1. if py > self.px else 0.
+        acceptance = np.exp(py - self.px)
         if acceptance < self.rng.uniform(): # reject
             return plq,cols
         # accept, update px & config & env_m
@@ -838,35 +831,17 @@ class ExchangeSampler2D(ExchangeSampler):
             plq,cols = self._update_pair(site1,site2,plq,cols) 
         return cols
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
-        try:
-            cols,renvs = self.af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
-        except AttributeError:
-            return
+        cols,renvs = self.af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
         for j in range(self.Ly - y_bsz + 1): 
-            try:
-                plq = self.af._get_plq_forward(j,y_bsz,cols,renvs)
-            except AttributeError:
-                return
+            plq = self.af._get_plq_forward(j,y_bsz,cols,renvs)
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
-            try:
-                cols = self.af._contract_cols(cols,(0,j))
-            except (ValueError,IndexError):
-                return
+            cols = self.af._contract_cols(cols,(0,j))
     def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
-        try:
-            cols,lenvs = self.af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
-        except AttributeError:
-            return
+        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
         for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
-            try:
-                plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
-            except AttributeError:
-                return
+            plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
-            try:
-                cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
-            except (ValueError,IndexError):
-                return
+            cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
     def sweep_row_forward(self,x_bsz,y_bsz):
         self.af.cache_bot = dict()
         self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=x_bsz-1)

@@ -8,7 +8,6 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 DISCARD = 1e3
 CG_TOL = 1e-4
 MAXITER = 100
@@ -391,8 +390,12 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             vmean /= self.n
             evmean /= self.n
-            #print(evmean)
             self.g = evmean - self.E * vmean
+            #print(evmean)
+            #print(vmean)
+            #print(self.g)
+            #print(self.E)
+            #exit()
             self.vmean = vmean
     def _extract_Hvmean(self):
         Hvmean = np.zeros(self.nparam,dtype=self.dtype)
@@ -1132,6 +1135,8 @@ class DenseSampler:
             config = self.af.parse_config(config)
             plocal.append(self.af.prob(config))
         plocal = np.array(plocal)
+        #print(plocal)
+        #exit()
          
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
         nonzeros = []
@@ -1177,10 +1182,10 @@ class ExchangeSampler:
     def _burn_in(self,config=None,burn_in=None):
         if config is not None:
             self.config = config 
-        self.px = self.af.prob(self.af.parse_config(self.config))
+        self.px = np.log(self.af.prob(self.af.parse_config(self.config)))
 
         if RANK==0:
-            print('\tprob=',self.px)
+            print('\tlog prob=',self.px)
             return 
         t0 = time.time()
         burn_in = self.burn_in if burn_in is None else burn_in
@@ -1463,22 +1468,21 @@ class AmplitudeFactory:
         """Calculate the probability of a configuration.
         """
         return self.unsigned_amplitude(config) ** 2
-    def _new_prob_from_plq(self,plq,sites,cis):
+    def _new_log_prob_from_plq(self,plq,sites,cis):
         plq_new = self.replace_sites(plq.copy(),sites,cis) 
         cy = safe_contract(plq_new)
         if cy is None:
             return plq_new,None
-        return plq_new,tensor2backend(cy**2,'numpy') 
+        return plq_new,2*np.log(np.fabs(tensor2backend(cy,'numpy')))
     def extract_grad(self):
         vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
         return self.dict2vec(vx)
     def propagate(self,ex):
-        if len(ex)==0:
+        if not isinstance(ex,torch.Tensor):
             return 0.,np.zeros(self.nparam)
-        ex_num = sum(ex.values())
-        ex_num.backward()
+        ex.backward()
         Hvx = self.extract_grad()
-        return tensor2backend(ex_num,'numpy'),Hvx 
+        return tensor2backend(ex,'numpy'),Hvx 
     def get_grad_deterministic(self,config,unsigned=False):
         self.wfn2backend(backend='torch',requires_grad=True)
         cache_top = dict()
@@ -1487,7 +1491,7 @@ class AmplitudeFactory:
         if cx is None:
             vx = np.zeros(self.nparam)
         else:
-            cx,vx = self.propagate({0:cx})
+            cx,vx = self.propagate(cx)
             vx /= cx
             sign = 1. if unsigned else self.config_sign(config)
             cx *= sign
@@ -1503,21 +1507,20 @@ class AmplitudeFactory:
                 self.vx[site] = self.tensor2backend(self.site_grad(tn.copy(),site)/cij,'numpy')
         return self.vx
 ##### ham methods #####
-    def _add_gate(self,tn,where,contract=True):
-        return _add_gate(tn,self.model.gate,self.model.order,where,
-                         self.site_ind,self.site_tag,contract=contract)
-    def update_pair_energy_from_plq(self,tn,where,ex):
+    def _add_gate(self,tn,gate,order,where):
+        return _add_gate(tn,gate,order,where,self.site_ind,self.site_tag,contract=True)
+    def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
-        if self.model.pair_valid(i1,i2):
-            ex_ij = self._add_gate(tn,where,contract=True)
+        if not self.model.pair_valid(i1,i2):
+            return {tag:0 for tag in self.model.gate}
+        coeff = self.model.pair_coeff(*where)
+        ex = dict()
+        for tag,(gate,order) in self.model.gate.items():
+            ex_ij = self._add_gate(tn.copy(),gate,order,where) 
             if ex_ij is None:
                 ex_ij = 0
-            else:
-                ex_ij *= self.model.pair_coeff(*where)
-        else:
-            ex_ij = 0
-        ex[where,self.spin] = ex_ij
+            ex[tag] = ex_ij * coeff 
         return ex 
     def pair_energies_from_plq(self,plq,pairs):
         ex = dict()
@@ -1528,28 +1531,27 @@ class AmplitudeFactory:
             tn = plq.get(key,None) 
             if tn is None:
                 continue
-            ex = self.update_pair_energy_from_plq(tn.copy(),where,ex) 
             cij = safe_contract(tn.copy())
             cx[where] = cij,key
+
+            ex_ij = self.update_pair_energy_from_plq(tn,where) 
+            for tag,eij in ex_ij.items():
+                ex[where,tag] = eij,eij/cij 
         return ex,cx
     def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): 
         if compute_Hv:
             self.wfn2backend(backend='torch',requires_grad=True)
             self.model.gate2backend('torch')
-        ex_num,cx,plq = self.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
+        ex,cx,plq = self.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
 
         if compute_Hv:
+            ex_num = sum([eij for eij,_ in ex.values()])
             _,Hvx = self.propagate(ex_num)
         else:
             Hvx = 0.
 
-        ex = 0.
-        for (where,_),eij in ex_num.items():
-            cij,plq_key = cx[where]
-            cij = tensor2backend(cij,'numpy')
-            ex += eij/cij
-            self.cx[plq_key] = cij
-        ex = tensor2backend(ex,'numpy')
+        ex = tensor2backend(sum([eij for _,eij in ex.values()]),'numpy')
+        self.cx.update({plq_key:tensor2backend(cij,'numpy') for where,(cij,plq_key) in cx.items()})
         if compute_v:
             self.get_grad_from_plq(plq) 
         if compute_Hv:
@@ -1617,7 +1619,7 @@ class AmplitudeFactory:
             return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
 class Model:
     def gate2backend(self,backend):
-        self.gate = tensor2backend(self.gate,backend)
+        self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}
 def get_gate1():
     return np.array([[1,0],
                    [0,-1]]) * .5

@@ -1,4 +1,5 @@
 import numpy as np
+import itertools
 #####################################################
 # for separate ansatz
 #####################################################
@@ -46,24 +47,26 @@ class ProductAmplitudeFactory:
         for ix,af in enumerate(self.af):
             cx[ix],vx[ix] = af.get_grad_deterministic(config[ix],unsigned=unsigned)
         return np.array(cx),np.concatenate(vx)
-    def _new_prob_from_plq(self,plq,sites,cis):
+    def _new_log_prob_from_plq(self,plq,sites,cis):
         py = [None] * self.naf 
         plq_new = [None] * self.naf
         config_new = self.parse_config(self.config_new)
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                plq_new[ix],py[ix] = af._new_prob_from_plq(plq[ix],sites,cis[ix])
+                plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,cis[ix])
             else:
-                py[ix] = af.prob(config_new[ix])
+                py[ix] = 2 * af.log_amplitude(config_new[ix])[0]
             if py[ix] is None:
-                return plq_new,0. 
-        return plq_new,np.prod(np.array(py))
+                return plq_new,None 
+        return plq_new,sum(py)
     def prob(self,config):
-        try:
-            p = np.array([af.prob(config[ix]) for ix,af in enumerate(self.af)])
-            return np.prod(p)
-        except ValueError:
-            return 0.
+        p = 1
+        for ix,af in enumerate(self.af):
+            pix = af.prob(config[ix])
+            if pix is None:
+                return 0
+            p *= pix
+        return p 
     def replace_sites(self,tn,sites,cis):
         for ix,af in enumerate(self.af):
             if not af.is_tn:
@@ -80,65 +83,55 @@ class ProductAmplitudeFactory:
         ex_num.backward()
         Hvx = [af.extract_grad() for af in self.af] 
         return np.concatenate(Hvx) 
-    def parse_energy_numerator(self,ex,cx):
-        keys = set()
-        for ex_ in ex:
-            keys.update(set(ex_.keys()))
-        enum = 0.
-        for key in keys:
+    def parse_energy(self,ex,batch_key,cx=None):
+        pairs = self.model.batched_pairs[batch_key][3]
+        e = 0.
+        p = 1 if cx is None else 0
+        for where,spin in itertools.product(pairs,('a','b')):
             term = 1.
             for ix,ex_ in enumerate(ex):
-                if key in ex_:
-                    term *= ex_[key] 
+                if (where,spin) in ex_:
+                    term *= ex_[where,spin][p] 
                 else:
+                    if p==1:
+                        continue 
                     if isinstance(cx[ix],dict):
-                        term *= cx[ix][key[0]][0]
+                        term *= cx[ix][where][0]
                     else:
                         term *= cx[ix]
-            enum += term
-        return enum
+            e += term
+        if p==1:
+            e = tensor2backend(e,'numpy')
+        return e
     def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): # only used for Hessian
-        ex_num = [None] * self.naf
+        ex = [None] * self.naf
         cx = [None] * self.naf
         plq = [None] * self.naf
         for ix,af in enumerate(self.af):
             if compute_Hv:
                 af.wfn2backend(backend='torch',requires_grad=True)
                 af.model.gate2backend('torch')
-            ex_num[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
+            ex[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
 
         if compute_Hv:
-            ex = self.parse_energy_numerator(ex_num,cx)
-            Hvx = self.propagate(ex)
+            Hvx = self.propagate(self.parse_energy(ex,batch_key,cx=cx))
         else:
             Hvx = 0.
 
-        keys = set()
-        for eix in ex_num:
-            keys.update(set(eix.keys()))
-        ex = 0.
-        for (where,spin) in keys:
-            term = 1.
-            for ix,eix in enumerate(ex_num):
-                if isinstance(cx[ix],dict):
-                    cij,plq_key = cx[ix][where]
-                else:
-                    cij,plq_key = cx[ix],None
-                if plq_key in self.af[ix].cx:
-                    cij = self.af[ix].cx[plq_key]
-                else:
-                    cij = tensor2backend(cij,'numpy')
-                    self.af[ix].cx[plq_key] = cij
-                if (where,spin) in eix:
-                    term *= eix[where,spin] / cij 
-            ex += term
-        ex = tensor2backend(ex,'numpy')
+        ex = self.parse_energy(ex,batch_key)
+        for ix,af in enumerate(self.af):
+            if af.is_tn:
+                af.cx.update({plq_key:tensor2backend(cij,'numpy') for where,(cij,plq_key) in cx[ix].items()})
+            else:
+                af.cx = {None:tensor2backend(cx[ix],'numpy')}
+             
         if compute_v: 
             for ix,af in enumerate(self.af):
                 af.get_grad_from_plq(plq[ix])
         if compute_Hv: 
             self.wfn2backend()
-            self.model.gate2backend(self.backend)
+            for af in self.af:
+                af.model.gate2backend(self.backend)
         return ex,Hvx
     def contraction_error(self,multiply=True):
         cx,err = np.zeros(self.naf),np.zeros(self.naf)
@@ -168,6 +161,7 @@ class ProductAmplitudeFactory:
                     vx[ix] = af.dict2vec(af.vx)
                 else:
                     vx[ix] = af.vx
+                af.vx = None
             vx = np.concatenate(vx)
         else:
             vx = None
@@ -240,38 +234,83 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class TNJastrow(AmplitudeFactory):
-    def update_pair_energy_from_plq(self,tn,where,ex):
+    def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
-        if self.model.pair_valid(i1,i2): # term vanishes 
-            for spin in ('a','b'):
-                i1_new,i2_new = pair_terms(i1,i2,spin)
-                if i1_new is None:
-                    ex_ij = 0
-                else:
-                    tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
-                    ex_ij = safe_contract(tn_new)
-                    if ex_ij is None:
-                        ex_ij = 0
-                ex[where,spin] = ex_ij 
-        else:
-            for spin in ('a','b'):
-                ex[where,spin] = 0
+        if not self.model.pair_valid(i1,i2): # term vanishes 
+            return {spin:0 for spin in ('a','b')}
+        ex = dict()
+        for spin in ('a','b'):
+            i1_new,i2_new = pair_terms(i1,i2,spin)
+            if i1_new is None:
+                ex[spin] = 0
+                continue
+            tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
+            ex_ij = safe_contract(tn_new)
+            if ex_ij is None:
+                ex_ij = 0
+            ex[spin] = ex_ij 
         return ex 
 import autoray as ar
 import torch
 import h5py
-class RBM(AmplitudeFactory):
-    def __init__(self,a,b,w,backend='numpy'):
-        self.a = a 
-        self.b = b
-        self.w = w
-        self.nv = len(a)
-        self.nh = len(b)
-        self.nparam = a.size + b.size + w.size
-        self.block_dict = [(0,self.nparam)]
-        self.spin = None
+class NN(AmplitudeFactory):
+    def unsigned_amplitude(self,config,cx=None,cache_top=None,cache_bot=None,to_numpy=True):
+        if cx is None:
+            cx,_ = self.log_amplitude(config,to_numpy=to_numpy) 
+        jnp,_ = self.get_backend()
+        return jnp.exp(cx)
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
+        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        jnp = torch if new_cache else np
+        logcx,_ = self.log_amplitude(self.config,to_numpy=False)
+        cx = jnp.exp(logcx) 
+        ex = dict()
+        for where in pairs:
+            ix1,ix2 = [self.flatten(site) for site in where]
+            i1,i2 = self.config[ix1],self.config[ix2]
+            if self.model.pair_valid(i1,i2): # term vanishes 
+                for spin in ('a','b'):
+                    i1_new,i2_new = pair_terms(i1,i2,spin)
+                    if i1_new is None:
+                        ex[where,spin] = 0,0 
+                    else:
+                        config_new = list(self.config)
+                        config_new[ix1] = i1_new
+                        config_new[ix2] = i2_new 
+                        logcx_new,_ = self.log_amplitude(config_new,to_numpy=False) 
+                        cx_new = jnp.exp(logcx_new)
+                        ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) 
+            else:
+                for spin in ('a','b'):
+                    ex[where,spin] = 0,0
+        return ex,cx,None
+    def get_grad_from_plq(self,plq=None):
+        if self.vx is not None:
+            return self.vx
+        self.wfn2backend(backend='torch',requires_grad=True)
+        c,_ = self.log_amplitude(self.config,to_numpy=False) 
+        _,self.vx = self.propagate(c) 
+        #print(self.config,self.vx)
+        #exit()
+        self.wfn2backend()
+        return self.vx 
+class RBM(NN):
+    def __init__(self,a=None,b=None,w=None,nv=None,nh=None,backend='numpy'):
         self.is_tn = False
+        self.backend = backend
+        self.spin = None
+        self.vx = None
+        if a is None:
+            self.nv,self.nh = nv,nh
+        else:
+            self.a = a 
+            self.b = b
+            self.w = w
+            self.nv = len(a)
+            self.nh = len(b)
+        self.nparam = self.nv + self.nh + self.nh * self.nv 
+        self.block_dict = [(0,self.nv),(self.nv,self.nv+self.nh),(self.nv+self.nh,self.nparam)]
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
@@ -282,54 +321,147 @@ class RBM(AmplitudeFactory):
         ls = [tensor2backend(tsr,'numpy') for tsr in [self.a,self.b,self.w]]
         ls[-1] = ls[-1].flatten()
         return np.concatenate(ls)
+    def load_from_disc(self,fname):
+        f = h5py.File(fname,'r')
+        self.a = f['a'][:]
+        self.b = f['b'][:]
+        self.w = f['w'][:]
+        f.close()
+        return self.a,self.b,self.w
+    def save_to_disc(self,a,b,w,fname,root=0):
+        if RANK!=root:
+            return
+        f = h5py.File(fname+'.hdf5','w')
+        f.create_dataset('a',data=a) 
+        f.create_dataset('b',data=b) 
+        f.create_dataset('w',data=w) 
+        f.close()
     def update(self,x,fname=None,root=0):
-        x = x.split([self.nv,self.nv+self.nh])
+        x = np.split(x,[self.nv,self.nv+self.nh])
         self.a = x[0]
         self.b = x[1]
         self.w = x[2].reshape(self.nv,self.nh)
-        if RANK==root:
-            if fname is not None:
-                f = h5py.File(fname+'.hdf5','w')
-                f.create_dataset('a',self.a) 
-                f.create_dataset('b',self.b) 
-                f.create_dataset('w',self.w) 
-                f.close()
+        if fname is not None:
+            self.save_to_disc(self.a,self.b,self.w,fname,root=root)
         self.wfn2backend()
     def extract_grad(self):
-        ls = [tensor2backend(self.tsr_grad(tsr),'numpy') for tsr in [self.a,self.b,self.w]] 
+        ls = [tensor2backend(self.tensor_grad(tsr),'numpy') for tsr in [self.a,self.b,self.w]] 
         ls[-1] = ls[-1].flatten()
         return np.concatenate(ls)
-    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        ca,cb = config_to_ab(config) 
-        c = np.array(ca+cb)
+    def get_backend(self,c=None):
         if isinstance(self.a,torch.Tensor):
-            c = tensor2backend(c,backend='torch')
-            jnp = torch
+            if c is not None:
+                c = tensor2backend(c,backend='torch')
+            return torch,c
         else:
-            jnp = np
-        c = jnp.exp(jnp.dot(self.a,c)) * jnp.prod(2*jnp.cosh(jnp.matmul(c,self.w) + self.b))
+            return np,c
+    def log_amplitude(self,config,to_numpy=True):
+        ca,cb = config_to_ab(config) 
+        #c = np.array(ca+cb,dtype=float)
+        c = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=1).flatten()
+        jnp,c = self.get_backend(c=c) 
+        c = jnp.dot(self.a,c) + jnp.sum(jnp.log(jnp.cosh(jnp.matmul(c,self.w) + self.b)))
         if to_numpy:
             c = tensor2backend(c,'numpy') 
-        return c 
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
-        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
-        cx = self.unsigned_amplitude(self.config,to_numpy=False)
-        ex = dict()
-        for where in pairs:
-            ix1,ix2 = [self.flatten(site) for site in where]
-            i1,i2 = self.config[ix1],self.config[ix2]
-            if self.model.pair_valid(i1,i2): # term vanishes 
-                for spin in ('a','b'):
-                    i1_new,i2_new = pair_terms(i1,i2,spin)
-                    if i1_new is None:
-                        cx_new = 0 
-                    else:
-                        config_new = list(self.config)
-                        config_new[ix1] = i1_new
-                        config_new[ix2] = i2_new 
-                        cx_new = self.unsigned_amplitude(config_new,to_numpy=False) 
-                    ex[where,spin] = cx_new        
-            else:
-                for spin in ('a','b'):
-                    ex[where,spin] = 0
-        return ex,cx
+        return c,0 
+class FNN(NN):
+    def __init__(self,w=None,b=None,nl=None,backend='numpy'):
+        self.is_tn = False
+        self.backend = backend
+        self.spin = None
+        self.vx = None
+        if w is None:
+            self.nl = nl
+            return
+        self.w = w
+        self.b = b
+        self.nl = len(w)
+        self.init_block_dict() 
+    def init_block_dict(self,w=None,b=None):
+        if w is None:
+            w,b = self.w,self.b
+        else:
+            self.w,self.b = w,b
+        self.block_dict = []
+        start = 0
+        for i in range(self.nl):
+            tsrs = [w[i]] if i==self.nl-1 else [w[i],b[i]]
+            for tsr in tsrs:
+                stop = start + tsr.size
+                self.block_dict.append((start,stop))
+                start = stop
+        self.nparam = stop
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+        ar.set_backend(tsr)
+        self.w = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) for tsr in self.w]
+        self.b = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) for tsr in self.b]
+    def get_x(self):
+        ls = []
+        for i in range(self.nl):
+            ls.append(tensor2backend(self.w[i],'numpy').flatten())
+            if i<self.nl-1: 
+                ls.append(tensor2backend(self.b[i],'numpy'))
+        return np.concatenate(ls)
+    def load_from_disc(self,fname):
+        f = h5py.File(fname,'r')
+        self.w = []
+        self.b = []
+        for i in range(self.nl):
+            self.w.append(f[f'w{i}'][:])
+            if i<self.nl-1:
+                self.b.append(f[f'b{i}'][:])
+        f.close()
+        return self.w,self.b
+    def save_to_disc(self,w,b,fname,root=0):
+        if RANK!=root:
+            return
+        f = h5py.File(fname+'.hdf5','w')
+        for i in range(self.nl):
+            f.create_dataset(f'w{i}',data=w[i]) 
+            if i<self.nl-1:
+                f.create_dataset(f'b{i}',data=b[i]) 
+        f.close()
+    def update(self,x,fname=None,root=0):
+        for i in range(self.nl):
+            start,stop = self.block_dict[2*i]
+            size = stop-start
+            xi,x = x[:size],x[size:]
+            self.w[i] = xi.reshape(self.w[i].shape)
+
+            if i<self.nl-1:
+                start,stop = self.block_dict[2*i+1]
+                size = stop-start
+                xi,x = x[:size],x[size:]
+                self.b[i] = xi
+        if fname is not None:
+            self.save_to_disc(self.w,self.b,fname,root=root) 
+        self.wfn2backend()
+    def extract_grad(self):
+        ls = []
+        for i in range(self.nl):
+            ls.append(tensor2backend(self.tensor_grad(self.w[i]),'numpy').flatten())
+            if i<self.nl-1: 
+                ls.append(tensor2backend(self.tensor_grad(self.b[i]),'numpy'))
+        return np.concatenate(ls)
+    def get_backend(self,c=None):
+        if isinstance(self.w[0],torch.Tensor):
+            if c is not None:
+                c = tensor2backend(c,backend='torch')
+            return torch,c
+        else:
+            return np,c
+    def log_amplitude(self,config,to_numpy=True):
+        c = np.array(config,dtype=float)
+        jnp,c = self.get_backend(c=c) 
+        for i in range(self.nl-1):
+            c = jnp.matmul(c,self.w[i])     
+            c = c + self.b[i]
+            #c = jnp.tanh(c)
+            c = jnp.log(jnp.cosh(c))
+        c = jnp.dot(c,self.w[-1])
+        #exit()
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+        return c,0
