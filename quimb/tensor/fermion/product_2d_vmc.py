@@ -237,12 +237,36 @@ class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
                 cx[ix] = cx_new
         return cx 
 class RBM2D(RBM,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,a=None,b=None,w=None,nv=None,nh=None,backend='numpy'):
+    def __init__(self,Lx,Ly,nv,nh,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(a=a,b=b,w=w,nv=nv,nh=nh,backend=backend)
+        super().__init__(nv,nh,**kwargs)
 class FNN2D(FNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,w=None,b=None,nl=None,backend='numpy'):
+    def __init__(self,Lx,Ly,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(w=w,b=b,nl=nl,backend=backend)
+        super().__init__(nl,**kwargs)
+class CNN2D(FNN2D):
+    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
+        self.kx,self.ky = kx,ky 
+        #self.blks = []
+        #for i,j in itertools.product(range(Lx-kx),range(Ly-ky)):
+        #    self.blks.append(list(itertools.product(range(i,i+kx),range(j,j+ky))))
+        #self.get_site_map(self.blks)
+        super().__init__(Lx,Ly,nl,**kwargs) 
+    def log_amplitude(self,config,to_numpy=True):
+        c = np.array(config,dtype=float).reshape((self.Lx,self.Ly)) 
+        jnp,c = self.get_backend(c=c)
+        for i in range(self.nl-1):
+            c = self.convolve(c,self.w[i],jnp) + self.b[i]
+            c = jnp.log(jnp.cosh(c)) 
+        c = jnp.dot(c,self.w[-1])
+        #exit()
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+        return c,0
+    def convolve(self,x,w,jnp):
+        v = jnp.zeros((self.Lx,self.Ly),requires_grad=True) 
+        for i,j in itertools.product(range(self.Lx-kx),range(self.Ly-ky)):
+            v[i:i+kx,j:j+ky] += jnp.matmul(w[i,j,:,:],x[i:i+kx,j:j+ky].flatten()).reshape((kx,ky))
+        return v 

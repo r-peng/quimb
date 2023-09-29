@@ -295,22 +295,20 @@ class NN(AmplitudeFactory):
         #exit()
         self.wfn2backend()
         return self.vx 
+def to_spin(config,order='F'):
+    ca,cb = config_to_ab(config) 
+    return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=order)
 class RBM(NN):
-    def __init__(self,a=None,b=None,w=None,nv=None,nh=None,backend='numpy'):
+    def __init__(self,nv,nh,order='F',backend='numpy'):
+        self.nv,self.nh = nv,nh
+        self.nparam = nv + nh + nv * nh 
+        self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
+
         self.is_tn = False
         self.backend = backend
         self.spin = None
+        self.order = order
         self.vx = None
-        if a is None:
-            self.nv,self.nh = nv,nh
-        else:
-            self.a = a 
-            self.b = b
-            self.w = w
-            self.nv = len(a)
-            self.nh = len(b)
-        self.nparam = self.nv + self.nh + self.nh * self.nv 
-        self.block_dict = [(0,self.nv),(self.nv,self.nv+self.nh),(self.nv+self.nh,self.nparam)]
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
@@ -356,32 +354,24 @@ class RBM(NN):
         else:
             return np,c
     def log_amplitude(self,config,to_numpy=True):
-        ca,cb = config_to_ab(config) 
-        #c = np.array(ca+cb,dtype=float)
-        c = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=1).flatten()
+        c = to_spin(config,order=self.order)
         jnp,c = self.get_backend(c=c) 
         c = jnp.dot(self.a,c) + jnp.sum(jnp.log(jnp.cosh(jnp.matmul(c,self.w) + self.b)))
         if to_numpy:
             c = tensor2backend(c,'numpy') 
         return c,0 
 class FNN(NN):
-    def __init__(self,w=None,b=None,nl=None,backend='numpy'):
+    def __init__(self,nl,to_spin=False,order='F',backend='numpy'):
+        self.nl = nl
+
         self.is_tn = False
         self.backend = backend
         self.spin = None
+        self.to_spin = to_spin
+        self.order = order
         self.vx = None
-        if w is None:
-            self.nl = nl
-            return
-        self.w = w
-        self.b = b
-        self.nl = len(w)
-        self.init_block_dict() 
-    def init_block_dict(self,w=None,b=None):
-        if w is None:
-            w,b = self.w,self.b
-        else:
-            self.w,self.b = w,b
+    def get_block_dict(self,w,b):
+        self.w,self.b = w,b
         self.block_dict = []
         start = 0
         for i in range(self.nl):
@@ -453,11 +443,10 @@ class FNN(NN):
         else:
             return np,c
     def log_amplitude(self,config,to_numpy=True):
-        c = np.array(config,dtype=float)
+        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
         jnp,c = self.get_backend(c=c) 
         for i in range(self.nl-1):
-            c = jnp.matmul(c,self.w[i])     
-            c = c + self.b[i]
+            c = jnp.matmul(c,self.w[i]) + self.b[i]    
             #c = jnp.tanh(c)
             c = jnp.log(jnp.cosh(c))
         c = jnp.dot(c,self.w[-1])
@@ -465,3 +454,4 @@ class FNN(NN):
         if to_numpy:
             c = tensor2backend(c,'numpy') 
         return c,0
+        

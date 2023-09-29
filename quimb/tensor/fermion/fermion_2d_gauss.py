@@ -5,7 +5,7 @@ from pyblock3.algebra.fermion_ops import max_entangled_state,gauss
 from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
 from .fermion_2d import FPEPS
 from .fermion_vmc import get_data_map
-from .fermion_product_vmc import config_to_ab
+from .product_vmc import config_to_ab
 np.set_printoptions(suppress=True,linewidth=1000)
 #def inv_back(A,C,dC):
 #    # C = inv(A)
