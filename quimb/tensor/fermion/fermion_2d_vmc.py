@@ -432,7 +432,10 @@ def create_particle(fpeps,site,spin,spinless=False,data_map=None):
     if spinless:
         cre = data_map['cre'].copy()
     else:
-        cre = data_map[f'cre_{spin}'].copy()
+        if spin=='sum':
+            cre = data_map[f'cre_a'] + data_map['cre_b']
+        else:
+            cre = data_map[f'cre_{spin}'].copy()
     T = fpeps[fpeps.site_tag(*site)]
     trans_order = list(range(1,T.ndim))+[0] 
     data = np.tensordot(cre, T.data, axes=((1,), (-1,))).transpose(trans_order)
@@ -457,3 +460,12 @@ def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,spinless=False):
                 fpeps = create_particle(fpeps,site,'b',spinless=spinless,data_map=data_map)
                 fpeps = create_particle(fpeps,site,'a',spinless=spinless,data_map=data_map)
     return fpeps
+def get_hole_doped_product_state(Lx,Ly,holes,symmetry='u1',flat=True):
+    fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,spinless=False)
+    data_map = get_data_map(symmetry=_SYMMETRY,flat=_FLAT,spinless=False)
+    for site in itertools.product(range(Lx),range(Ly)):
+        if site in holes:
+            continue
+        fpeps = create_particle(fpeps,site,'sum',spinless=False,data_map=data_map)
+    return fpeps 
+         

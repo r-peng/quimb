@@ -631,3 +631,53 @@ class UnrestrictedGaussianFPEPS(SpinlessGaussianFPEPS):
         return tn
     def init(self,config,eps=1e-2):
         return np.concatenate([psi.init(config_ix,eps=eps) for psi,config_ix in zip(self.psi,config)])
+class GaussianFPEPS(SpinlessGaussianFPEPS):
+    def __init__(self,Lx,Ly,M,Ne,blks=None,occ_b=None,fix_bond=False):
+        self.Lx,self.Ly = Lx,Ly
+        self.Ne = Ne
+        self.P = 2 
+        self.M = M
+        self.occ_b = self.M if occ_b is None else occ_b 
+        self.fix_bond = fix_bond
+
+        self.nsite = Lx * Ly
+        self.Ptot = self.P * self.nsite
+        self.nbond = 2 * self.nsite - self.Lx - self.Ly
+        self.occ_v = self.occ_b * self.nbond
+        self.Mtot = self.M * self.nbond * 2 
+        print('occ_v=',self.occ_v)
+        print('Mtot=',self.Mtot)
+
+        if blks is None:
+            blks = [list(itertools.product(range(self.Lx),range(self.Ly)))]
+        self.get_site_map(blks)
+        self.get_Cin()
+
+        self.config = None
+        self.nit = 0
+        self.terminate = False
+        self.fname = None
+    def set_ham(self,h1,eri,exact,thresh=1e-5):
+        assert h1.shape[0] == self.P * self.nsite # check size 
+        assert np.linalg.norm(h1-h1.T)<1e-6 # check hermitian
+        self.exact = exact
+        self.thresh = thresh
+        if isinstance(eri,np.ndarray):
+            # eri = <12|12>
+            assert np.linalg.norm(eri-eri.transpose(1,0,3,2))<1e-6 # check symmetry 
+            assert np.linalg.norm(eri-eri.transpose(2,3,0,1))<1e-6 # check hermitian
+            eri_aa = eri - eri.transpose(0,1,3,2) 
+            eri = torch.tensor(eri,requires_grad=False) 
+            eri_aa = torch.tensor(eri_aa,requires_grad=False) 
+            def _eri(rho_a,rho_b):
+                return .5 * torch.einsum('pqrs,pr,qs->',eri_aa,rho_a,rho_a) \
+                     + .5 * torch.einsum('pqrs,pr,qs->',eri_aa,rho_b,rho_b) \
+                     +      torch.einsum('pqrs,pr,qs->',eri_ab,rho_a,rho_b)
+        elif callable(eri):
+            _eri = eri
+        else:
+            raise NotImplementedError    
+        h1 = torch.tensor(h1,requires_grad=False)
+        def energy(rho_a,rho_b):
+            return torch.sum((rho_a + rho_b) * h1) + _eri(rho_a,rho_b)
+        self.energy = energy
