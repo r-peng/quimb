@@ -434,6 +434,7 @@ def create_particle(fpeps,site,spin,spinless=False,data_map=None):
     else:
         if spin=='sum':
             cre = data_map[f'cre_a'] + data_map['cre_b']
+            cre.shape = (4,4)
         else:
             cre = data_map[f'cre_{spin}'].copy()
     T = fpeps[fpeps.site_tag(*site)]

@@ -169,9 +169,7 @@ class TNVMC: # stochastic sampling
             self.xi = kwargs.get('xi',0.5)
 
         # to be set before run
-        self.progbar = False
         self.tmpdir = None
-        self.config = None
         self.batchsize = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
@@ -179,7 +177,11 @@ class TNVMC: # stochastic sampling
         self.cond1 = None
         self.cond2 = None
         self.check = None 
-        self.debug = False
+
+        self.save_wfn = True
+        self.progbar = False
+        self.save_local = False
+        self.save_grad_hess = False
 
         self.free_quantities()
     def free_quantities(self):
@@ -201,7 +203,7 @@ class TNVMC: # stochastic sampling
             norm = np.linalg.norm(x)
             x *= self.init_norm / norm    
         return x
-    def run(self,start,stop,tmpdir=None):
+    def run(self,start,stop):
         self.Eold = 0.
         for step in range(start,stop):
             self.step = step
@@ -210,11 +212,18 @@ class TNVMC: # stochastic sampling
             x = self.transform_gradients()
             self.free_quantities()
             COMM.Bcast(x,root=0) 
-            fname = None if tmpdir is None else tmpdir+f'psi{step+1}' 
+            fname = self.tmpdir+f'psi{step+1}' if self.save_wfn else None
             psi = self.sampler.af.update(x,fname=fname,root=0)
-    def sample(self,samplesize=None,compute_v=True,compute_Hv=None):
+    def sample(self,samplesize=None,save_local=None,compute_v=True,compute_Hv=None,save_config=True):
         self.sampler.preprocess()
+
+        if self.exact_sampling:
+            samplesize = len(self.sampler.nonzeros)
+            save_config = False
+        else:
+            samplesize = self.batchsize if samplesize is None else samplesize
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
+        save_local = self.save_local if save_local is None else save_local 
 
         self.buf = np.zeros(4)
         self.terminate = np.array([0])
@@ -229,18 +238,13 @@ class TNVMC: # stochastic sampling
             self.Hv = [] 
 
         if RANK==0:
-            self._ctr(samplesize=samplesize)
+            self._ctr(samplesize,save_config)
         else:
             if self.exact_sampling:
-                self._sample_exact(compute_v=compute_v,compute_Hv=compute_Hv)
+                self._sample_exact(compute_v,compute_Hv)
             else:
-                self._sample_stochastic(compute_v=compute_v,compute_Hv=compute_Hv)
-    def _ctr(self,samplesize=None):
-        if self.exact_sampling:
-            samplesize = len(self.sampler.nonzeros)
-        else:
-            samplesize = self.batchsize if samplesize is None else samplesize
-
+                self._sample_stochastic(compute_v,compute_Hv,save_config,save_local)
+    def _ctr(self,samplesize,save_config):
         if self.progbar:
             pg = Progbar(total=samplesize)
 
@@ -267,11 +271,18 @@ class TNVMC: # stochastic sampling
                     COMM.Send(self.terminate,dest=worker,tag=1)
             else:
                 COMM.Send(self.terminate,dest=rank,tag=1)
+        if save_config:
+            ls = []
+            for worker in range(1,SIZE):
+                config = np.zeros(self.nsite,dtype=int)
+                COMM.Recv(config,source=worker,tag=2)
+                ls.append(config)
+            np.save(self.tmpdir+f'config{self.step}.npy',np.array(ls))
         print('\tsample time=',time.time()-t0)
         print('\tcontraction err=',err_mean / len(self.e),err_max)
         self.e = np.array(self.e)
         self.f = np.array(self.f)
-    def _sample_stochastic(self,compute_v=True,compute_Hv=False):
+    def _sample_stochastic(self,compute_v,compute_Hv,save_config,save_local):
         self.buf[1] = 1.
         c = []
         e = []
@@ -298,19 +309,22 @@ class TNVMC: # stochastic sampling
             if compute_Hv:
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
-            if self.debug:
+            if save_local:
                 c.append(cx)
                 e.append(ex)
                 configs.append(list(config))
 
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.terminate,source=0,tag=1)
-        self.sampler.config = self.config
+        #self.sampler.config = self.config
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:
             self.Hv = np.array(self.Hv)
-        if self.debug:
+        if save_config:
+            config = np.array(config,dtype=int)
+            COMM.Send(config,dest=0,tag=2)
+        if save_local:
             f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
             if compute_Hv:
                 f.create_dataset('Hv',data=self.Hv)
@@ -320,7 +334,7 @@ class TNVMC: # stochastic sampling
             f.create_dataset('c',data=np.array(c))
             f.create_dataset('config',data=np.array(configs))
             f.close()
-    def _sample_exact(self,compute_v=True,compute_Hv=None): 
+    def _sample_exact(self,compute_v,compute_Hv): 
         # assumes exact contraction
         p = self.sampler.p
         all_configs = self.sampler.all_configs
@@ -574,7 +588,7 @@ class TNVMC: # stochastic sampling
                 S = self.S[ix] + self.cond1 * np.eye(stop-start)
                 self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
         print('\tSR solver time=',time.time()-t0)
-        if self.tmpdir is not None:
+        if self.save_grad_hess:
             if self.solve_full:
                 S = self.S
             else:
@@ -617,7 +631,7 @@ class TNVMC: # stochastic sampling
             w = min(np.array(w).real)
             dE = np.sum(dE)
             print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
-        if self.tmpdir is not None:
+        if self.save_grad_hess:
             if self.solve_full:
                 H = self.H
                 S = self.S
@@ -812,7 +826,7 @@ class TNVMC: # stochastic sampling
             w = w.sum()
         print(f'\tLIN solver time={time.time()-t0},inorm={inorm},eigenvalue={w},scale1={v0}')
         self._scale_eigenvector()
-        if self.tmpdir is not None:
+        if self.save_grad_hess:
             Hi0 = self.g
             H0j = self.Hvmean - self.E * self.vmean
             if self.solve_full:
@@ -874,10 +888,9 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             E,Eerr = self.E,self.Eerr
         self.free_quantities()
-        debug = self.debug
-        self.debug = False
-        self.sample(samplesize=self.batchsize_small,compute_v=False,compute_Hv=False)
-        self.debug = debug
+        config = self.sampler.config
+        self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+        self.sampler.config = config
         self.extract_energy()
         if RANK>0:
             return True 
@@ -1579,6 +1592,9 @@ class AmplitudeFactory:
             Hvx = None
         self.vx = None
         self.cx = None
+        if len(vx)!=19782:
+            print(RANK,len(vx))
+            exit()
         return cx,ex,vx,Hvx,err 
     def batch_quantities_deterministic(self,batch_key,compute_Hv):
         if compute_Hv:
