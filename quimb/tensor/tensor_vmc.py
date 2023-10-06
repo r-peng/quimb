@@ -1592,9 +1592,6 @@ class AmplitudeFactory:
             Hvx = None
         self.vx = None
         self.cx = None
-        if len(vx)!=19782:
-            print(RANK,len(vx))
-            exit()
         return cx,ex,vx,Hvx,err 
     def batch_quantities_deterministic(self,batch_key,compute_Hv):
         if compute_Hv:
