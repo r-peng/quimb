@@ -13,10 +13,10 @@ def set_options(pbc=False,deterministic=False,symmetry='u1',flat=True):
     this._DETERMINISTIC = deterministic
     this._SYMMETRY = symmetry
     this._FLAT = flat 
-    from ..tensor_2d_vmc import set_options
+    from ..tensor_2d_vmc_ import set_options
     set_options(pbc=pbc,deterministic=deterministic)
 
-from ..tensor_2d_vmc import (
+from ..tensor_2d_vmc_ import (
     flatten,flat2site,
     AmplitudeFactory2D,
     Model2D,
@@ -128,7 +128,7 @@ class Hubbard(FermionModel2D):
                 self.gate = {None:((h1[0]+h1[1]),order)}
         self.spinless = spinless
 
-        self.pairs = self.pairs_nn()
+        #self.pairs = self.pairs_nn()
         if _DETERMINISTIC:
             self.batched_pairs = dict()
             self.batch_deterministic_nnh() 

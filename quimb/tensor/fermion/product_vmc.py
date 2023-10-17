@@ -254,17 +254,46 @@ class TNJastrow(AmplitudeFactory):
 import autoray as ar
 import torch
 import h5py
+def to_spin(config,order='F'):
+    ca,cb = config_to_ab(config) 
+    return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=order)
 class NN(AmplitudeFactory):
-    def unsigned_amplitude(self,config,cx=None,cache_top=None,cache_bot=None,to_numpy=True):
-        if cx is None:
-            cx,_ = self.log_amplitude(config,to_numpy=to_numpy) 
-        jnp,_ = self.get_backend()
-        return jnp.exp(cx)
+    def __init__(self,to_spin=True,order='F',backend='numpy',log_amp=True):
+        self.backend = backend
+        self.order = order
+        self.log_amp = log_amp # if output is amplitude or log amplitude 
+        self.to_spin = to_spin
+
+        self.is_tn = False
+        self.spin = None
+        self.vx = None
+    def log_amplitude(self,config,to_numpy=True):
+        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
+        jnp,c = self.get_backend(c=c) 
+        c,s = self.forward(c,jnp),1
+        if not self.log_amp: # NN outputs amplitude
+            c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+            s = tensor2backend(s,'numpy') 
+        return c,s
+    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+        c = to_spin(config,order=self.order)
+        jnp,c = self.get_backend(c=c) 
+        c = self.forward(c,jnp)
+        if self.log_amp: # NN outputs log amplitude
+            c = jnp.exp(c)
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+        return c
     def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
         jnp = torch if new_cache else np
-        logcx,_ = self.log_amplitude(self.config,to_numpy=False)
-        cx = jnp.exp(logcx) 
+        if self.log_amp:
+            logcx,sx = self.log_amplitude(self.config,to_numpy=False)
+            cx = jnp.exp(logcx) * sx
+        else:
+            cx = self.unsigned_amplitude(self.config,to_numpy=False)
         ex = dict()
         for where in pairs:
             ix1,ix2 = [self.flatten(site) for site in where]
@@ -278,9 +307,13 @@ class NN(AmplitudeFactory):
                         config_new = list(self.config)
                         config_new[ix1] = i1_new
                         config_new[ix2] = i2_new 
-                        logcx_new,_ = self.log_amplitude(config_new,to_numpy=False) 
-                        cx_new = jnp.exp(logcx_new)
-                        ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) 
+                        if self.log_amp:
+                            logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
+                            cx_new = jnp.exp(logcx_new) * sx_new
+                            ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) * sx_new / sx 
+                        else:
+                            cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
+                            ex[where,spin] = cx_new, cx_new/cx 
             else:
                 for spin in ('a','b'):
                     ex[where,spin] = 0,0
@@ -295,20 +328,12 @@ class NN(AmplitudeFactory):
         #exit()
         self.wfn2backend()
         return self.vx 
-def to_spin(config,order='F'):
-    ca,cb = config_to_ab(config) 
-    return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=order)
 class RBM(NN):
-    def __init__(self,nv,nh,order='F',backend='numpy'):
+    def __init__(self,nv,nh,**kwargs):
         self.nv,self.nh = nv,nh
         self.nparam = nv + nh + nv * nh 
         self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
-
-        self.is_tn = False
-        self.backend = backend
-        self.spin = None
-        self.order = order
-        self.vx = None
+        super().__init__(**kwargs)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
@@ -353,23 +378,15 @@ class RBM(NN):
             return torch,c
         else:
             return np,c
-    def log_amplitude(self,config,to_numpy=True):
-        c = to_spin(config,order=self.order)
-        jnp,c = self.get_backend(c=c) 
+    def forward(self,c,jnp): # NN output
         c = jnp.dot(self.a,c) + jnp.sum(jnp.log(jnp.cosh(jnp.matmul(c,self.w) + self.b)))
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-        return c,0 
+        return c
 class FNN(NN):
-    def __init__(self,nl,to_spin=False,order='F',backend='numpy'):
+    def __init__(self,nl,afn='logcosh',**kwargs):
         self.nl = nl
-
-        self.is_tn = False
-        self.backend = backend
-        self.spin = None
-        self.to_spin = to_spin
-        self.order = order
-        self.vx = None
+        assert afn in ('logcosh','logistic','tanh','softplus','silu')
+        self.afn = afn 
+        super().__init__(**kwargs)
     def get_block_dict(self,w,b):
         self.w,self.b = w,b
         self.block_dict = []
@@ -439,19 +456,78 @@ class FNN(NN):
         if isinstance(self.w[0],torch.Tensor):
             if c is not None:
                 c = tensor2backend(c,backend='torch')
-            return torch,c
+            jnp = torch
         else:
-            return np,c
-    def log_amplitude(self,config,to_numpy=True):
-        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
-        jnp,c = self.get_backend(c=c) 
+            jnp = np
+        if self.afn=='logcosh':
+            def _afn(x):
+                return jnp.log(jnp.cosh(x))
+        elif self.afn=='logistic':
+            def _afn(x):
+                return 1./(1.+jnp.exp(-x))    
+        elif self.afn=='tanh':
+            _afn = jnp.tahn
+        elif self.afn=='softplus':
+            def _afn(x):
+                return jnp.log(1.+jnp.exp(x))
+        elif self.afn=='silu':
+            def _afn(x):
+                return x/(1.+jnp.exp(-x))
+        else:
+            raise NotImplementedError
+        self._afn = _afn 
+        return jnp,c
+    def forward(self,c,jnp):
         for i in range(self.nl-1):
             c = jnp.matmul(c,self.w[i]) + self.b[i]    
-            #c = jnp.tanh(c)
-            c = jnp.log(jnp.cosh(c))
-        c = jnp.dot(c,self.w[-1])
-        #exit()
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-        return c,0
-        
+            c = self._afn(c)
+        return jnp.dot(c,self.w[-1])
+class SIGN(NN):
+    def __init__(self,n,afn='tanh',**kwargs):
+        assert afn in ('tanh','cos','sin') 
+        self.afn = afn
+        self.nparam = n 
+        self.block_dict = [(0,n)] 
+        super().__init__(log_amp=False,**kwargs)
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+        ar.set_backend(tsr)
+        self.w = tensor2backend(self.w,backend=backend,requires_grad=requires_grad)
+    def get_x(self):
+        return tensor2backend(self.w,'numpy')
+    def load_from_disc(self,fname):
+        self.w = np.load(fname)
+        return self.w
+    def save_to_disc(self,w,fname,root=0):
+        if RANK!=root:
+            return
+        np.save(fname+'.npy',w)
+    def update(self,x,fname=None,root=0):
+        self.w = x
+        if fname is not None:
+            self.save_to_disc(self.w,fname,root=root) 
+        self.wfn2backend()
+    def extract_grad(self):
+        return tensor2backend(self.tensor_grad(self.w),'numpy')
+    def get_backend(self,c=None):
+        if isinstance(self.w,torch.Tensor):
+            if c is not None:
+                c = tensor2backend(c,backend='torch')
+            jnp = torch
+        else:
+            jnp = np
+        if self.afn=='tahn':
+            _afn = jnp.tahn
+        elif self.afn=='cos':
+            def _afn(x):
+                return jnp.cos(np.pi*x)    
+        elif self.afn=='sin':
+            def _afn(x):
+                return jnp.sin(np.pi*x)
+        else:
+            raise NotImplementedError
+        self._afn = _afn 
+        return jnp,c
+    def forward(self,c,jnp):
+        return self._afn(jnp.dot(c,self.w))

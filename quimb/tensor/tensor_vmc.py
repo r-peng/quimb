@@ -178,7 +178,6 @@ class TNVMC: # stochastic sampling
         self.cond2 = None
         self.check = None 
 
-        self.save_wfn = True
         self.progbar = False
         self.save_local = False
         self.save_grad_hess = False
@@ -203,7 +202,7 @@ class TNVMC: # stochastic sampling
             norm = np.linalg.norm(x)
             x *= self.init_norm / norm    
         return x
-    def run(self,start,stop):
+    def run(self,start,stop,save_wfn=True):
         self.Eold = 0.
         for step in range(start,stop):
             self.step = step
@@ -212,7 +211,7 @@ class TNVMC: # stochastic sampling
             x = self.transform_gradients()
             self.free_quantities()
             COMM.Bcast(x,root=0) 
-            fname = self.tmpdir+f'psi{step+1}' if self.save_wfn else None
+            fname = self.tmpdir+f'psi{step+1}' if save_wfn else None
             psi = self.sampler.af.update(x,fname=fname,root=0)
     def sample(self,samplesize=None,save_local=None,compute_v=True,compute_Hv=None,save_config=True):
         self.sampler.preprocess()
@@ -1148,8 +1147,8 @@ class DenseSampler:
             config = self.af.parse_config(config)
             plocal.append(self.af.prob(config))
         plocal = np.array(plocal)
-        #print(plocal)
-        #exit()
+        print(RANK,plocal)
+        exit()
          
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
         nonzeros = []
@@ -1511,6 +1510,8 @@ class AmplitudeFactory:
         self.wfn2backend()
         return cx,vx
     def get_grad_from_plq(self,plq):
+        if plq is None:
+            return 
         for plq_key,tn in plq.items():
             cij = self.cx[plq_key]
             sites = self.plq_sites(plq_key)
@@ -1574,14 +1575,22 @@ class AmplitudeFactory:
     def compute_local_quantities_from_plq(self,compute_v,compute_Hv):
         ex,Hvx = 0.,0.
         self.cx,self.vx = dict(),dict()
+        if self.pbc:
+            if compute_Hv:
+                cx,vx = self.get_grad_deterministic(self.config)
+            else:
+                cx = self.unsigned_amplitude(self.config) * self.config_sign(self.config)
+                vx = None
         for batch_key in self.model.batched_pairs:
-            ex_,Hvx_ = self.batch_quantities_from_plq(batch_key,compute_v,compute_Hv)  
+            if batch_key=='deterministic':
+                ex_,Hvx_ = self.batch_quantities_deterministic(batch_key,compute_Hv)
+                ex_ /= cx
+            else:
+                ex_,Hvx_ = self.batch_quantities_from_plq(batch_key,compute_v,compute_Hv)  
             ex += ex_
             Hvx += Hvx_
-        if compute_v:
-            vx = self.dict2vec(self.vx)
-        else:
-            vx = None
+        if not self.pbc:
+            vx = self.dict2vec(self.vx) if compute_v else None
         cx,err = contraction_error(self.cx) 
 
         eu = self.model.compute_local_energy_eigen(self.config)
@@ -1626,10 +1635,9 @@ class AmplitudeFactory:
         return cx,ex,vx,Hvx,0. 
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         self.config = config
-        if self.deterministic:
-            return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
-        else:
-            return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
+        fxn = self.compute_local_quantities_deterministic if self.deterministic else\
+              self.compute_local_quantities_from_plq
+        return fxn(compute_v,compute_Hv)
 class Model:
     def gate2backend(self,backend):
         self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}

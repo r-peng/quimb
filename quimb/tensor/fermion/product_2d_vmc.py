@@ -18,7 +18,7 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False):
 
 from .product_vmc import (
     TNJastrow,
-    RBM,FNN,
+    RBM,FNN,SIGN,
     ProductAmplitudeFactory,
 )
 #class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
@@ -215,7 +215,7 @@ def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
-from ..tensor_2d_vmc import AmplitudeFactory2D 
+from ..tensor_2d_vmc_ import AmplitudeFactory2D 
 class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
     def pair_energy_deterministic(self,config,site1,site2,model,cache_top=None,cache_bot=None):
         ix1,ix2 = model.flatten(site1),model.flatten(site2)
@@ -246,27 +246,32 @@ class FNN2D(FNN,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nl,**kwargs)
-class CNN2D(FNN2D):
-    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
-        self.kx,self.ky = kx,ky 
-        #self.blks = []
-        #for i,j in itertools.product(range(Lx-kx),range(Ly-ky)):
-        #    self.blks.append(list(itertools.product(range(i,i+kx),range(j,j+ky))))
-        #self.get_site_map(self.blks)
-        super().__init__(Lx,Ly,nl,**kwargs) 
-    def log_amplitude(self,config,to_numpy=True):
-        c = np.array(config,dtype=float).reshape((self.Lx,self.Ly)) 
-        jnp,c = self.get_backend(c=c)
-        for i in range(self.nl-1):
-            c = self.convolve(c,self.w[i],jnp) + self.b[i]
-            c = jnp.log(jnp.cosh(c)) 
-        c = jnp.dot(c,self.w[-1])
-        #exit()
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-        return c,0
-    def convolve(self,x,w,jnp):
-        v = jnp.zeros((self.Lx,self.Ly),requires_grad=True) 
-        for i,j in itertools.product(range(self.Lx-kx),range(self.Ly-ky)):
-            v[i:i+kx,j:j+ky] += jnp.matmul(w[i,j,:,:],x[i:i+kx,j:j+ky].flatten()).reshape((kx,ky))
-        return v 
+class SIGN2D(SIGN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(Lx*Ly,**kwargs)
+#class CNN2D(FNN2D):
+#    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
+#        self.kx,self.ky = kx,ky 
+#        #self.blks = []
+#        #for i,j in itertools.product(range(Lx-kx),range(Ly-ky)):
+#        #    self.blks.append(list(itertools.product(range(i,i+kx),range(j,j+ky))))
+#        #self.get_site_map(self.blks)
+#        super().__init__(Lx,Ly,nl,**kwargs) 
+#    def log_amplitude(self,config,to_numpy=True):
+#        c = np.array(config,dtype=float).reshape((self.Lx,self.Ly)) 
+#        jnp,c = self.get_backend(c=c)
+#        for i in range(self.nl-1):
+#            c = self.convolve(c,self.w[i],jnp) + self.b[i]
+#            c = jnp.log(jnp.cosh(c)) 
+#        c = jnp.dot(c,self.w[-1])
+#        #exit()
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#        return c,0
+#    def convolve(self,x,w,jnp):
+#        v = jnp.zeros((self.Lx,self.Ly),requires_grad=True) 
+#        for i,j in itertools.product(range(self.Lx-kx),range(self.Ly-ky)):
+#            v[i:i+kx,j:j+ky] += jnp.matmul(w[i,j,:,:],x[i:i+kx,j:j+ky].flatten()).reshape((kx,ky))
+#        return v 
