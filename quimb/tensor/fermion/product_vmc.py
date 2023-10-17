@@ -278,7 +278,7 @@ class NN(AmplitudeFactory):
             s = tensor2backend(s,'numpy') 
         return c,s
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        c = to_spin(config,order=self.order)
+        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
         jnp,c = self.get_backend(c=c) 
         c = self.forward(c,jnp)
         if self.log_amp: # NN outputs log amplitude

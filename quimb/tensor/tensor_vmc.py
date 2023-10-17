@@ -1147,8 +1147,8 @@ class DenseSampler:
             config = self.af.parse_config(config)
             plocal.append(self.af.prob(config))
         plocal = np.array(plocal)
-        print(RANK,plocal)
-        exit()
+        #print(RANK,plocal)
+        #exit()
          
         COMM.Allgatherv(plocal,[ptotal,self.count,self.disp,MPI.DOUBLE])
         nonzeros = []
