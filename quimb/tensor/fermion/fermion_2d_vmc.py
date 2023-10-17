@@ -13,10 +13,10 @@ def set_options(pbc=False,deterministic=False,symmetry='u1',flat=True):
     this._DETERMINISTIC = deterministic
     this._SYMMETRY = symmetry
     this._FLAT = flat 
-    from ..tensor_2d_vmc_ import set_options
+    from ..tensor_2d_vmc import set_options
     set_options(pbc=pbc,deterministic=deterministic)
 
-from ..tensor_2d_vmc_ import (
+from ..tensor_2d_vmc import (
     flatten,flat2site,
     AmplitudeFactory2D,
     Model2D,

@@ -215,7 +215,7 @@ def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
             row.append(data)
         arrays.append(row)
     return PEPS(arrays)
-from ..tensor_2d_vmc_ import AmplitudeFactory2D 
+from ..tensor_2d_vmc import AmplitudeFactory2D 
 class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
     def pair_energy_deterministic(self,config,site1,site2,model,cache_top=None,cache_bot=None):
         ix1,ix2 = model.flatten(site1),model.flatten(site2)

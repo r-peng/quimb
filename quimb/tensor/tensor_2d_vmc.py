@@ -1,4 +1,4 @@
-import time,itertools
+import time,itertools,functools
 import numpy as np
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -360,10 +360,6 @@ class AmplitudeFactory2D(AmplitudeFactory):
         except AttributeError:
             tn = None
         return tn 
-    def _contract_3row(self,tn,imin,x_bsz,direction='row'):
-        for i in range(imin,imin+x_bsz):
-            tn = self._contract_boundary_single(tn,i,i-1,direction=direction) 
-        return safe_contract_(tn) 
     def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None,direction='row'):
         if direction=='row':
             Lx = self.Lx
@@ -402,12 +398,6 @@ class AmplitudeFactory2D(AmplitudeFactory):
         if to_numpy:
             cx = 0. if cx is None else tensor2backend(cx,'numpy')
         return cx  
-    def _new_prob_pbc(self,cols,sites,cis,imin,x_bsz):
-        cols_new = self.replace_sites(cols.copy(),sites,cis) 
-        cy = self._contract_3row(cols_new,imin,x_bsz)
-        if cy is None:
-            return cols_new,None
-        return cols_new,2*np.log(np.fabs(tensor2backend(cy,'numpy')))
 ##### hamiltonian methods #######
     def pair_energy_deterministic(self,site1,site2,cache_bot=None,cache_top=None):
         ix1,ix2 = [self.flatten(site) for site in (site1,site2)]
@@ -436,61 +426,72 @@ class AmplitudeFactory2D(AmplitudeFactory):
         return fxn(batch_key,new_cache=new_cache) 
     def batch_pair_energies_from_plq_obc(self,batch_key,new_cache=False):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        assert direction=='row'
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
-        self._get_all_benvs(self.config,1,cache=cache_bot,stop=bix+1,direction=direction)
-        self._get_all_benvs(self.config,-1,cache=cache_top,stop=tix-1,direction=direction)
+        self._get_all_benvs(self.config,1,cache=cache_bot,stop=bix+1)
+        self._get_all_benvs(self.config,-1,cache=cache_top,stop=tix-1)
 
         # form plqs
         plq = dict()
         for imin,imax,x_bsz,y_bsz in plq_types:
-            plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax,direction=direction))
+            plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
 
         # compute energy numerator 
         ex,cx = self.pair_energies_from_plq(plq,pairs)
         return ex,cx,plq
-    #def batch_pair_energies_from_plq_pbc(self,batch_key,new_cache=False):
-    #    bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
-    #    cache_bot = dict() if new_cache else None
-    #    cache_top = dict() if new_cache else None
-    #    self._get_all_benvs(self.config,1,cache=cache_bot,stop=bix+1,direction=direction)
-    #    self._get_all_benvs(self.config,-1,cache=cache_top,stop=tix-1,direction=direction)
+    def batch_pair_energies_from_plq_pbc(self,batch_key,new_cache=False):
+        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        if direction=='row':
+            psi = self.psi
+        else:
+            psi = self.psi.copy()
+            psi.reorder('col',inplace=True)
+        cache_bot = dict() if new_cache else None
+        cache_top = dict() if new_cache else None
+        self._get_all_benvs(self.config,1,psi=psi,cache=cache_bot,stop=bix+1,direction=direction)
+        self._get_all_benvs(self.config,-1,psi=psi,cache=cache_top,stop=tix-1,direction=direction)
 
-    #    # form 3row_tn
-    #    plq = dict()
-    #    for imin,imax,x_bsz,y_bsz in plq_types:
-    #        for i in range(imin,imax+1):
-    #            plq[i,x_bsz] = self.build_3row_tn(self.config,i,ix_bsz,psi=self.psi,cache_bot,cache_top-cache_top) 
+        # form 3row_tn
+        plq = dict()
+        for imin,imax,x_bsz,_ in plq_types:
+            for i in range(imin,imax+1):
+                plq[i,x_bsz] = self.build_3row_tn(self.config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top,direction=direction) 
 
-    #    ex,cx = dict(),dict()
-    #    sign = self.config_sign(self.config)
-    #    for where in pairs:
-    #        i = min([i for (i,_) in where])
-    #        x_bsz = abs(where[0][1]-where[1][1])
-    #        tn = plq.get((i,x_bsz),None)
-    #        if tn is None:
-    #            continue
-    #        # cij
-    #        cx[where] = self._contract_3row(tn.copy(),i,x_bsz,direction=direction) * sign,(i,x_bsz)
+        def _contract_3row(self,tn,imin,x_bsz):
+            for i in range(imin,imin+x_bsz):
+                tn = self._contract_boundary_single(tn,i,i-1,direction=direction) 
+            return safe_contract_(tn) 
 
-    #        # ex_ij
-    #        ix1,ix2 = [self.flatten(site) for site in where]
-    #        i1,i2 = self.config[ix1],self.config[ix2] 
-    #        if not self.model.pair_valid(i1,i2):
-    #            for tag in self.model.gate:
-    #                ex[where,tag] = 0,0
-    #            continue
-    #        coeff_comm = self.model.pair_coeff(*where) * self.intermediate_sign(self.config,ix1,ix2)
-    #        for i1_new,i2_new,coeff in self.model.pair_terms(i1,i2):
-    #            config_new = list(self.config)
-    #            config_new[ix1] = i1_new
-    #            config_new[ix2] = i2_new 
-    #            config_new = self.parse_config(tuple(config_new)) 
-    #            sign_new = self.config_sign(config_new)
-    #            eij = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
-    #            eij = _contract_3row(eij,i,x_bsz) * coeff * coeff_comm *  sign * sign_new 
-    #            ex[where,tag] = eij,eij/cij 
-    #    return ex,cx,None
+        ex,cx = dict(),dict()
+        sign = self.config_sign(self.config)
+        for where in pairs:
+            i = min([i for (i,_) in where])
+            x_bsz = abs(where[0][1]-where[1][1])
+            tn = plq.get((i,x_bsz),None)
+            if tn is None:
+                continue
+            # cij
+            cx[where] = _contract_3row(tn.copy(),i,x_bsz) * sign,(i,x_bsz)
+
+            # ex_ij
+            ix1,ix2 = [self.flatten(site) for site in where]
+            i1,i2 = self.config[ix1],self.config[ix2] 
+            if not self.model.pair_valid(i1,i2):
+                for tag in self.model.gate:
+                    ex[where,tag] = 0,0
+                continue
+            coeff_comm = self.model.pair_coeff(*where) * self.intermediate_sign(self.config,ix1,ix2)
+            for i1_new,i2_new,coeff in self.model.pair_terms(i1,i2):
+                config_new = list(self.config)
+                config_new[ix1] = i1_new
+                config_new[ix2] = i2_new 
+                config_new = self.parse_config(tuple(config_new)) 
+                sign_new = self.config_sign(config_new)
+                eij = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
+                eij = _contract_3row(eij,i,x_bsz) * coeff * coeff_comm *  sign * sign_new 
+                ex[where,tag] = eij,eij/cij 
+        return ex,cx,None
     def batch_pair_energies_deterministic(self,batch_key,new_cache=False):
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
@@ -514,43 +515,43 @@ class Model2D(Model):
         return flatten(i,j,self.Ly)
     def flat2site(self,ix):
         return flat2site(ix,self.Ly)
-    def pairs_nn(self,d=1):
-        ls = [] 
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            if j+d<self.Ly:
-                where = (i,j),(i,j+d)
-                ls.append(where)
-            else:
-                if _PBC:
-                    where = (i,(j+d)%self.Ly),(i,j)
-                    ls.append(where)
-            if i+d<self.Lx:
-                where = (i,j),(i+d,j)
-                ls.append(where)
-            else:
-                if _PBC:
-                    where = ((i+d)%self.Lx,j),(i,j)
-                    ls.append(where)
-        return ls
-    def pairs_diag(self):
-        ls = [] 
-        for i in range(self.Lx):
-            for j in range(self.Ly):
-                if i+1<self.Lx and j+1<self.Ly:
-                    where = (i,j),(i+1,j+1)
-                    ls.append(where)
-                    where = (i,j+1),(i+1,j)
-                    ls.append(where)
-                else:
-                    if _PBC:
-                        ix1,ix2 = self.flatten((i,j)),self.flatten(((i+1)%self.Lx,(j+1)%self.Ly))
-                        where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                        ls.append(where)
-                        
-                        ix1,ix2 = self.flatten((i,(j+1)%self.Ly)),self.flatten(((i+1)%self.Lx,j))
-                        where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
-                        ls.append(where)
-        return ls
+    #def pairs_nn(self,d=1):
+    #    ls = [] 
+    #    for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+    #        if j+d<self.Ly:
+    #            where = (i,j),(i,j+d)
+    #            ls.append(where)
+    #        else:
+    #            if _PBC:
+    #                where = (i,(j+d)%self.Ly),(i,j)
+    #                ls.append(where)
+    #        if i+d<self.Lx:
+    #            where = (i,j),(i+d,j)
+    #            ls.append(where)
+    #        else:
+    #            if _PBC:
+    #                where = ((i+d)%self.Lx,j),(i,j)
+    #                ls.append(where)
+    #    return ls
+    #def pairs_diag(self):
+    #    ls = [] 
+    #    for i in range(self.Lx):
+    #        for j in range(self.Ly):
+    #            if i+1<self.Lx and j+1<self.Ly:
+    #                where = (i,j),(i+1,j+1)
+    #                ls.append(where)
+    #                where = (i,j+1),(i+1,j)
+    #                ls.append(where)
+    #            else:
+    #                if _PBC:
+    #                    ix1,ix2 = self.flatten((i,j)),self.flatten(((i+1)%self.Lx,(j+1)%self.Ly))
+    #                    where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
+    #                    ls.append(where)
+    #                    
+    #                    ix1,ix2 = self.flatten((i,(j+1)%self.Ly)),self.flatten(((i+1)%self.Lx,j))
+    #                    where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
+    #                    ls.append(where)
+    #    return ls
     def batch_deterministic_nnh(self,d=1):
         for i in range(self.Lx):
             ls = self.batched_pairs.get((i,i),[])
@@ -558,10 +559,11 @@ class Model2D(Model):
                 if j+d<self.Ly:
                     where = (i,j),(i,j+d)
                     ls.append(where)
+                elif _PBC:
+                    where = (i,(j+d)%self.Ly),(i,j)
+                    ls.append(where)
                 else:
-                    if _PBC:
-                        where = (i,(j+d)%self.Ly),(i,j)
-                        ls.append(where)
+                    pass
             self.batched_pairs[i,i] = ls
     def batch_deterministic_nnv(self,d=1):
         for i in range(self.Lx-d):
@@ -604,40 +606,56 @@ class Model2D(Model):
             where = (0,j),(self.Lx-1,(j+1)%self.Ly)
             ls.append(where)
         self.batched_pairs['pbc'] = ls 
-    def batch_plq_nn(self,d=1):
+    def batch_plq_nn(self):
+        # OBC plqs
         self.batched_pairs = dict() 
-        batchsize = max(self.Lx // self.nbatch,d+1)
+        batchsize = max(self.Lx // self.nbatch,2)
+        pbc_terms = []
         for i in range(self.Lx):
             batch_idx = i // batchsize
             if batch_idx not in self.batched_pairs:
                 self.batched_pairs[batch_idx] = [],[] 
             rows,pairs = self.batched_pairs[batch_idx]
-            for ix in range(d+1):
-                if i+ix < self.Lx:
-                    rows.append(i+ix)
+            rows.append(i)
+            if i+1 < self.Lx:
+                rows.append(i+1)
             for j in range(self.Ly):
-                for ix in range(1,d+1):
-                    if j+ix<self.Ly:
-                        where = (i,j),(i,j+ix)
-                        pairs.append(where)
-                for ix in range(1,d+1):
-                    if i+ix<self.Lx:
-                        where = (i,j),(i+ix,j)
-                        pairs.append(where)
-        #self.pairs = []
+                if j+1<self.Ly:
+                    where = (i,j),(i,j+1)
+                    pairs.append(where)
+                elif _PBC:
+                    where = (i,(j+1)%self.Ly),(i,j)
+                    pairs.append(where)
+                else:
+                    pass 
+
+                if i+1<self.Lx:
+                    where = (i,j),(i+1,j)
+                    pairs.append(where)
+                elif _PBC:
+                    where = ((i+1)%self.Lx,j),(i,j)
+                    pbc_terms.append(where)
+                else:
+                    pass
         for batch_idx in self.batched_pairs:
             rows,pairs = self.batched_pairs[batch_idx]
             imin,imax = min(rows),max(rows)
             bix,tix = max(0,imax-1),min(imin+1,self.Lx-1) # bot_ix,top_ix 
-            plq_types = (imin,imax,1,d+1), (imin,imax-d,d+1,1),# i0_min,i0_max,x_bsz,y_bsz
+            plq_types = [(imin,imax,1,2), (imin,imax-1,2,1)] # i0_min,i0_max,x_bsz,y_bsz
             self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' 
-            self.pairs += pairs
-        #self.plq_sz = (1,d+1),(d+1,1)
-        if RANK==0:
-            print('nbatch=',len(self.batched_pairs))
+
+        if not _PBC:
+            if RANK==0:
+                print('nbatch=',len(self.batched_pairs))
+            return
+        # adding PBC terms
+        plq_types = (self.Ly-2,1,1,self.Lx),
+        self.batch_pairs['ver'] = self.Ly-2,1,plq_types,pbc_terms,'col' 
     def batch_plq_diag(self):
         self.batched_pairs = dict()
         batchsize = max(self.Lx // self.nbatch, 2)
+        pbc_ver = []
+        pbc_diag = []
         for i in range(self.Lx):
             batch_idx = i // batchsize
             if batch_idx not in self.batched_pairs:
@@ -650,14 +668,43 @@ class Model2D(Model):
                 if j+1<self.Ly: # NN
                     where = (i,j),(i,j+1)
                     pairs.append(where)
+                elif _PBC:
+                    where = (i,(j+1)%self.Ly),(i,j)
+                    pairs.append(where)
+                else:
+                    pass 
+
                 if i+1<self.Lx: # NN
                     where = (i,j),(i+1,j)
                     pairs.append(where)
+                elif _PBC:
+                    where = ((i+1)%self.Lx,j),(i,j)
+                    pbc_ver.append(where)
+                else:
+                    pass
+
                 if i+1<self.Lx and j+1<self.Ly: # diag
                     where = (i,j),(i+1,j+1)
                     pairs.append(where)
                     where = (i,j+1),(i+1,j)
                     pairs.append(where)
+                elif i+1<self.Ly and _PBC:
+                    where = (i,j),(i+1,(j+1)%self.Ly) 
+                    pairs.append(where)
+                    where = (i,(j+1)%self.Ly),(i+1,j)
+                    pairs.append(where)
+                elif j+1<self.Ly and _PBC:
+                    where = ((i+1)%self.Lx,j+1),(i,j)
+                    pbc_ver.append(where)
+                    where = ((i+1)%self.Lx,j),(i,j+1)
+                    pbc_ver.append(where)
+                elif _PBC:
+                    where = ((i+1)%self.Lx,(j+1)%self.Ly),(i,j) 
+                    pbc_diag.append(where)
+                    where = ((i+1)%self.Lx,j),(i,(j+1)%self.Ly)
+                    pbc_diag.append(where)
+                else:
+                    pass 
         for batch_idx in self.batched_pairs:
             rows,pairs = self.batched_pairs[batch_idx]
             imin,imax = min(rows),max(rows)
@@ -665,6 +712,14 @@ class Model2D(Model):
             bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
             self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' # bot_ix,top_ix,pairs 
         #self.plq_sz = (2,2),
+        if not _PBC:
+            if RANK==0:
+                print('nbatch=',len(self.batched_pairs))
+            return
+        # adding PBC terms
+        plq_types = (self.Ly-2,1,2,self.Lx),
+        self.batch_pairs['ver'] = self.Ly-2,1,plq_types,pbc_ver,'col' 
+        self.batch_pairs['deterministic'] = pbc_diag
 from .tensor_vmc import get_gate2
 class Heisenberg(Model2D): 
     def __init__(self,J,h,Lx,Ly,**kwargs):
@@ -678,7 +733,6 @@ class Heisenberg(Model2D):
         self.gate = get_gate2((self.Jx,self.Jy,0.))
         self.order = 'b1,k1,b2,k2'
 
-        self.pairs = self.pairs_nn()
         if _DETERMINISTIC:
             self.batched_pairs = dict()
             self.batch_deterministic_nnh() 
@@ -722,7 +776,6 @@ class J1J2(Model2D): # prototypical next nn model
         self.J1,self.J2 = J1,J2
         self.gate = {None:(get_gate2((1.,1.,0.)),'b1,k1,b2,k2')}
 
-        self.pairs = self.pairs_nn() + self.pairs_diag() # list of all pairs, for SR
         if _DETERMINISTIC:
             self.batched_pairs = dict()
             self.batch_deterministic_nnh() 
@@ -898,12 +951,35 @@ class ExchangeSampler2D(ExchangeSampler):
             plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
+    def sweep_col_pbc(self,i,cols,x_bsz,y_bsz,step):
+        sweep = range(self.Ly-y_bsz+1) if step==1 else range(self.Ly-y_bsz,-1,-1)
+        for j in sweep:
+            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
+            for site1,site2 in pairs:
+                config_sites,config_new = self._new_pair(site1,site2)
+                if config_sites is None:
+                    continue
+                config_sites = self.af.parse_config(config_sites)
+                self.af.config_new = config_new
+                cols_new,py = af._new_log_prob_pbc(cols,(site1,site2),config_sites,i,x_bsz) 
+                if py is None:
+                    continue
+                acceptance = np.exp(py - self.px)
+                if acceptance < self.rng.uniform(): # reject
+                    continue
+                # accept, update px & config & env_m
+                self.px = py
+                self.config = config_new
+                cols = cols_new
     def sweep_row_forward(self,x_bsz,y_bsz):
         self.af.cache_bot = dict()
         self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=x_bsz-1)
 
         cdir = self.rng.choice([-1,1]) 
-        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+        if self.af.pbc:
+            sweep_col = functools.partialmethod(self.sweep_col_pbc,step=cdir) 
+        else:
+            sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
 
         imax = self.Lx-x_bsz
         for i in range(imax+1):
