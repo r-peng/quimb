@@ -469,19 +469,26 @@ class FNN(NN):
         self.w = []
         self.b = []
         for i in range(self.nl+1):
-            self.w.append(f[f'w{i}'][:])
-            if i<self.nl:
+            try:
+                self.w.append(f[f'w{i}'][:])
+            except:
+                pass
+            try:
                 self.b.append(f[f'b{i}'][:])
+            except:
+                pass
         f.close()
         return self.w,self.b
     def save_to_disc(self,w,b,fname,root=0):
         if RANK!=root:
             return
         f = h5py.File(fname+'.hdf5','w')
-        for i in range(self.nl+1):
-            f.create_dataset(f'w{i}',data=w[i]) 
-            if i<self.nl:
+        for i,wi in enumerate(w):
+            f.create_dataset(f'w{i}',data=wi) 
+            try:
                 f.create_dataset(f'b{i}',data=b[i]) 
+            except:
+                pass
         f.close()
     def update(self,x,fname=None,root=0):
         for i in range(self.nl+1):
