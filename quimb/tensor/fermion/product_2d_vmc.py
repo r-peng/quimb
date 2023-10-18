@@ -245,6 +245,8 @@ class FNN2D(FNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
+        to_spin = kwargs.get('to_spin',True)
+        self.nv = Lx * Ly * 2 if to_spin else Lx * Ly
         super().__init__(nl,**kwargs)
 class SIGN2D(SIGN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,**kwargs):
