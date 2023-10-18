@@ -334,6 +334,25 @@ class RBM(NN):
         self.nparam = nv + nh + nv * nh 
         self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
         super().__init__(**kwargs)
+    def init(self,eps,fname=None):
+        self.a = (np.random.rand(self.nv) * 2 - 1) * eps 
+        self.b = (np.random.rand(self.nh) * 2 - 1) * eps 
+        self.w = (np.random.rand(self.nv,self.nh) * 2 - 1) * eps
+        COMM.Bcast(self.a,root=0)
+        COMM.Bcast(self.b,root=0)
+        COMM.Bcast(self.w,root=0)
+        if fname is not None: 
+            self.save_to_disc(self.a,self.b,self.w,fname) 
+        return self.a,self.b,self.w
+    def init_from(self,a,b,w,eps,fname=None):
+        self.init(eps)
+        self.a[:len(a)] = a
+        self.b[:len(b)] = b 
+        sh1,sh2 = w.shape
+        self.w[:sh1,:sh2] = w
+        if fname is not None: 
+            self.save_to_disc(self.a,self.b,self.w,fname) 
+        return self.a,self.b,self.w
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
@@ -383,16 +402,50 @@ class RBM(NN):
         return c
 class FNN(NN):
     def __init__(self,nl,afn='logcosh',**kwargs):
-        self.nl = nl
+        self.nl = nl # number of hidden layer
         assert afn in ('logcosh','logistic','tanh','softplus','silu')
         self.afn = afn 
         super().__init__(**kwargs)
+    def init(self,nn,eps,fname=None): # nn is number of nodes in each hidden layer
+        if isinstance(nn,int):
+            nn = (nn,) * self.nl 
+        else:
+            assert len(nn)==self.nl
+
+        self.w = []
+        self.b = [] 
+        for i in range(self.nl):
+            sh1 = self.nv if i==0 else nn[i-1]
+            wi = (np.random.rand(sh1,nn[i]) * .5 - 1) * eps 
+            COMM.Bcast(wi,root=0)
+            self.w.append(wi)
+
+            bi = (np.random.rand(nn[i]) * .5 - 1) * eps 
+            COMM.Bcast(bi,root=0)
+            self.b.append(bi)
+        self.w.append(np.ones(nn[-1]))
+        if fname is not None: 
+            self.save_to_disc(self.w,self.b,fname)
+        return self.w,self.b
+    def init_from(self,nn,w,b,eps,fname=None):
+        self.init(nn,eps)
+        for i,wi in enumerate(w):
+            if i==len(w)-1:
+                self.w[i][:len(wi),0] = wi
+            else:
+                sh1,sh2 = wi.shape  
+                self.w[i][:sh1,:sh2] = wi
+        for i,bi in enumerate(b):
+            self.b[i][:len(b)] = bi
+        if fname is not None: 
+            self.save_to_disc(self.w,self.b,fname) 
+        return self.w,self.b
     def get_block_dict(self,w,b):
         self.w,self.b = w,b
         self.block_dict = []
         start = 0
-        for i in range(self.nl):
-            tsrs = [w[i]] if i==self.nl-1 else [w[i],b[i]]
+        for i in range(self.nl+1):
+            tsrs = [w[i]] if i==self.nl else [w[i],b[i]]
             for tsr in tsrs:
                 stop = start + tsr.size
                 self.block_dict.append((start,stop))
@@ -406,18 +459,18 @@ class FNN(NN):
         self.b = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) for tsr in self.b]
     def get_x(self):
         ls = []
-        for i in range(self.nl):
+        for i in range(self.nl+1):
             ls.append(tensor2backend(self.w[i],'numpy').flatten())
-            if i<self.nl-1: 
+            if i<self.nl: 
                 ls.append(tensor2backend(self.b[i],'numpy'))
         return np.concatenate(ls)
     def load_from_disc(self,fname):
         f = h5py.File(fname,'r')
         self.w = []
         self.b = []
-        for i in range(self.nl):
+        for i in range(self.nl+1):
             self.w.append(f[f'w{i}'][:])
-            if i<self.nl-1:
+            if i<self.nl:
                 self.b.append(f[f'b{i}'][:])
         f.close()
         return self.w,self.b
@@ -425,19 +478,19 @@ class FNN(NN):
         if RANK!=root:
             return
         f = h5py.File(fname+'.hdf5','w')
-        for i in range(self.nl):
+        for i in range(self.nl+1):
             f.create_dataset(f'w{i}',data=w[i]) 
-            if i<self.nl-1:
+            if i<self.nl:
                 f.create_dataset(f'b{i}',data=b[i]) 
         f.close()
     def update(self,x,fname=None,root=0):
-        for i in range(self.nl):
+        for i in range(self.nl+1):
             start,stop = self.block_dict[2*i]
             size = stop-start
             xi,x = x[:size],x[size:]
             self.w[i] = xi.reshape(self.w[i].shape)
 
-            if i<self.nl-1:
+            if i<self.nl:
                 start,stop = self.block_dict[2*i+1]
                 size = stop-start
                 xi,x = x[:size],x[size:]
@@ -447,9 +500,9 @@ class FNN(NN):
         self.wfn2backend()
     def extract_grad(self):
         ls = []
-        for i in range(self.nl):
+        for i in range(self.nl+1):
             ls.append(tensor2backend(self.tensor_grad(self.w[i]),'numpy').flatten())
-            if i<self.nl-1: 
+            if i<self.nl: 
                 ls.append(tensor2backend(self.tensor_grad(self.b[i]),'numpy'))
         return np.concatenate(ls)
     def get_backend(self,c=None):
@@ -478,7 +531,7 @@ class FNN(NN):
         self._afn = _afn 
         return jnp,c
     def forward(self,c,jnp):
-        for i in range(self.nl-1):
+        for i in range(self.nl):
             c = jnp.matmul(c,self.w[i]) + self.b[i]    
             c = self._afn(c)
         return jnp.dot(c,self.w[-1])
@@ -489,6 +542,18 @@ class SIGN(NN):
         self.nparam = n 
         self.block_dict = [(0,n)] 
         super().__init__(log_amp=False,**kwargs)
+    def init(self,eps,fname=None):
+        self.w = (np.random.rand(self.nparam) * 2 - 1) * eps 
+        COMM.Bcast(self.w,root=0)
+        if fname is not None: 
+            self.save_to_disc(self.w,fname) 
+        return self.w
+    def init_from(self,w,eps,fname):
+        self.init(eps)
+        self.w[:len(w)] = w
+        if fname is not None: 
+            self.save_to_disc(self.w,fname) 
+        return self.w
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
