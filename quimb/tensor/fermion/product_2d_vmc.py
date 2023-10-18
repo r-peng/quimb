@@ -250,7 +250,7 @@ class SIGN2D(SIGN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(Lx*Ly,**kwargs)
+        super().__init__(Lx*Ly*2,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 
