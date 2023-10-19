@@ -436,7 +436,7 @@ class FNN(NN):
                 sh1,sh2 = wi.shape  
                 self.w[i][:sh1,:sh2] = wi
         for i,bi in enumerate(b):
-            self.b[i][:len(b)] = bi
+            self.b[i][:len(bi)] = bi
         if fname is not None: 
             self.save_to_disc(self.w,self.b,fname) 
         return self.w,self.b

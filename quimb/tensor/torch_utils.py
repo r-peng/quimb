@@ -181,8 +181,8 @@ class QR(torch.autograd.Function):
             print(R)
             raise ValueError
         inds = torch.abs(diag) < epsilon
-        #if inds.sum().numpy()>0: # rank deficient, revert to svd
-        if len(inds)>0: # rank deficient, revert to svd
+        if inds.sum().numpy()>0: # rank deficient, revert to svd
+        #if len(inds)>0: # rank deficient, revert to svd
             #print(inds,inds.sum())
             U,S,Vh = SVDforward(A)
             SVh = S.reshape((S.size(0),1)) * Vh
