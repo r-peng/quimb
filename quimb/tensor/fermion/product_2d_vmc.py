@@ -242,17 +242,15 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
 class FNN2D(FNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nl,**kwargs):
+    def __init__(self,Lx,Ly,nv,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        to_spin = kwargs.get('to_spin',True)
-        self.nv = Lx * Ly * 2 if to_spin else Lx * Ly
-        super().__init__(nl,**kwargs)
+        super().__init__(nv,nl,**kwargs)
 class SIGN2D(SIGN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,**kwargs):
+    def __init__(self,Lx,Ly,nv,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(Lx*Ly*2,**kwargs)
+        super().__init__(nv,nl,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 

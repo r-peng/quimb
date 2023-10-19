@@ -334,10 +334,12 @@ class RBM(NN):
         self.nparam = nv + nh + nv * nh 
         self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
         super().__init__(**kwargs)
-    def init(self,eps,fname=None):
-        self.a = (np.random.rand(self.nv) * 2 - 1) * eps 
-        self.b = (np.random.rand(self.nh) * 2 - 1) * eps 
-        self.w = (np.random.rand(self.nv,self.nh) * 2 - 1) * eps
+    def init(self,eps,a=-1,b=1,fname=None):
+        # small numbers initialized in range (a,b)
+        c = b-a
+        self.a = (np.random.rand(self.nv) * c + a) * eps 
+        self.b = (np.random.rand(self.nh) * c + a) * eps 
+        self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps
         COMM.Bcast(self.a,root=0)
         COMM.Bcast(self.b,root=0)
         COMM.Bcast(self.w,root=0)
@@ -401,12 +403,13 @@ class RBM(NN):
         c = jnp.dot(self.a,c) + jnp.sum(jnp.log(jnp.cosh(jnp.matmul(c,self.w) + self.b)))
         return c
 class FNN(NN):
-    def __init__(self,nl,afn='logcosh',**kwargs):
+    def __init__(self,nv,nl,afn='logcosh',**kwargs):
+        self.nv = nv
         self.nl = nl # number of hidden layer
-        assert afn in ('logcosh','logistic','tanh','softplus','silu')
+        assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
         self.afn = afn 
         super().__init__(**kwargs)
-    def init(self,nn,eps,fname=None): # nn is number of nodes in each hidden layer
+    def init(self,nn,eps,a=-1,b=1,fname=None): # nn is number of nodes in each hidden layer
         if isinstance(nn,int):
             nn = (nn,) * self.nl 
         else:
@@ -414,13 +417,14 @@ class FNN(NN):
 
         self.w = []
         self.b = [] 
+        c = b-a
         for i in range(self.nl):
             sh1 = self.nv if i==0 else nn[i-1]
-            wi = (np.random.rand(sh1,nn[i]) * .5 - 1) * eps 
+            wi = (np.random.rand(sh1,nn[i]) * c + a) * eps 
             COMM.Bcast(wi,root=0)
             self.w.append(wi)
 
-            bi = (np.random.rand(nn[i]) * .5 - 1) * eps 
+            bi = (np.random.rand(nn[i]) * c + a) * eps 
             COMM.Bcast(bi,root=0)
             self.b.append(bi)
         self.w.append(np.ones(nn[-1]))
@@ -533,6 +537,9 @@ class FNN(NN):
         elif self.afn=='silu':
             def _afn(x):
                 return x/(1.+jnp.exp(-x))
+        elif self.afn=='cos':
+            def _afn(x):
+                return jnp.cos(x*np.pi)
         else:
             raise NotImplementedError
         self._afn = _afn 
@@ -542,64 +549,70 @@ class FNN(NN):
             c = jnp.matmul(c,self.w[i]) + self.b[i]    
             c = self._afn(c)
         return jnp.dot(c,self.w[-1])
-class SIGN(NN):
-    def __init__(self,n,afn='tanh',**kwargs):
-        assert afn in ('tanh','cos','sin') 
-        self.afn = afn
-        self.nparam = n 
-        self.block_dict = [(0,n)] 
-        super().__init__(log_amp=False,**kwargs)
-    def init(self,eps,fname=None):
-        self.w = (np.random.rand(self.nparam) * 2 - 1) * eps 
-        COMM.Bcast(self.w,root=0)
-        if fname is not None: 
-            self.save_to_disc(self.w,fname) 
-        return self.w
-    def init_from(self,w,eps,fname):
-        self.init(eps)
-        self.w[:len(w)] = w
-        if fname is not None: 
-            self.save_to_disc(self.w,fname) 
-        return self.w
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
-        ar.set_backend(tsr)
-        self.w = tensor2backend(self.w,backend=backend,requires_grad=requires_grad)
-    def get_x(self):
-        return tensor2backend(self.w,'numpy')
-    def load_from_disc(self,fname):
-        self.w = np.load(fname)
-        return self.w
-    def save_to_disc(self,w,fname,root=0):
-        if RANK!=root:
-            return
-        np.save(fname+'.npy',w)
-    def update(self,x,fname=None,root=0):
-        self.w = x
-        if fname is not None:
-            self.save_to_disc(self.w,fname,root=root) 
-        self.wfn2backend()
-    def extract_grad(self):
-        return tensor2backend(self.tensor_grad(self.w),'numpy')
-    def get_backend(self,c=None):
-        if isinstance(self.w,torch.Tensor):
-            if c is not None:
-                c = tensor2backend(c,backend='torch')
-            jnp = torch
-        else:
-            jnp = np
-        if self.afn=='tahn':
-            _afn = jnp.tahn
-        elif self.afn=='cos':
-            def _afn(x):
-                return jnp.cos(np.pi*x)    
-        elif self.afn=='sin':
-            def _afn(x):
-                return jnp.sin(np.pi*x)
-        else:
-            raise NotImplementedError
-        self._afn = _afn 
-        return jnp,c
+class SIGN(FNN):
+    def __init__(self,nv,nl,afn='tanh',**kwargs):
+        super().__init__(nv,nl,afn=afn,log_amp=False,**kwargs)
     def forward(self,c,jnp):
-        return self._afn(jnp.dot(c,self.w))
+        c = super().forward(c,jnp) 
+        return self._afn(c)
+#class SIGN(NN):
+#    def __init__(self,n,afn='tanh',**kwargs):
+#        assert afn in ('tanh','cos','sin') 
+#        self.afn = afn
+#        self.nparam = n 
+#        self.block_dict = [(0,n)] 
+#        super().__init__(log_amp=False,**kwargs)
+#    def init(self,eps,fname=None):
+#        self.w = (np.random.rand(self.nparam) * 2 - 1) * eps 
+#        COMM.Bcast(self.w,root=0)
+#        if fname is not None: 
+#            self.save_to_disc(self.w,fname) 
+#        return self.w
+#    def init_from(self,w,eps,fname):
+#        self.init(eps)
+#        self.w[:len(w)] = w
+#        if fname is not None: 
+#            self.save_to_disc(self.w,fname) 
+#        return self.w
+#    def wfn2backend(self,backend=None,requires_grad=False):
+#        backend = self.backend if backend is None else backend
+#        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+#        ar.set_backend(tsr)
+#        self.w = tensor2backend(self.w,backend=backend,requires_grad=requires_grad)
+#    def get_x(self):
+#        return tensor2backend(self.w,'numpy')
+#    def load_from_disc(self,fname):
+#        self.w = np.load(fname)
+#        return self.w
+#    def save_to_disc(self,w,fname,root=0):
+#        if RANK!=root:
+#            return
+#        np.save(fname+'.npy',w)
+#    def update(self,x,fname=None,root=0):
+#        self.w = x
+#        if fname is not None:
+#            self.save_to_disc(self.w,fname,root=root) 
+#        self.wfn2backend()
+#    def extract_grad(self):
+#        return tensor2backend(self.tensor_grad(self.w),'numpy')
+#    def get_backend(self,c=None):
+#        if isinstance(self.w,torch.Tensor):
+#            if c is not None:
+#                c = tensor2backend(c,backend='torch')
+#            jnp = torch
+#        else:
+#            jnp = np
+#        if self.afn=='tahn':
+#            _afn = jnp.tahn
+#        elif self.afn=='cos':
+#            def _afn(x):
+#                return jnp.cos(np.pi*x)    
+#        elif self.afn=='sin':
+#            def _afn(x):
+#                return jnp.sin(np.pi*x)
+#        else:
+#            raise NotImplementedError
+#        self._afn = _afn 
+#        return jnp,c
+#    def forward(self,c,jnp):
+#        return self._afn(jnp.dot(c,self.w))
