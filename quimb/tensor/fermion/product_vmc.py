@@ -530,7 +530,8 @@ class FNN(NN):
             def _afn(x):
                 return 1./(1.+jnp.exp(-x))    
         elif self.afn=='tanh':
-            _afn = jnp.tahn
+            def _afn(x):
+                return jnp.tanh(self.coeff * x)
         elif self.afn=='softplus':
             def _afn(x):
                 return jnp.log(1.+jnp.exp(x))
@@ -539,7 +540,7 @@ class FNN(NN):
                 return x/(1.+jnp.exp(-x))
         elif self.afn=='cos':
             def _afn(x):
-                return jnp.cos(x*np.pi)
+                return jnp.cos(self.coeff * x)
         else:
             raise NotImplementedError
         self._afn = _afn 
