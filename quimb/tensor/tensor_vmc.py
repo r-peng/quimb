@@ -1109,14 +1109,14 @@ class TNVMC: # stochastic sampling
 #############################################################################################
 import itertools
 class DenseSampler:
-    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-14,fix_sector=True):
+    def __init__(self,nsite,nspin,exact=False,seed=None,thresh=1e-28,fix_sector=True):
         self.nsite = nsite 
         self.nspin = nspin
 
         self.all_configs = self.get_all_configs(fix_sector=fix_sector)
         self.ntotal = len(self.all_configs)
         if RANK==0:
-            print('ntotal=',self.ntotal)
+            print('ntotal configs=',self.ntotal)
         self.flat_indexes = list(range(self.ntotal))
         self.p = None
 
@@ -1146,6 +1146,8 @@ class DenseSampler:
         for config in configs:
             config = self.af.parse_config(config)
             plocal.append(self.af.prob(config))
+        #    print(RANK,plocal)
+        #    exit()
         plocal = np.array(plocal)
         #print(RANK,plocal)
         #exit()
@@ -1158,8 +1160,6 @@ class DenseSampler:
         n = np.sum(ptotal)
         ptotal /= n 
         self.p = ptotal
-        if RANK==SIZE-1:
-            print('\tdense amplitude time=',time.time()-t0)
 
         ntotal = len(nonzeros)
         batchsize,remain = ntotal//(SIZE-1),ntotal%(SIZE-1)
@@ -1171,6 +1171,9 @@ class DenseSampler:
             start = (batchsize+1)*(RANK-1)-L
             stop = start+batchsize+1
         self.nonzeros = nonzeros if RANK==0 else nonzeros[start:stop]
+        if RANK==SIZE-1:
+            print('\tdense amplitude time=',time.time()-t0)
+            print('\ttotal non-zero amplitudes=',ntotal)
     def get_all_configs(self,fix_sector=True):
         if not fix_sector:
             return list(itertools.product((0,1),repeat=self.nsite))
@@ -1272,6 +1275,9 @@ def tensor2backend(data,backend,requires_grad=False):
     if isinstance(data,np.ndarray):
         if backend=='torch': # numpy to torch 
             data = torch.tensor(data,requires_grad=requires_grad)
+        else:
+            if data.size==1:
+                data = data.reshape(-1)[0] 
     elif isinstance(data,torch.Tensor):
         if backend=='numpy': # torch to numpy
             data = data.detach().numpy()

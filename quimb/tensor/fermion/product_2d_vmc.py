@@ -18,7 +18,7 @@ def set_options(symmetry='u1',flat=True,pbc=False,deterministic=False):
 
 from .product_vmc import (
     TNJastrow,
-    RBM,FNN,SIGN,
+    RBM,FNN,SIGN,ORB,
     ProductAmplitudeFactory,
 )
 #class ProductAmplitudeFactory2D(ProductAmplitudeFactory,AmplitudeFactory2D):
@@ -116,10 +116,13 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
     def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True):
         cx = np.zeros(self.naf) 
         for ix,af in enumerate(self.af):
-            cache_top_ = af.cache_top if cache_top is None else cache_top[ix]
-            cache_bot_ = af.cache_bot if cache_bot is None else cache_bot[ix]
-            cx[ix] = af.unsigned_amplitude(config[ix],
-                         cache_bot=cache_bot_,cache_top=cache_top_,to_numpy=to_numpy)
+            if af.is_tn:
+                cache_top_ = af.cache_top if cache_top is None else cache_top[ix]
+                cache_bot_ = af.cache_bot if cache_bot is None else cache_bot[ix]
+                cx[ix] = af.unsigned_amplitude(config[ix],
+                             cache_bot=cache_bot_,cache_top=cache_top_,to_numpy=to_numpy)
+            else:
+                cx[ix] = af.unsigned_amplitude(config[ix],to_numpy=to_numpy)
         #print(config[2],cx)
         #print(self.config_sign(config))
         #exit()
@@ -251,6 +254,11 @@ class SIGN2D(SIGN,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nl,**kwargs)
+class ORB2D(ORB,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nelec,spin,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(Lx*Ly,nelec,spin,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 

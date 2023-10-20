@@ -1023,11 +1023,8 @@ class ExchangeSampler2D(ExchangeSampler):
             cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
             if cy is None:
                 continue
-            py = tensor2backend(cy ** 2,'numpy')
-            try:
-                acceptance = py / self.px
-            except ZeroDivisionError:
-                acceptance = 1. if py > self.px else 0.
+            py = np.log(tensor2backend(cy,'numpy')**2)
+            acceptance = np.exp(py - self.px)
             if self.rng.uniform() < acceptance: # accept, update px & config & env_m
                 self.px = py
                 self.config = tuple(config_new) 

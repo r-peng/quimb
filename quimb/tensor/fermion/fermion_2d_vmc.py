@@ -166,6 +166,19 @@ class Hubbard(FermionModel2D):
         if ndiff==0:
             sign = i1-i2
             return [(0,3,sign),(3,0,sign)]
+    def get_h(self):
+        h = np.zeros((self.nsite,)*2)
+        for ix1 in range(self.nsite):
+            i,j = self.flat2site(ix1)
+            if i+1<self.Lx or _PBC:
+                ix2 = self.flatten(((i+1)%self.Lx,j))
+                h[ix1,ix2] = -self.t
+                h[ix2,ix1] = -self.t
+            if j+1<self.Ly or _PBC:
+                ix2 = self.flatten((i,(j+1)%self.Ly))
+                h[ix1,ix2] = -self.t
+                h[ix2,ix1] = -self.t
+        return h
 class FDKineticO2(Hubbard):
     def __init__(self,N,L,spinless=False,nbatch=1):
         self.eps = L/N if _PBC else L/(N+1.)

@@ -1,5 +1,6 @@
 import numpy as np
 import itertools
+import scipy
 #####################################################
 # for separate ansatz
 #####################################################
@@ -66,6 +67,7 @@ class ProductAmplitudeFactory:
             if pix is None:
                 return 0
             p *= pix
+            #print(RANK,ix,pix)
         return p 
     def replace_sites(self,tn,sites,cis):
         for ix,af in enumerate(self.af):
@@ -322,8 +324,13 @@ class NN(AmplitudeFactory):
         if self.vx is not None:
             return self.vx
         self.wfn2backend(backend='torch',requires_grad=True)
-        c,_ = self.log_amplitude(self.config,to_numpy=False) 
-        _,self.vx = self.propagate(c) 
+        if self.log_amp:
+            cx,_ = self.log_amplitude(self.config,to_numpy=False) 
+            _,self.vx = self.propagate(cx) 
+        else:
+            cx = self.unsigned_amplitude(self.config,to_numpy=False) 
+            cx,self.vx = self.propagate(cx) 
+            self.vx /= cx
         #print(self.config,self.vx)
         #exit()
         self.wfn2backend()
@@ -556,6 +563,142 @@ class SIGN(FNN):
     def forward(self,c,jnp):
         c = super().forward(c,jnp) 
         return self._afn(c)
+class ORB(NN): # 1-particle orbital rotation
+    def __init__(self,nsite,nelec,spin,orth=True,**kwargs):
+        super().__init__(log_amp=False)
+        self.nsite = nsite
+        self.nelec = nelec
+        self.spin = spin
+        self.orth = orth 
+        self.nparam = nsite * nelec
+        self.block_dict = [(0,self.nparam)] 
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+        ar.set_backend(tsr)
+        self.U = tensor2backend(self.U,backend=backend,requires_grad=requires_grad) 
+    def get_x(self):
+        return tensor2backend(self.U,'numpy').flatten()
+    def load_from_disc(self,fname):
+        self.U = np.load(fname) 
+        return self.U
+    def save_to_disc(self,U,fname,root=0): 
+        if RANK!=root:
+            return
+        np.save(fname+'.npy',U)
+    def update(self,x,fname=None,root=0):
+        self.U = x.reshape((self.nsite,self.nelec))
+        if self.orth:
+            self.U,_ = np.linalg.qr(self.U)
+        if fname is not None:
+            self.save_to_disc(self.U,fname,root=root) 
+        self.wfn2backend()
+    def extract_grad(self):
+        return tensor2backend(self.tensor_grad(self.U),'numpy').flatten()
+    def get_backend(self):
+        if isinstance(self.U,torch.Tensor):
+            jnp = torch
+            def _select(det,U):
+                return torch.index_select(U,0,torch.tensor(det[0]))
+        else:
+            jnp = np
+            def _select(det,U):
+                return U[det,:]
+        self._select = _select
+        return jnp
+    def forward(self,config,jnp):
+        det = np.where(np.array(config))
+        return jnp.linalg.det(self._select(det,self.U)) 
+    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+        jnp = self.get_backend() 
+        c = self.forward(config,jnp) 
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+        return c
+    def log_amplitude(self,config,to_numpy=True):
+        jnp = self.get_backend() 
+        c = self.forward(config,jnp) 
+        c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
+        if to_numpy:
+            c = tensor2backend(c,'numpy') 
+            s = tensor2backend(s,'numpy') 
+        return c,s
+def BackFlow(FNN):
+    def __init__(self,nsite,nelec,nv,nl,**kwargs):
+        self.nsite = nsite
+        self.nelec = nelec 
+        super().__init__(nv,nl,log_amp=False,**kwargs)
+    
+#class ORB(NN):
+#    def __init__(self,nsite,nelec,**kwargs):
+#        self.nsite = nsite
+#        self.nelec = nelec
+#        self.nparam = 2 * nsite ** 2
+#        self.block_dict = [(0,nsite**2),(nsite**2,self.nparam)]
+#        super().__init__(to_spin=True,order='C',log_amp=False,**kwargs)
+#    def init(self,eps,a=-1,b=1,fname=None):
+#        c = b-a
+#        self.K = (np.random.rand(2,self.nsite,self.nsite) * c + a) * eps
+#        COMM.Bcast(self.K,root=0)
+#        if fname is not None:
+#            self.save_to_disc(self.K,fname)
+#        self.U = [scipy.linalg.expm(self.K[ix]-self.K[ix].T)[:,:self.nelec[ix]] for ix in (0,1)]
+#    def wfn2backend(self,backend=None,requires_grad=False):
+#        backend = self.backend if backend is None else backend
+#        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+#        ar.set_backend(tsr)
+#        self.K = tensor2backend(self.K,backend=backend,requires_grad=requires_grad) 
+#        expm = scipy.linalg.expm if backend=='numpy' else torch.linalg.matrix_exp
+#        self.U = [expm(self.K[ix]-self.K[ix].T)[:,:self.nelec[ix]] for ix in (0,1)]
+#    def get_x(self):
+#        return tensor2backend(self.K,'numpy').flatten()
+#    def load_from_disc(self,fname):
+#        self.K = np.load(fname) 
+#        self.U = [scipy.linalg.expm(self.K[ix]-self.K[ix].T)[:,:self.nelec[ix]] for ix in (0,1)]
+#        return self.K
+#    def save_to_disc(self,K,fname,root=0): 
+#        if RANK!=root:
+#            return
+#        np.save(fname+'.npy',K)
+#    def update(self,x,fname=None,root=0):
+#        self.K = x.reshape((2,)+(self.nsite,)*2)
+#        if fname is not None:
+#            self.save_to_disc(self.K,fname,root=root) 
+#        self.wfn2backend()
+#    def extract_grad(self):
+#        return tensor2backend(self.tensor_grad(self.K),'numpy').flatten()
+#    def get_backend(self):
+#        if isinstance(self.K,torch.Tensor):
+#            jnp = torch
+#            def _select(det,U):
+#                return torch.index_select(U,0,torch.tensor(det[0]))
+#        else:
+#            jnp = np
+#            def _select(det,U):
+#                return U[det,:]
+#        self._select = _select
+#        return jnp,None
+#    def forward(self,config,jnp):
+#        config = config_to_ab(config) 
+#        c = 1. 
+#        for config_,U_ in zip(config,self.U):
+#            det = np.where(np.array(config_))
+#            c *= jnp.linalg.det(self._select(det,U_)) 
+#        return c
+#    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+#        jnp,_ = self.get_backend() 
+#        c = self.forward(config,jnp) 
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#        return c
+#    def log_amplitude(self,config,to_numpy=True):
+#        jnp,_ = self.get_backend() 
+#        c = self.forward(config,jnp) 
+#        c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#            s = tensor2backend(s,'numpy') 
+#        return c,s
 #class SIGN(NN):
 #    def __init__(self,n,afn='tanh',**kwargs):
 #        assert afn in ('tanh','cos','sin') 
