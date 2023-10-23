@@ -1039,7 +1039,7 @@ class ExchangeSampler2D(ExchangeSampler):
             sweep_col = range(0,jmax+1) if cdir==1 else range(jmax,-1,-1)
             for i,j in itertools.product(sweep_row,sweep_col):
                 self.update_plq_deterministic(i,j,x_bsz,y_bsz)
-        self.af.update_cache(af.parse_config(self.config))
+        self.af.update_cache(self.af.parse_config(self.config))
 
 def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):
     arrays = []
