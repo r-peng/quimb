@@ -17,7 +17,6 @@ def set_options(pbc=False,deterministic=False):
     return set_options(pbc=pbc,deterministic=deterministic)
 
 from .product_vmc import (
-    TNJastrow,
     RBM,FNN,SIGN,ORB,
     ProductAmplitudeFactory,
 )
