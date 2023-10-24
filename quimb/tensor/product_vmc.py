@@ -16,7 +16,7 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 class ProductAmplitudeFactory:
     def parse_config(self,config):
-        return [config] * len(self.af)
+        return [config] * self.naf
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         for af in self.af:
@@ -212,41 +212,6 @@ class ProductAmplitudeFactory:
     #    eu = self.model.compute_local_energy_eigen(config)
     #    ex += eu
     #    return cx,ex,vx,None,0.
-#######################################################################
-# some jastrow forms
-#######################################################################
-def pair_terms(i1,i2,spin):
-    if spin=='a':
-        map_ = {(0,1):(1,0),(1,0):(0,1),
-                (2,3):(3,2),(3,2):(2,3),
-                (0,3):(1,2),(3,0):(2,1),
-                (1,2):(0,3),(2,1):(3,0)}
-    elif spin=='b':
-        map_ = {(0,2):(2,0),(2,0):(0,2),
-                (1,3):(3,1),(3,1):(1,3),
-                (0,3):(2,1),(3,0):(1,2),
-                (1,2):(3,0),(2,1):(0,3)}
-    else:
-        raise ValueError
-    return map_.get((i1,i2),(None,)*2)
-class TNJastrow(AmplitudeFactory):
-    def update_pair_energy_from_plq(self,tn,where):
-        ix1,ix2 = [self.flatten(site) for site in where]
-        i1,i2 = self.config[ix1],self.config[ix2] 
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return {spin:0 for spin in ('a','b')}
-        ex = dict()
-        for spin in ('a','b'):
-            i1_new,i2_new = pair_terms(i1,i2,spin)
-            if i1_new is None:
-                ex[spin] = 0
-                continue
-            tn_new = self.replace_sites(tn.copy(),where,(i1_new,i2_new))
-            ex_ij = safe_contract(tn_new)
-            if ex_ij is None:
-                ex_ij = 0
-            ex[spin] = ex_ij 
-        return ex 
 import autoray as ar
 import torch
 import h5py
