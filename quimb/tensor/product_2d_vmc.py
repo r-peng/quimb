@@ -20,6 +20,7 @@ from .product_vmc import (
     RBM,FNN,SIGN,
     ProductAmplitudeFactory,
 )
+from ..tensor_2d_vmc import AmplitudeFactory2D 
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
     def __init__(self,af):
         self.af = af 
