@@ -17,7 +17,7 @@ def set_options(pbc=False,deterministic=False):
     return set_options(pbc=pbc,deterministic=deterministic)
 
 from .product_vmc import (
-    RBM,FNN,SIGN,ORB,
+    RBM,FNN,SIGN,
     ProductAmplitudeFactory,
 )
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
