@@ -92,7 +92,8 @@ class ProductAmplitudeFactory:
         pairs = self.model.batched_pairs[batch_key][3]
         e = 0.
         p = 1 if cx is None else 0
-        for where,spin in itertools.product(pairs,self.spins):
+        spins = ('a','b') if self.fermion else (None,)
+        for where,spin in itertools.product(pairs,spins):
             term = 1.
             for ix,ex_ in enumerate(ex):
                 if (where,spin) in ex_:

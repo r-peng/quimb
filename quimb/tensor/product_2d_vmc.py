@@ -26,7 +26,7 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
         self.deterministic = self.af[0].deterministic 
         #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
-        self.spins = ('a','b') if fermion else (None,)
+        self.fermion = fermion 
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):
