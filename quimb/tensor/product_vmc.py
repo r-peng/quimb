@@ -83,11 +83,11 @@ class ProductAmplitudeFactory:
         pairs = self.model.batched_pairs[batch_key][3]
         e = 0.
         p = 1 if cx is None else 0
-        for where in pairs:
+        for where,spin in itertools.product(pairs,self.spins):
             term = 1.
             for ix,ex_ in enumerate(ex):
-                if where in ex_:
-                    term *= ex_[where][p] 
+                if (where,spin) in ex_:
+                    term *= ex_[where,spin][p] 
                 else:
                     if p==1:
                         continue 
@@ -108,6 +108,10 @@ class ProductAmplitudeFactory:
                 af.wfn2backend(backend='torch',requires_grad=True)
                 af.model.gate2backend('torch')
             ex[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
+        #    print(ix)
+        #    print(ex[ix])
+        #    print(cx[ix])
+        #exit()
 
         if compute_Hv:
             Hvx = self.propagate(self.parse_energy(ex,batch_key,cx=cx))
@@ -223,6 +227,9 @@ class NN(AmplitudeFactory):
         self.is_tn = False
         self.spin = None
         self.vx = None
+        self.spins = None,
+    def pair_terms(self,i1,i2,spin=None):
+        return i2,i1
     def log_amplitude(self,config,to_numpy=True):
         c = np.array(config,dtype=float)
         jnp,c = self.get_backend(c=c) 
@@ -255,22 +262,24 @@ class NN(AmplitudeFactory):
             ix1,ix2 = [self.flatten(site) for site in where]
             i1,i2 = self.config[ix1],self.config[ix2]
             if self.model.pair_valid(i1,i2): # term vanishes 
-                i1_new,i2_new = i2,i1 
-                if i1_new is None:
-                    ex[where] = 0,0 
-                else:
-                    config_new = list(self.config)
-                    config_new[ix1] = i1_new
-                    config_new[ix2] = i2_new 
-                    if self.log_amp:
-                        logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
-                        cx_new = jnp.exp(logcx_new) * sx_new
-                        ex[where] = cx_new,jnp.exp(logcx_new-logcx) * sx_new / sx 
+                for spin in self.spins:
+                    i1_new,i2_new = self.pair_terms(i1,i2,spin)
+                    if i1_new is None:
+                        ex[where,spin] = 0,0 
                     else:
-                        cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
-                        ex[where] = cx_new, cx_new/cx 
+                        config_new = list(self.config)
+                        config_new[ix1] = i1_new
+                        config_new[ix2] = i2_new 
+                        if self.log_amp:
+                            logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
+                            cx_new = jnp.exp(logcx_new) * sx_new
+                            ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) * sx_new / sx 
+                        else:
+                            cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
+                            ex[where,spin] = cx_new, cx_new/cx 
             else:
-                ex[where] = 0,0
+                for spin in self.spins:
+                    ex[where,spin] = 0,0
         return ex,cx,None
     def get_grad_from_plq(self,plq=None):
         if self.vx is not None:

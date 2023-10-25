@@ -32,8 +32,8 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
 
         self.pbc = _PBC
         self.deterministic = _DETERMINISTIC
-        self.spinless = False
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+        self.spins = None,
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):

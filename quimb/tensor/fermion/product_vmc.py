@@ -29,26 +29,6 @@ class FermionProductAmplitudeFactory(ProductAmplitudeFactory):
     def parse_config(self,config):
         ca,cb = config_to_ab(config)
         return [{'a':ca,'b':cb,None:config}[af.spin] for af in self.af]
-    def parse_energy(self,ex,batch_key,cx=None):
-        pairs = self.model.batched_pairs[batch_key][3]
-        e = 0.
-        p = 1 if cx is None else 0
-        for where,spin in itertools.product(pairs,('a','b')):
-            term = 1.
-            for ix,ex_ in enumerate(ex):
-                if (where,spin) in ex_:
-                    term *= ex_[where,spin][p] 
-                else:
-                    if p==1:
-                        continue 
-                    if isinstance(cx[ix],dict):
-                        term *= cx[ix][where][0]
-                    else:
-                        term *= cx[ix]
-            e += term
-        if p==1:
-            e = tensor2backend(e,'numpy')
-        return e
 #######################################################################
 # some jastrow forms
 #######################################################################
@@ -95,44 +75,15 @@ class FermionNN(NN):
         self.to_spin = to_spin
         self.order = order
         super().__init__(**kwargs)
+        self.spins = 'a','b'
+    def pair_terms(self,i1,i2,spin):
+        return pair_terms(i1,i2,spin)
     def log_amplitude(self,config,to_numpy=True):
         c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
         return super().log_amplitude(c,to_numpy=to_numpy)
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
         c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
         return super().log_amplitude(c,to_numpy=to_numpy)
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
-        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
-        jnp = torch if new_cache else np
-        if self.log_amp:
-            logcx,sx = self.log_amplitude(self.config,to_numpy=False)
-            cx = jnp.exp(logcx) * sx
-        else:
-            cx = self.unsigned_amplitude(self.config,to_numpy=False)
-        ex = dict()
-        for where in pairs:
-            ix1,ix2 = [self.flatten(site) for site in where]
-            i1,i2 = self.config[ix1],self.config[ix2]
-            if self.model.pair_valid(i1,i2): # term vanishes 
-                for spin in ('a','b'):
-                    i1_new,i2_new = pair_terms(i1,i2,spin)
-                    if i1_new is None:
-                        ex[where,spin] = 0,0 
-                    else:
-                        config_new = list(self.config)
-                        config_new[ix1] = i1_new
-                        config_new[ix2] = i2_new 
-                        if self.log_amp:
-                            logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
-                            cx_new = jnp.exp(logcx_new) * sx_new
-                            ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) * sx_new / sx 
-                        else:
-                            cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
-                            ex[where,spin] = cx_new, cx_new/cx 
-            else:
-                for spin in ('a','b'):
-                    ex[where,spin] = 0,0
-        return ex,cx,None
 class FermionRBM(FermionNN,RBM):
     def __init__(self,nv,nh,**kwargs):
         self.nv,self.nh = nv,nh
