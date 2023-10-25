@@ -6,21 +6,13 @@ import numpy as np
 #SIZE = COMM.Get_size()
 #RANK = COMM.Get_rank()
 
-import sys
-this = sys.modules[__name__]
-def set_options(pbc=False,deterministic=False):
-    this._PBC = pbc
-    this._DETERMINISTIC = deterministic
-    from .tensor_2d_vmc import set_options as set_options
-    return set_options(pbc=pbc,deterministic=deterministic)
-
 from .product_vmc import (
     RBM,FNN,SIGN,
     ProductAmplitudeFactory,
 )
 from .tensor_2d_vmc import AmplitudeFactory2D 
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
-    def __init__(self,af):
+    def __init__(self,af,fermion=False):
         self.af = af 
         self.get_sections()
 
@@ -30,10 +22,11 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
         self.nsite = self.af[0].nsite
         self.backend = self.af[0].backend
 
-        self.pbc = _PBC
-        self.deterministic = _DETERMINISTIC
-        self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-        self.spins = None,
+        self.pbc = self.af[0].pbc 
+        self.deterministic = self.af[0].deterministic 
+        #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+
+        self.spins = ('a','b') if fermion else (None,)
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):

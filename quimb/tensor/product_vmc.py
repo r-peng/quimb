@@ -14,9 +14,18 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
+def config_to_ab(config):
+    config = np.array(config)
+    return tuple(config % 2), tuple(config // 2)
+def config_from_ab(config_a,config_b):
+    return tuple(np.array(config_a) + np.array(config_b) * 2)
 class ProductAmplitudeFactory:
     def parse_config(self,config):
-        return [config] * self.naf
+        if self.fermion:
+            ca,cb = config_to_ab(config)
+            return [{'a':ca,'b':cb,None:config}[af.spin] for af in self.af]
+        else:
+            return [config] * self.naf
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         for af in self.af:
@@ -219,19 +228,48 @@ class ProductAmplitudeFactory:
 import autoray as ar
 import torch
 import h5py
+def pair_terms(i1,i2,spin):
+    if spin=='a':
+        map_ = {(0,1):(1,0),(1,0):(0,1),
+                (2,3):(3,2),(3,2):(2,3),
+                (0,3):(1,2),(3,0):(2,1),
+                (1,2):(0,3),(2,1):(3,0)}
+    elif spin=='b':
+        map_ = {(0,2):(2,0),(2,0):(0,2),
+                (1,3):(3,1),(3,1):(1,3),
+                (0,3):(2,1),(3,0):(1,2),
+                (1,2):(3,0),(2,1):(0,3)}
+    else:
+        raise ValueError
+    return map_.get((i1,i2),(None,)*2)
 class NN(AmplitudeFactory):
-    def __init__(self,backend='numpy',log_amp=True):
+    def __init__(self,backend='numpy',log_amp=True,fermion=False,to_spin=True,order='F'):
         self.backend = backend
         self.log_amp = log_amp # if output is amplitude or log amplitude 
 
         self.is_tn = False
         self.spin = None
         self.vx = None
-        self.spins = None,
+
+        self.fermion = fermion
+        if fermion:
+            self.to_spin = to_spin
+            self.order = order
+        else:
+            self.to_spin = False
     def pair_terms(self,i1,i2,spin=None):
-        return i2,i1
+        if self.fermion:
+            return pair_terms(i1,i2,spin) 
+        else:
+            return i2,i1
+    def input(self,config):
+        if self.fermion and self.to_spin:
+            ca,cb = config_to_ab(config) 
+            return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+        else:
+            return np.array(config,dtype=float)
     def log_amplitude(self,config,to_numpy=True):
-        c = np.array(config,dtype=float)
+        c = self.input(config)
         jnp,c = self.get_backend(c=c) 
         c,s = self.forward(c,jnp),1
         if not self.log_amp: # NN outputs amplitude
@@ -241,7 +279,7 @@ class NN(AmplitudeFactory):
             s = tensor2backend(s,'numpy') 
         return c,s
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        c = np.array(config,dtype=float)
+        c = self.input(config)
         jnp,c = self.get_backend(c=c) 
         c = self.forward(c,jnp)
         if self.log_amp: # NN outputs log amplitude
@@ -252,6 +290,7 @@ class NN(AmplitudeFactory):
     def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
         jnp = torch if new_cache else np
+        spins = ('a','b') if self.fermion else (None,)
         if self.log_amp:
             logcx,sx = self.log_amplitude(self.config,to_numpy=False)
             cx = jnp.exp(logcx) * sx
@@ -262,7 +301,7 @@ class NN(AmplitudeFactory):
             ix1,ix2 = [self.flatten(site) for site in where]
             i1,i2 = self.config[ix1],self.config[ix2]
             if self.model.pair_valid(i1,i2): # term vanishes 
-                for spin in self.spins:
+                for spin in spins:
                     i1_new,i2_new = self.pair_terms(i1,i2,spin)
                     if i1_new is None:
                         ex[where,spin] = 0,0 
@@ -278,7 +317,7 @@ class NN(AmplitudeFactory):
                             cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
                             ex[where,spin] = cx_new, cx_new/cx 
             else:
-                for spin in self.spins:
+                for spin in spins:
                     ex[where,spin] = 0,0
         return ex,cx,None
     def get_grad_from_plq(self,plq=None):

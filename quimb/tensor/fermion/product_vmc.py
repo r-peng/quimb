@@ -20,32 +20,9 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-def config_to_ab(config):
-    config = np.array(config)
-    return tuple(config % 2), tuple(config // 2)
-def config_from_ab(config_a,config_b):
-    return tuple(np.array(config_a) + np.array(config_b) * 2)
-class FermionProductAmplitudeFactory(ProductAmplitudeFactory):
-    def parse_config(self,config):
-        ca,cb = config_to_ab(config)
-        return [{'a':ca,'b':cb,None:config}[af.spin] for af in self.af]
 #######################################################################
 # some jastrow forms
 #######################################################################
-def pair_terms(i1,i2,spin):
-    if spin=='a':
-        map_ = {(0,1):(1,0),(1,0):(0,1),
-                (2,3):(3,2),(3,2):(2,3),
-                (0,3):(1,2),(3,0):(2,1),
-                (1,2):(0,3),(2,1):(3,0)}
-    elif spin=='b':
-        map_ = {(0,2):(2,0),(2,0):(0,2),
-                (1,3):(3,1),(3,1):(1,3),
-                (0,3):(2,1),(3,0):(1,2),
-                (1,2):(3,0),(2,1):(0,3)}
-    else:
-        raise ValueError
-    return map_.get((i1,i2),(None,)*2)
 class TNJastrow(AmplitudeFactory):
     def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
@@ -64,45 +41,6 @@ class TNJastrow(AmplitudeFactory):
                 ex_ij = 0
             ex[spin] = ex_ij 
         return ex 
-import autoray as ar
-import torch
-import h5py
-def to_spin(config,order='F'):
-    ca,cb = config_to_ab(config) 
-    return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=order)
-class FermionNN(NN):
-    def __init__(self,to_spin=True,order='F',**kwargs):
-        self.to_spin = to_spin
-        self.order = order
-        super().__init__(**kwargs)
-        self.spins = 'a','b'
-    def pair_terms(self,i1,i2,spin):
-        return pair_terms(i1,i2,spin)
-    def log_amplitude(self,config,to_numpy=True):
-        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
-        return super().log_amplitude(c,to_numpy=to_numpy)
-    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        c = to_spin(config,self.order) if self.to_spin else np.array(config,dtype=float)
-        return super().log_amplitude(c,to_numpy=to_numpy)
-class FermionRBM(FermionNN,RBM):
-    def __init__(self,nv,nh,**kwargs):
-        self.nv,self.nh = nv,nh
-        self.nparam = nv + nh + nv * nh 
-        self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
-        super().__init__(**kwargs)
-class FermionFNN(FermionNN,FNN):
-    def __init__(self,nv,nl,afn='logcosh',**kwargs):
-        self.nv = nv
-        self.nl = nl # number of hidden layer
-        assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
-        self.afn = afn 
-        super().__init__(**kwargs)
-class FermionSIGN(FermionFNN):
-    def __init__(self,nv,nl,afn='tanh',**kwargs):
-        super().__init__(nv,nl,afn=afn,log_amp=False,**kwargs)
-    def forward(self,c,jnp):
-        c = super().forward(c,jnp) 
-        return self._afn(c)
 class ORB(NN): # 1-particle orbital rotation
     def __init__(self,nsite,nelec,spin,orth=True,**kwargs):
         super().__init__(log_amp=False)

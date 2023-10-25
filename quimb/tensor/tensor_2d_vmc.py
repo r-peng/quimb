@@ -5,8 +5,6 @@ COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
-import sys
-this = sys.modules[__name__]
 from .tensor_vmc import (
     tensor2backend,
     safe_contract,
@@ -15,9 +13,6 @@ from .tensor_vmc import (
     Model,
     ExchangeSampler,
 )
-def set_options(pbc=False,deterministic=False):
-    this._PBC = pbc
-    this._DETERMINISTIC = deterministic 
 def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
 def flat2site(ix,Ly): # ix in row order
@@ -26,7 +21,7 @@ def flat2site(ix,Ly): # ix in row order
 # amplitude fxns 
 ####################################################################################
 class AmplitudeFactory2D(AmplitudeFactory):
-    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',**compress_opts):
+    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
@@ -40,8 +35,8 @@ class AmplitudeFactory2D(AmplitudeFactory):
 
         # init contraction
         self.compress_opts = compress_opts
-        self.pbc = _PBC
-        self.deterministic = _DETERMINISTIC
+        self.pbc = pbc 
+        self.deterministic = deterministic
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         if blks is None:
@@ -166,7 +161,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             else:
                 sites = (j,iprev),(j,i) 
             tn.contract_([self.site_tag(site) for site in sites],which='any')
-        if _PBC:
+        if self.pbc:
             return self.compress_row_pbc(tn,i,direction=direction)
         else:
             return self.compress_row_obc(tn,i,direction=direction)
@@ -506,10 +501,12 @@ class AmplitudeFactory2D(AmplitudeFactory):
 # models
 ####################################################################
 class Model2D(Model):
-    def __init__(self,Lx,Ly,nbatch=1):
+    def __init__(self,Lx,Ly,nbatch=1,pbc=False,deterministic=False):
         self.Lx,self.Ly = Lx,Ly
         self.nsite = Lx * Ly
         self.nbatch = nbatch 
+        self.pbc = pbc
+        self.deterministic = deterministic
     def flatten(self,site):
         i,j = site
         return flatten(i,j,self.Ly)
@@ -559,7 +556,7 @@ class Model2D(Model):
                 if j+d<self.Ly:
                     where = (i,j),(i,j+d)
                     ls.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = (i,(j+d)%self.Ly),(i,j)
                     ls.append(where)
                 else:
@@ -572,7 +569,7 @@ class Model2D(Model):
                 where = (i,j),(i+d,j)
                 ls.append(where)
             self.batched_pairs[i,i+d] = ls
-        if not _PBC:
+        if not self.pbc:
             return
         ls = self.batched_pairs.get('pbc',[]) 
         for (i,j) in itertools.product(range(self.Lx-d,self.Lx),range(self.Ly)):
@@ -589,14 +586,14 @@ class Model2D(Model):
                     where = (i,j+1),(i+1,j)
                     ls.append(where)
                 else:
-                    if _PBC:
+                    if self.pbc:
                         where = (i,j),(i+1,(j+1)%self.Ly)
                         ls.append(where)
                         
                         where = (i,(j+1)%self.Ly),(i+1,j)
                         ls.append(where)
             self.batched_pairs[i,i+1] = ls
-        if not _PBC:
+        if not self.pbc:
             return
         ls = self.batched_pairs.get('pbc',[])
         for j in range(self.Ly):
@@ -623,7 +620,7 @@ class Model2D(Model):
                 if j+1<self.Ly:
                     where = (i,j),(i,j+1)
                     pairs.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = (i,(j+1)%self.Ly),(i,j)
                     pairs.append(where)
                 else:
@@ -632,7 +629,7 @@ class Model2D(Model):
                 if i+1<self.Lx:
                     where = (i,j),(i+1,j)
                     pairs.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = ((i+1)%self.Lx,j),(i,j)
                     pbc_terms.append(where)
                 else:
@@ -644,7 +641,7 @@ class Model2D(Model):
             plq_types = [(imin,imax,1,2), (imin,imax-1,2,1)] # i0_min,i0_max,x_bsz,y_bsz
             self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' 
 
-        if not _PBC:
+        if not self.pbc:
             if RANK==0:
                 print('nbatch=',len(self.batched_pairs))
             return
@@ -668,7 +665,7 @@ class Model2D(Model):
                 if j+1<self.Ly: # NN
                     where = (i,j),(i,j+1)
                     pairs.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = (i,(j+1)%self.Ly),(i,j)
                     pairs.append(where)
                 else:
@@ -677,7 +674,7 @@ class Model2D(Model):
                 if i+1<self.Lx: # NN
                     where = (i,j),(i+1,j)
                     pairs.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = ((i+1)%self.Lx,j),(i,j)
                     pbc_ver.append(where)
                 else:
@@ -688,17 +685,17 @@ class Model2D(Model):
                     pairs.append(where)
                     where = (i,j+1),(i+1,j)
                     pairs.append(where)
-                elif i+1<self.Ly and _PBC:
+                elif i+1<self.Ly and self.pbc:
                     where = (i,j),(i+1,(j+1)%self.Ly) 
                     pairs.append(where)
                     where = (i,(j+1)%self.Ly),(i+1,j)
                     pairs.append(where)
-                elif j+1<self.Ly and _PBC:
+                elif j+1<self.Ly and self.pbc:
                     where = ((i+1)%self.Lx,j+1),(i,j)
                     pbc_ver.append(where)
                     where = ((i+1)%self.Lx,j),(i,j+1)
                     pbc_ver.append(where)
-                elif _PBC:
+                elif self.pbc:
                     where = ((i+1)%self.Lx,(j+1)%self.Ly),(i,j) 
                     pbc_diag.append(where)
                     where = ((i+1)%self.Lx,j),(i,(j+1)%self.Ly)
@@ -712,7 +709,7 @@ class Model2D(Model):
             bix,tix = max(0,imax-2),min(imin+2,self.Lx-1)
             self.batched_pairs[batch_idx] = bix,tix,plq_types,pairs,'row' # bot_ix,top_ix,pairs 
         #self.plq_sz = (2,2),
-        if not _PBC:
+        if not self.pbc:
             if RANK==0:
                 print('nbatch=',len(self.batched_pairs))
             return
@@ -733,7 +730,7 @@ class Heisenberg(Model2D):
         self.gate = get_gate2((self.Jx,self.Jy,0.))
         self.order = 'b1,k1,b2,k2'
 
-        if _DETERMINISTIC:
+        if self.deterministic:
             self.batched_pairs = dict()
             self.batch_deterministic_nnh() 
             self.batch_deterministic_nnv() 
@@ -771,12 +768,12 @@ class Heisenberg(Model2D):
         else:
             return [(1-i1,1-i2,.25*(self.Jx-self.Jy))]
 class J1J2(Model2D): # prototypical next nn model
-    def __init__(self,J1,J2,Lx,Ly,nbatch=1):
-        super().__init__(Lx,Ly,nbatch=nbatch)
+    def __init__(self,J1,J2,Lx,Ly,**kwargs):
+        super().__init__(Lx,Ly,**kwargs)
         self.J1,self.J2 = J1,J2
         self.gate = {None:(get_gate2((1.,1.,0.)),'b1,k1,b2,k2')}
 
-        if _DETERMINISTIC:
+        if self.deterministic:
             self.batched_pairs = dict()
             self.batch_deterministic_nnh() 
             self.batch_deterministic_nnv() 
@@ -809,12 +806,12 @@ class J1J2(Model2D): # prototypical next nn model
             if j+1<self.Ly:
                 e1 += s1 * (-1)**config[self.flatten((i,j+1))]
             else:
-                if _PBC:
+                if self.pbc:
                     e1 += s1 * (-1)**config[self.flatten((i,0))]
             if i+1<self.Lx:
                 e1 += s1 * (-1)**config[self.flatten((i+1,j))]
             else:
-                if _PBC:
+                if self.pbc:
                     e1 += s1 * (-1)**config[self.flatten((0,j))]
         # next NN
         e2 = 0. 
@@ -825,7 +822,7 @@ class J1J2(Model2D): # prototypical next nn model
                 ix1,ix2 = self.flatten((i,j+1)), self.flatten((i+1,j))
                 e2 += (-1)**(config[ix1]+config[ix2])
             else:
-                if _PBC:
+                if self.pbc:
                     ix1,ix2 = self.flatten((i,j)), self.flatten(((i+1)%self.Lx,(j+1)%self.Ly))
                     e2 += (-1)**(config[ix1]+config[ix2])
                     ix1,ix2 = self.flatten((i,(j+1)%self.Ly)), self.flatten(((i+1)%self.Lx,j))
@@ -1031,8 +1028,8 @@ class ExchangeSampler2D(ExchangeSampler):
     def _sample_deterministic(self):
         bsz = self.get_bsz()
         for x_bsz,y_bsz in bsz:
-            imax = self.Lx-1 if _PBC else self.Lx-x_bsz
-            jmax = self.Ly-1 if _PBC else self.Ly-y_bsz
+            imax = self.Lx-1 if self.af.pbc else self.Lx-x_bsz
+            jmax = self.Ly-1 if self.af.pbc else self.Ly-y_bsz
             rdir = self.rng.choice([-1,1]) 
             cdir = self.rng.choice([-1,1]) 
             sweep_row = range(0,imax+1) if rdir==1 else range(imax,-1,-1)
