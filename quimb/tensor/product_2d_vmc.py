@@ -11,8 +11,6 @@ this = sys.modules[__name__]
 def set_options(pbc=False,deterministic=False):
     this._PBC = pbc
     this._DETERMINISTIC = deterministic
-    this._SYMMETRY = symmetry
-    this._FLAT = flat 
     from .tensor_2d_vmc import set_options as set_options
     return set_options(pbc=pbc,deterministic=deterministic)
 
@@ -20,7 +18,7 @@ from .product_vmc import (
     RBM,FNN,SIGN,
     ProductAmplitudeFactory,
 )
-from ..tensor_2d_vmc import AmplitudeFactory2D 
+from .tensor_2d_vmc import AmplitudeFactory2D 
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
     def __init__(self,af):
         self.af = af 
@@ -119,11 +117,6 @@ class SIGN2D(SIGN,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nl,**kwargs)
-class ORB2D(ORB,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nelec,spin,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(Lx*Ly,nelec,spin,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 
