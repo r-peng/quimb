@@ -880,7 +880,13 @@ class ExchangeSampler2D(ExchangeSampler):
         self.dense = False
         self.burn_in = burn_in 
         self.af = None
+
+        assert scheme in ('hv','blks','random')
         self.scheme = scheme
+        if scheme=='random':
+            self.pairs = [((i,j),(i,j+1)) for i,j in itertools.product(range(Lx),range(Ly-1))]
+            self.pairs += [((i,j),(i+1,j)) for i,j in itertools.product(range(Lx-1),range(Ly))]
+            self.npair = len(self.pairs)
     def flatten(self,site):
         i,j = site
         return flatten(i,j,self.Ly)
@@ -897,7 +903,7 @@ class ExchangeSampler2D(ExchangeSampler):
         config_new[ix1] = i1_new
         config_new[ix2] = i2_new
         return (i1_new,i2_new),tuple(config_new)
-    def _update_pair(self,site1,site2,plq,cols):
+    def _update_pair_from_plq(self,site1,site2,plq,cols):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return plq,cols
@@ -934,7 +940,7 @@ class ExchangeSampler2D(ExchangeSampler):
     def update_plq(self,i,j,x_bsz,y_bsz,plq,cols):
         pairs = self.get_pairs(i,j,x_bsz,y_bsz)
         for site1,site2 in pairs:
-            plq,cols = self._update_pair(site1,site2,plq,cols) 
+            plq,cols = self._update_pair_from_plq(site1,site2,plq,cols) 
         return cols
     def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
         cols,renvs = self.af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
@@ -1011,20 +1017,18 @@ class ExchangeSampler2D(ExchangeSampler):
             sweep_fn = {0:self.sweep_row_forward,
                         1:self.sweep_row_backward}[self.rng.choice([0,1])] 
             sweep_fn(x_bsz,y_bsz) 
-    def update_plq_deterministic(self,i,j,x_bsz,y_bsz):
-        pairs = self.get_pairs(i,j,x_bsz,y_bsz)
-        for (site1,site2) in pairs:
-            config_sites,config_new = self._new_pair(site1,site2)
-            if config_sites is None:
-                continue
-            cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
-            if cy is None:
-                continue
-            py = np.log(tensor2backend(cy,'numpy')**2)
-            acceptance = np.exp(py - self.px)
-            if self.rng.uniform() < acceptance: # accept, update px & config & env_m
-                self.px = py
-                self.config = tuple(config_new) 
+    def _update_pair(self,site1,site2):
+        config_sites,config_new = self._new_pair(site1,site2)
+        if config_sites is None:
+            continue
+        cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
+        if cy is None:
+            continue
+        py = np.log(tensor2backend(cy,'numpy')**2)
+        acceptance = np.exp(py - self.px)
+        if self.rng.uniform() < acceptance: # accept, update px & config & env_m
+            self.px = py
+            self.config = tuple(config_new) 
     def _sample_deterministic(self):
         bsz = self.get_bsz()
         for x_bsz,y_bsz in bsz:
@@ -1035,7 +1039,9 @@ class ExchangeSampler2D(ExchangeSampler):
             sweep_row = range(0,imax+1) if rdir==1 else range(imax,-1,-1)
             sweep_col = range(0,jmax+1) if cdir==1 else range(jmax,-1,-1)
             for i,j in itertools.product(sweep_row,sweep_col):
-                self.update_plq_deterministic(i,j,x_bsz,y_bsz)
+                pairs = self.get_pairs(i,j,x_bsz,y_bsz)
+                for site1,site2 in pairs:
+                    self._update_pair(site1,site2)
         self.af.update_cache(self.af.parse_config(self.config))
 
 def get_product_state(Lx,Ly,config=None,bdim=1,eps=0.,pdim=2,normalize=True):

@@ -1211,11 +1211,17 @@ class ExchangeSampler:
     def propose_new_pair(self,i1,i2):
         return i2,i1
     def sample(self):
-        if self.af.deterministic:
+        if self.scheme=='random':
+            self._sample_random()
+        elif self.af.deterministic:
             self._sample_deterministic()
         else:
             self._sample()
         return self.config,self.px
+    def _sample_random(self):
+        for i in range(self.npairs):
+            ix = self.rng.integers(0,high=self.npairs)
+            self._update_pair(*self.pairs[ix])
 ##############################################################################################
 # HELPER FUNCS 
 ##############################################################################################
