@@ -42,7 +42,7 @@ def get_parity_cum(fpeps):
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
 class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D): 
-    def __init__(self,psi,blks=None,spinless=False,backend='numpy',pbc=False,deterministc=False,symmetry='u1',flta=True,**compress_opts):
+    def __init__(self,psi,blks=None,spinless=False,backend='numpy',pbc=False,deterministic=False,symmetry='u1',flat=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
@@ -92,7 +92,7 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
 from pyblock3.algebra.fermion_ops import H1
 class Hubbard(FermionModel2D):
     def __init__(self,t,u,Lx,Ly,spinless=False,spin=None,sep=False,symmetry='u1',flat=True,**kwargs):
-        super().__init__(Lx,Ly,**kwrags)
+        super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
         #self.gate = {spin:(H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless),'b1,b2,k1,k2')}
         data_map = get_data_map(symmetry=symmetry,flat=flat,spinless=spinless) 
