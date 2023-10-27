@@ -6,11 +6,7 @@ import numpy as np
 #SIZE = COMM.Get_size()
 #RANK = COMM.Get_rank()
 
-from .product_vmc import (
-    TNJastrow,
-    FermionRBM,FermionFNN,FermionSIGN,ORB,
-    FermionProductAmplitudeFactory,
-)
+from .product_vmc import TNJastrow,BackFlow
 from ..tensor_2d import PEPS
 def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
     if isinstance(coeffs,np.ndarray):
@@ -56,11 +52,11 @@ class PEPSJastrow(TNJastrow,AmplitudeFactory2D):
             if cx_new is not None:
                 cx[ix] = cx_new
         return cx 
-class ORB2D(ORB,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nelec,spin,**kwargs):
+class BackFlow2D(BackFlow,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,mo,nv,nl,spin,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(Lx*Ly,nelec,spin,**kwargs)
+        super().__init__(mo,nv,nl,spin,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 

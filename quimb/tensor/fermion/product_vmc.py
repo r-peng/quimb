@@ -1,29 +1,13 @@
 import numpy as np
-import itertools
-import scipy
-#####################################################
-# for separate ansatz
-#####################################################
-from ..tensor_vmc import (
-    tensor2backend,
-    safe_contract,
-    contraction_error,
-    AmplitudeFactory,
-)
-from ..product_vmc import (
-    ProductAmplitudeFactory,
-    NN,
-    RBM,
-    FNN,
-)
-from mpi4py import MPI
-COMM = MPI.COMM_WORLD
-SIZE = COMM.Get_size()
-RANK = COMM.Get_rank()
+from ..product_vmc import FNN,tensor2backend,pair_terms,config_to_ab
+#from mpi4py import MPI
+#COMM = MPI.COMM_WORLD
+#SIZE = COMM.Get_size()
+#RANK = COMM.Get_rank()
 #######################################################################
 # some jastrow forms
 #######################################################################
-class TNJastrow(AmplitudeFactory):
+class TNJastrow(FermionAmplitudeFactory):
     def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
@@ -41,72 +25,122 @@ class TNJastrow(AmplitudeFactory):
                 ex_ij = 0
             ex[spin] = ex_ij 
         return ex 
-class ORB(NN): # 1-particle orbital rotation
-    def __init__(self,nsite,nelec,spin,orth=True,**kwargs):
-        super().__init__(log_amp=False)
-        self.nsite = nsite
-        self.nelec = nelec
+def BackFlow(FNN):
+    def __init__(self,mo,nv,nl,spin,**kwargs):
+        self.mo = mo
+        self.nsite,self.nelec = mo.shape
         self.spin = spin
-        self.orth = orth 
-        self.nparam = nsite * nelec
-        self.block_dict = [(0,self.nparam)] 
+        super().__init__(nv,nl,nf=self.nsite*self.nelec,log_amp=False,fermion=True,**kwargs)
+    def config_to_spin(self,config):
+        return np.array(config) % 2 if self.spin=='a' else np.array(config) // 2
     def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
-        ar.set_backend(tsr)
-        self.U = tensor2backend(self.U,backend=backend,requires_grad=requires_grad) 
-    def get_x(self):
-        return tensor2backend(self.U,'numpy').flatten()
-    def load_from_disc(self,fname):
-        self.U = np.load(fname) 
-        return self.U
-    def save_to_disc(self,U,fname,root=0): 
-        if RANK!=root:
-            return
-        np.save(fname+'.npy',U)
-    def update(self,x,fname=None,root=0):
-        self.U = x.reshape((self.nsite,self.nelec))
-        if self.orth:
-            self.U,_ = np.linalg.qr(self.U)
-        if fname is not None:
-            self.save_to_disc(self.U,fname,root=root) 
-        self.wfn2backend()
-    def extract_grad(self):
-        return tensor2backend(self.tensor_grad(self.U),'numpy').flatten()
-    def get_backend(self):
-        if isinstance(self.U,torch.Tensor):
-            jnp = torch
-            def _select(det,U):
-                return torch.index_select(U,0,torch.tensor(det[0]))
+        super().wfn2backend(backend=backend,requires_grad=requires_grad)
+        self.mo = tensor2backend(self.mo,backend)
+        if backend=='numpy':
+            def _det(config,mo):
+                det = np.where(config)
+                return mo[det,:]
         else:
-            jnp = np
-            def _select(det,U):
-                return U[det,:]
-        self._select = _select
-        return jnp
-    def forward(self,config,jnp):
-        det = np.where(np.array(config))
-        return jnp.linalg.det(self._select(det,self.U)) 
+            def _det(config,mo):
+                det = np.where(config)[0] 
+                return torch.index_select(mo,0,torch.tensor(det))
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        jnp = self.get_backend() 
-        c = self.forward(config,jnp) 
+        c = self._input(config)
+        mo = super().forward(c)
+        mo = self.jnp.reshape(mo,self.mo.shape) + self.mo
+        c = self._det(self.config_to_spin(config),mo)
         if to_numpy:
             c = tensor2backend(c,'numpy') 
         return c
     def log_amplitude(self,config,to_numpy=True):
-        jnp = self.get_backend() 
-        c = self.forward(config,jnp) 
-        c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-            s = tensor2backend(s,'numpy') 
-        return c,s
-def BackFlow(FNN):
-    def __init__(self,nsite,nelec,nv,nl,**kwargs):
-        self.nsite = nsite
-        self.nelec = nelec 
-        super().__init__(nv,nl,log_amp=False,**kwargs)
-    
+        c = self.unsigned_amplitude(config,to_numpy=to_numpy)
+        jnp = np if to_numpy else self.jnp
+        return self.jnp.log(jnp.abs(c)),self.jnp.sign(c)
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
+        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        jnp = torch if new_cache else np
+        cx = self.unsigned_amplitude(self.config,to_numpy=False)
+        ex = dict()
+        for where in pairs:
+            ix1,ix2 = [self.flatten(site) for site in where]
+            i1,i2 = self.config[ix1],self.config[ix2]
+            if self.model.pair_valid(i1,i2): # term vanishes 
+                i1_new,i2_new = self.pair_terms(i1,i2,self.spin)
+                if i1_new is None:
+                    ex[where,self.spin] = 0,0 
+                else:
+                    config_new = list(self.config)
+                    config_new[ix1] = i1_new
+                    config_new[ix2] = i2_new 
+                    cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
+
+                    coeff = self.model.pair_coeff(*where)
+                    coeff *= (-1)**(sum(self.config_to_spin(self.config)[ix1+1:ix2])%2)
+                    cx_new *= coeff 
+                    ex[where,self.spin] = cx_new, cx_new/cx 
+            else:
+                ex[where,self.spin] = 0,0
+        return ex,cx,None
+#class ORB(NN): # 1-particle orbital rotation
+#    def __init__(self,nsite,nelec,spin,orth=True,**kwargs):
+#        super().__init__(log_amp=False)
+#        self.nsite = nsite
+#        self.nelec = nelec
+#        self.spin = spin
+#        self.orth = orth 
+#        self.nparam = nsite * nelec
+#        self.block_dict = [(0,self.nparam)] 
+#    def wfn2backend(self,backend=None,requires_grad=False):
+#        backend = self.backend if backend is None else backend
+#        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+#        ar.set_backend(tsr)
+#        self.U = tensor2backend(self.U,backend=backend,requires_grad=requires_grad) 
+#    def get_x(self):
+#        return tensor2backend(self.U,'numpy').flatten()
+#    def load_from_disc(self,fname):
+#        self.U = np.load(fname) 
+#        return self.U
+#    def save_to_disc(self,U,fname,root=0): 
+#        if RANK!=root:
+#            return
+#        np.save(fname+'.npy',U)
+#    def update(self,x,fname=None,root=0):
+#        self.U = x.reshape((self.nsite,self.nelec))
+#        if self.orth:
+#            self.U,_ = np.linalg.qr(self.U)
+#        if fname is not None:
+#            self.save_to_disc(self.U,fname,root=root) 
+#        self.wfn2backend()
+#    def extract_grad(self):
+#        return tensor2backend(self.tensor_grad(self.U),'numpy').flatten()
+#    def get_backend(self):
+#        if isinstance(self.U,torch.Tensor):
+#            jnp = torch
+#            def _select(det,U):
+#                return torch.index_select(U,0,torch.tensor(det[0]))
+#        else:
+#            jnp = np
+#            def _select(det,U):
+#                return U[det,:]
+#        self._select = _select
+#        return jnp
+#    def forward(self,config,jnp):
+#        det = np.where(np.array(config))
+#        return jnp.linalg.det(self._select(det,self.U)) 
+#    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+#        jnp = self.get_backend() 
+#        c = self.forward(config,jnp) 
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#        return c
+#    def log_amplitude(self,config,to_numpy=True):
+#        jnp = self.get_backend() 
+#        c = self.forward(config,jnp) 
+#        c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#            s = tensor2backend(s,'numpy') 
+#        return c,s
 #class ORB(NN):
 #    def __init__(self,nsite,nelec,**kwargs):
 #        self.nsite = nsite

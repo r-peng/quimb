@@ -246,6 +246,7 @@ def pair_terms(i1,i2,spin):
 class NN(AmplitudeFactory):
     def __init__(self,backend='numpy',log_amp=True,fermion=False,to_spin=True,order='F'):
         self.backend = backend
+        self.jnp = np if backend=='numpy' else torch
         self.log_amp = log_amp # if output is amplitude or log amplitude 
 
         self.is_tn = False
@@ -266,25 +267,34 @@ class NN(AmplitudeFactory):
     def input(self,config):
         if self.fermion and self.to_spin:
             ca,cb = config_to_ab(config) 
-            return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+            return np.stack([np.array(tsr,dtype=int) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
         else:
-            return np.array(config,dtype=float)
+            return np.array(config,dtype=int)
+    def wfn2backend(self,backend):
+        if backend=='numpy':
+            tsr = np.zeros(1)
+            self.jnp = np 
+            self._input = self.input
+        else:
+            tsr = torch.zeros(1)
+            self.jnp = torch
+            def _input(config):
+                return tensor2backend(self.input(config),backend) 
+        ar.set_backend(tsr)
     def log_amplitude(self,config,to_numpy=True):
-        c = self.input(config)
-        jnp,c = self.get_backend(c=c) 
-        c,s = self.forward(c,jnp),1
+        c = self._input(config)
+        c,s = self.forward(c),1
         if not self.log_amp: # NN outputs amplitude
-            c,s = jnp.log(jnp.abs(c)),jnp.sign(c)
+            c,s = self.jnp.log(jnp.abs(c)),self.jnp.sign(c)
         if to_numpy:
             c = tensor2backend(c,'numpy') 
             s = tensor2backend(s,'numpy') 
         return c,s
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
-        c = self.input(config)
-        jnp,c = self.get_backend(c=c) 
-        c = self.forward(c,jnp)
+        c = self._input(config)
+        c = self.forward(c)
         if self.log_amp: # NN outputs log amplitude
-            c = jnp.exp(c)
+            c = self.jnp.exp(c)
         if to_numpy:
             c = tensor2backend(c,'numpy') 
         return c
@@ -365,9 +375,8 @@ class RBM(NN):
         return self.a,self.b,self.w
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
-        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
-        ar.set_backend(tsr)
-        self.a,self.b,self.w = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) \
+        super().wfn2backend(backend)
+        self.a,self.b,self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) \
                                 for tsr in [self.a,self.b,self.w]]
     def get_x(self):
         ls = [tensor2backend(tsr,'numpy') for tsr in [self.a,self.b,self.w]]
@@ -400,20 +409,14 @@ class RBM(NN):
         ls = [tensor2backend(self.tensor_grad(tsr),'numpy') for tsr in [self.a,self.b,self.w]] 
         ls[-1] = ls[-1].flatten()
         return np.concatenate(ls)
-    def get_backend(self,c=None):
-        if isinstance(self.a,torch.Tensor):
-            if c is not None:
-                c = tensor2backend(c,backend='torch')
-            return torch,c
-        else:
-            return np,c
-    def forward(self,c,jnp): # NN output
-        c = jnp.dot(self.a,c) + jnp.sum(jnp.log(jnp.cosh(jnp.matmul(c,self.w) + self.b)))
+    def forward(self,c): # NN output
+        c = self.jnp.dot(self.a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,self.w) + self.b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nl,afn='logcosh',**kwargs):
+    def __init__(self,nv,nl,nf=1,afn='logcosh',**kwargs):
         self.nv = nv
         self.nl = nl # number of hidden layer
+        self.nf = nf
         assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
         self.afn = afn 
         super().__init__(**kwargs)
@@ -435,18 +438,15 @@ class FNN(NN):
             bi = (np.random.rand(nn[i]) * c + a) * eps 
             COMM.Bcast(bi,root=0)
             self.b.append(bi)
-        self.w.append(np.ones(nn[-1]))
+        self.w.append(np.ones(nn[-1],self.nf))
         if fname is not None: 
             self.save_to_disc(self.w,self.b,fname)
         return self.w,self.b
     def init_from(self,nn,w,b,eps,fname=None):
         self.init(nn,eps)
         for i,wi in enumerate(w):
-            if i==len(w)-1:
-                self.w[i][:len(wi),0] = wi
-            else:
-                sh1,sh2 = wi.shape  
-                self.w[i][:sh1,:sh2] = wi
+            sh1,sh2 = wi.shape  
+            self.w[i][:sh1,:sh2] = wi
         for i,bi in enumerate(b):
             self.b[i][:len(bi)] = bi
         if fname is not None: 
@@ -465,10 +465,30 @@ class FNN(NN):
         self.nparam = stop
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
-        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
-        ar.set_backend(tsr)
-        self.w = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) for tsr in self.w]
-        self.b = [tensor2backend(tsr,backend=backend,requires_grad=requires_grad) for tsr in self.b]
+        super().wfn2backend(backend)
+        self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.w]
+        self.b = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.b]
+        if self.afn=='logcosh':
+            def _afn(x):
+                return self.jnp.log(self.jnp.cosh(x))
+        elif self.afn=='logistic':
+            def _afn(x):
+                return 1./(1.+self.jnp.exp(-x))    
+        elif self.afn=='tanh':
+            def _afn(x):
+                return self.jnp.tanh(self.coeff * x)
+        elif self.afn=='softplus':
+            def _afn(x):
+                return self.jnp.log(1.+self.jnp.exp(x))
+        elif self.afn=='silu':
+            def _afn(x):
+                return x/(1.+self.jnp.exp(-x))
+        elif self.afn=='cos':
+            def _afn(x):
+                return self.jnp.cos(self.coeff * x)
+        else:
+            raise NotImplementedError
+        self._afn = _afn 
     def get_x(self):
         ls = []
         for i in range(self.nl+1):
@@ -524,43 +544,14 @@ class FNN(NN):
             if i<self.nl: 
                 ls.append(tensor2backend(self.tensor_grad(self.b[i]),'numpy'))
         return np.concatenate(ls)
-    def get_backend(self,c=None):
-        if isinstance(self.w[0],torch.Tensor):
-            if c is not None:
-                c = tensor2backend(c,backend='torch')
-            jnp = torch
-        else:
-            jnp = np
-        if self.afn=='logcosh':
-            def _afn(x):
-                return jnp.log(jnp.cosh(x))
-        elif self.afn=='logistic':
-            def _afn(x):
-                return 1./(1.+jnp.exp(-x))    
-        elif self.afn=='tanh':
-            def _afn(x):
-                return jnp.tanh(self.coeff * x)
-        elif self.afn=='softplus':
-            def _afn(x):
-                return jnp.log(1.+jnp.exp(x))
-        elif self.afn=='silu':
-            def _afn(x):
-                return x/(1.+jnp.exp(-x))
-        elif self.afn=='cos':
-            def _afn(x):
-                return jnp.cos(self.coeff * x)
-        else:
-            raise NotImplementedError
-        self._afn = _afn 
-        return jnp,c
-    def forward(self,c,jnp):
+    def forward(self,c):
         for i in range(self.nl):
-            c = jnp.matmul(c,self.w[i]) + self.b[i]    
+            c = self.jnp.matmul(c,self.w[i]) + self.b[i]    
             c = self._afn(c)
-        return jnp.dot(c,self.w[-1])
+        return self.jnp.matmul(c,self.w[-1])
 class SIGN(FNN):
     def __init__(self,nv,nl,afn='tanh',**kwargs):
         super().__init__(nv,nl,afn=afn,log_amp=False,**kwargs)
-    def forward(self,c,jnp):
-        c = super().forward(c,jnp) 
+    def forward(self,c):
+        c = super().forward(c) 
         return self._afn(c)
