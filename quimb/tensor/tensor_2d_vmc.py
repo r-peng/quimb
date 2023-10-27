@@ -1020,10 +1020,10 @@ class ExchangeSampler2D(ExchangeSampler):
     def _update_pair(self,site1,site2):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
-            continue
+            return
         cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
         if cy is None:
-            continue
+            return
         py = np.log(tensor2backend(cy,'numpy')**2)
         acceptance = np.exp(py - self.px)
         if self.rng.uniform() < acceptance: # accept, update px & config & env_m

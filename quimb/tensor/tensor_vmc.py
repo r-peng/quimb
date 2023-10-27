@@ -1219,8 +1219,8 @@ class ExchangeSampler:
             self._sample()
         return self.config,self.px
     def _sample_random(self):
-        for i in range(self.npairs):
-            ix = self.rng.integers(0,high=self.npairs)
+        for i in range(self.npair):
+            ix = self.rng.integers(0,high=self.npair)
             self._update_pair(*self.pairs[ix])
 ##############################################################################################
 # HELPER FUNCS 
