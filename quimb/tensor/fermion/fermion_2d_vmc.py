@@ -472,4 +472,19 @@ def get_hole_doped_product_state(Lx,Ly,holes,symmetry='u1',flat=True):
             continue
         fpeps = create_particle(fpeps,site,'sum',spinless=False,data_map=data_map)
     return fpeps 
-         
+def get_fpeps_z2(Lx,Ly,D,typ='one',eps=0,flat=True):
+    from pyblock3.algebra.fermion_ops import peps_tensor_z2 
+    from ..tensor_2d import PEPS
+    from .fermion_2d import FPEPS
+    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1,shape='urdlp')
+    patterns = get_patterns(Lx,Ly,shape=shape)
+    ftn = FermionTensorNetwork([])
+    for ix, iy in itertools.product(range(tn.Lx), range(tn.Ly)):
+        T = tn[ix, iy]
+        #put vaccum at site (ix, iy) and apply a^{\dagger}
+        shape = (D,) * (len(pattern)-1) + (4,)
+        data = bonded_vaccum(shape, patterns[ix,iy],parity=0,typ=typ,eps=eps,flat=flat)
+        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
+        ftn.add_tensor(new_T, virtual=False)
+    ftn.view_as_(FPEPS, like=tn)
+    return ftn 
