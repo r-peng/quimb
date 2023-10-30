@@ -1,5 +1,11 @@
 import numpy as np
-from ..product_vmc import FNN,tensor2backend,pair_terms,config_to_ab
+import torch
+from ..product_vmc import (
+        FNN,
+        tensor2backend,
+        pair_terms,
+        safe_contract
+)
 #from mpi4py import MPI
 #COMM = MPI.COMM_WORLD
 #SIZE = COMM.Get_size()
@@ -7,7 +13,7 @@ from ..product_vmc import FNN,tensor2backend,pair_terms,config_to_ab
 #######################################################################
 # some jastrow forms
 #######################################################################
-class TNJastrow(FermionAmplitudeFactory):
+class TNJastrow:
     def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
         i1,i2 = self.config[ix1],self.config[ix2] 
@@ -25,29 +31,33 @@ class TNJastrow(FermionAmplitudeFactory):
                 ex_ij = 0
             ex[spin] = ex_ij 
         return ex 
-def BackFlow(FNN):
+class BackFlow(FNN):
     def __init__(self,mo,nv,nl,spin,**kwargs):
         self.mo = mo
         self.nsite,self.nelec = mo.shape
-        self.spin = spin
+        self._spin = spin
         super().__init__(nv,nl,nf=self.nsite*self.nelec,log_amp=False,fermion=True,**kwargs)
     def config_to_spin(self,config):
-        return np.array(config) % 2 if self.spin=='a' else np.array(config) // 2
-    def wfn2backend(self,backend=None,requires_grad=False):
-        super().wfn2backend(backend=backend,requires_grad=requires_grad)
-        self.mo = tensor2backend(self.mo,backend)
+        return np.array(config) % 2 if self._spin=='a' else np.array(config) // 2
+    def set_backend(self,backend):
+        super().set_backend(backend)
         if backend=='numpy':
             def _det(config,mo):
                 det = np.where(config)
-                return mo[det,:]
+                return np.linalg.det(mo[det,:])
         else:
             def _det(config,mo):
                 det = np.where(config)[0] 
-                return torch.index_select(mo,0,torch.tensor(det))
+                return torch.linalg.det(torch.index_select(mo,0,torch.tensor(det)))
+        self._det = _det
+    def wfn2backend(self,backend=None,requires_grad=False):
+        super().wfn2backend(backend=backend,requires_grad=requires_grad)
+        backend = self.backend if backend is None else backend
+        self.mo = tensor2backend(self.mo,backend)
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
         c = self._input(config)
         mo = super().forward(c)
-        mo = self.jnp.reshape(mo,self.mo.shape) + self.mo
+        mo = self.jnp.reshape(mo,(self.nsite,self.nelec)) + self.mo
         c = self._det(self.config_to_spin(config),mo)
         if to_numpy:
             c = tensor2backend(c,'numpy') 
@@ -55,7 +65,7 @@ def BackFlow(FNN):
     def log_amplitude(self,config,to_numpy=True):
         c = self.unsigned_amplitude(config,to_numpy=to_numpy)
         jnp = np if to_numpy else self.jnp
-        return self.jnp.log(jnp.abs(c)),self.jnp.sign(c)
+        return jnp.log(jnp.abs(c)),jnp.sign(c)
     def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
         bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
         jnp = torch if new_cache else np
@@ -65,9 +75,9 @@ def BackFlow(FNN):
             ix1,ix2 = [self.flatten(site) for site in where]
             i1,i2 = self.config[ix1],self.config[ix2]
             if self.model.pair_valid(i1,i2): # term vanishes 
-                i1_new,i2_new = self.pair_terms(i1,i2,self.spin)
+                i1_new,i2_new = self.pair_terms(i1,i2,self._spin)
                 if i1_new is None:
-                    ex[where,self.spin] = 0,0 
+                    ex[where,self._spin] = 0,0 
                 else:
                     config_new = list(self.config)
                     config_new[ix1] = i1_new
@@ -77,9 +87,9 @@ def BackFlow(FNN):
                     coeff = self.model.pair_coeff(*where)
                     coeff *= (-1)**(sum(self.config_to_spin(self.config)[ix1+1:ix2])%2)
                     cx_new *= coeff 
-                    ex[where,self.spin] = cx_new, cx_new/cx 
+                    ex[where,self._spin] = cx_new, cx_new/cx 
             else:
-                ex[where,self.spin] = 0,0
+                ex[where,self._spin] = 0,0
         return ex,cx,None
 #class ORB(NN): # 1-particle orbital rotation
 #    def __init__(self,nsite,nelec,spin,orth=True,**kwargs):

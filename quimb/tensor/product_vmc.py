@@ -246,7 +246,7 @@ def pair_terms(i1,i2,spin):
 class NN(AmplitudeFactory):
     def __init__(self,backend='numpy',log_amp=True,fermion=False,to_spin=True,order='F'):
         self.backend = backend
-        self.jnp = np if backend=='numpy' else torch
+        self.set_backend(backend)
         self.log_amp = log_amp # if output is amplitude or log amplitude 
 
         self.is_tn = False
@@ -267,10 +267,10 @@ class NN(AmplitudeFactory):
     def input(self,config):
         if self.fermion and self.to_spin:
             ca,cb = config_to_ab(config) 
-            return np.stack([np.array(tsr,dtype=int) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+            return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
         else:
-            return np.array(config,dtype=int)
-    def wfn2backend(self,backend):
+            return np.array(config,dtype=float)
+    def set_backend(self,backend):
         if backend=='numpy':
             tsr = np.zeros(1)
             self.jnp = np 
@@ -280,6 +280,7 @@ class NN(AmplitudeFactory):
             self.jnp = torch
             def _input(config):
                 return tensor2backend(self.input(config),backend) 
+            self._input = _input
         ar.set_backend(tsr)
     def log_amplitude(self,config,to_numpy=True):
         c = self._input(config)
@@ -375,7 +376,7 @@ class RBM(NN):
         return self.a,self.b,self.w
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
-        super().wfn2backend(backend)
+        self.set_backend(backend)
         self.a,self.b,self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) \
                                 for tsr in [self.a,self.b,self.w]]
     def get_x(self):
@@ -438,7 +439,7 @@ class FNN(NN):
             bi = (np.random.rand(nn[i]) * c + a) * eps 
             COMM.Bcast(bi,root=0)
             self.b.append(bi)
-        self.w.append(np.ones(nn[-1],self.nf))
+        self.w.append(np.ones((nn[-1],self.nf)))
         if fname is not None: 
             self.save_to_disc(self.w,self.b,fname)
         return self.w,self.b
@@ -463,11 +464,8 @@ class FNN(NN):
                 self.block_dict.append((start,stop))
                 start = stop
         self.nparam = stop
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        super().wfn2backend(backend)
-        self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.w]
-        self.b = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.b]
+    def set_backend(self,backend):
+        super().set_backend(backend)
         if self.afn=='logcosh':
             def _afn(x):
                 return self.jnp.log(self.jnp.cosh(x))
@@ -489,6 +487,11 @@ class FNN(NN):
         else:
             raise NotImplementedError
         self._afn = _afn 
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        self.set_backend(backend)
+        self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.w]
+        self.b = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.b]
     def get_x(self):
         ls = []
         for i in range(self.nl+1):
