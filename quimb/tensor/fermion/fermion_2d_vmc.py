@@ -20,7 +20,7 @@ from .fermion_vmc import (
     config2pn,
     FermionExchangeSampler,
 )
-from .fermion_core import FermionTensor,FermionTensorNetwork
+from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
 class FermionModel2D(FermionModel,Model2D):
     pass 
 class FermionExchangeSampler2D(FermionExchangeSampler,ExchangeSampler2D):
@@ -98,8 +98,8 @@ class Hubbard(FermionModel2D):
         data_map = get_data_map(symmetry=symmetry,flat=flat,spinless=spinless) 
         order = 'b1,k1,b2,k2'
         if spinless:
-            cre = data_map['cre'].copy() 
-            ann = data_map['ann'].copy() 
+            cre = data_map['cre'] 
+            ann = data_map['ann'] 
             h1 = np.tensordot(cre,ann,axes=([],[]))
             h1 = h1 + h1.transpose((2,3,0,1))
             h1.shape = (2,)*4
@@ -107,8 +107,8 @@ class Hubbard(FermionModel2D):
         else:
             h1 = []
             for spin in ('a','b'):
-                cre = data_map[f'cre_{spin}'].copy() 
-                ann = data_map[f'ann_{spin}'].copy() 
+                cre = data_map[f'cre_{spin}'] 
+                ann = data_map[f'ann_{spin}'] 
                 h1.append(np.tensordot(cre,ann,axes=([],[])))
                 h1[-1] = h1[-1] + h1[-1].transpose((2,3,0,1))
                 h1[-1].shape = (4,)*4
@@ -169,29 +169,29 @@ class Hubbard(FermionModel2D):
                 h[ix1,ix2] = -self.t
                 h[ix2,ix1] = -self.t
         return h
-#class FDKineticO2(Hubbard):
-#    def __init__(self,N,L,**kwargs):
-#        super().__init__(t,0.,N,N,**kwargs)
-#        self.eps = L/N if self.pbc else L/(N+1.)
-#
-#        t = .5 / self.eps**2
-#        self.l = 2. / self.eps**2
-#    def compute_local_energy_eigen(self,config):
-#        return self.l * sum(self.config2pn(config,0,len(config)))
-#    def get_h(self):
-#        h = np.zeros((self.nsite,)*2)
-#        for ix1 in range(self.nsite):
-#            i,j = self.flat2site(ix1)
-#            h[ix1,ix1] = self.l
-#            if i+1<self.Lx or self.pbc:
-#                ix2 = self.flatten(((i+1)%self.Lx,j))
-#                h[ix1,ix2] = -self.t
-#                h[ix2,ix1] = -self.t
-#            if j+1<self.Ly or self.pbc:
-#                ix2 = self.flatten((i,(j+1)%self.Ly))
-#                h[ix1,ix2] = -self.t
-#                h[ix2,ix1] = -self.t
-#        return h
+class FDKineticO2(Hubbard):
+    def __init__(self,N,L,**kwargs):
+        super().__init__(0,0.,N,N,**kwargs)
+        self.eps = L/N if self.pbc else L/(N+1.)
+
+        self.t = .5 / self.eps**2
+        self.l = 2. / self.eps**2
+    def compute_local_energy_eigen(self,config):
+        return self.l * sum(self.config2pn(config,0,len(config)))
+    def get_h(self):
+        h = np.zeros((self.nsite,)*2)
+        for ix1 in range(self.nsite):
+            i,j = self.flat2site(ix1)
+            h[ix1,ix1] = self.l
+            if i+1<self.Lx or self.pbc:
+                ix2 = self.flatten(((i+1)%self.Lx,j))
+                h[ix1,ix2] = -self.t
+                h[ix2,ix1] = -self.t
+            if j+1<self.Ly or self.pbc:
+                ix2 = self.flatten((i,(j+1)%self.Ly))
+                h[ix1,ix2] = -self.t
+                h[ix2,ix1] = -self.t
+        return h
 #class FDKineticO4(FermionModel2D):
 #    def __init__(self,N,L,spinless=False,**kwargs):
 #        super().__init__(N,N,**kwargs)
@@ -472,8 +472,110 @@ def get_hole_doped_product_state(Lx,Ly,holes,symmetry='u1',flat=True):
             continue
         fpeps = create_particle(fpeps,site,'sum',spinless=False,data_map=data_map)
     return fpeps 
-def get_fpeps_z2(Lx,Ly,D,typ='one',eps=0,flat=True,normalize=False):
-    from pyblock3.algebra.fermion_ops import peps_tensor_z2 
+def get_bond_state(Lx,Ly,M,site_order=None,symmetry='u1',flat=True,spin=None):
+    assert not(symmetry=='u11' and spin=='sum')
+    from pyblock3.algebra.fermion_ops import max_entangled_state
+    bond_state1 = max_entangled_state('++',symmetry=symmetry,flat=flat,spin='a') + \
+                  max_entangled_state('++',symmetry=symmetry,flat=flat,spin='b') if spin=='sum' else \
+                  max_entangled_state('++',symmetry=symmetry,flat=flat,spin=spin)
+    bond_state = bond_state1
+    for mode in range(1,M):
+        bond_state = np.tensordot(bond_state,bond_state1,axes=([],[]))
+    #print('bond state')
+    #print(bond_state)
+    left_idx = tuple([2*mode for mode in range(M)])
+    U,_,V = bond_state.tensor_svd(left_idx)
+    site_order = list(itertools.product(range(Lx),range(Ly))) if site_order is None else site_order
+
+    tn = FermionTensorNetwork([])
+    for (i,j) in site_order: 
+        #print(i,j)
+        if i<Lx-1:
+            uix = tuple([f'I{i},{j}_u{mode}_{spin}' for mode in range(M)]) 
+            bix = (rand_uuid(),)
+            vix = tuple([f'I{i+1},{j}_d{mode}_{spin}' for mode in range(M)]) 
+            utag,vtag = f'I{i},{j}',f'I{i+1},{j}'
+            tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True) 
+            tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True) 
+        if j<Ly-1:
+            uix = tuple([f'I{i},{j}_r{mode}_{spin}' for mode in range(M)]) 
+            bix = (rand_uuid(),)
+            vix = tuple([f'I{i},{j+1}_l{mode}_{spin}' for mode in range(M)]) 
+            utag,vtag = f'I{i},{j}',f'I{i},{j+1}'
+            tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True)
+            tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True)
+    return tn 
+def get_projector_state(Lx,Ly,tsrs,M,site_order=None,spin=None):
+    tn = FermionTensorNetwork([])
+    site_order = list(itertools.product(range(Lx),range(Ly))) if site_order is None else site_order
+    for (i,j) in site_order: 
+        inds = [f'k{i},{j}']
+        if i<Lx-1:
+            inds += [f'I{i},{j}_u{mode}_{spin}' for mode in range(M)]  
+        if j<Ly-1:
+            inds += [f'I{i},{j}_r{mode}_{spin}' for mode in range(M)]  
+        if i>0:
+            inds += [f'I{i},{j}_d{mode}_{spin}' for mode in range(M)]  
+        if j>0:
+            inds += [f'I{i},{j}_l{mode}_{spin}' for mode in range(M)]  
+        tags = f'I{i},{j}',f'ROW{i}',f'COL{j}'
+        print(i,j,inds) 
+        print(tsrs[i,j])
+        tn.add_tensor(FermionTensor(data=tsrs[i,j],inds=inds,tags=tags),virtual=True) 
+    return tn
+def get_fpeps_from_bra_ket(T,I,Lx,Ly):
+    from .fermion_2d import FPEPS
+    print(I)
+    T.add_tensor_network(I.H,virtual=True)
+    print(T)
+    for i,j in itertools.product(range(Lx),range(Ly)):
+        T.contract_tags(f'I{i},{j}',inplace=True)
+    T.view_as_(FPEPS,inplace=True,
+                site_tag_id='I{},{}',
+                row_tag_id='ROW{}',
+                col_tag_id='COL{}',
+                Lx=Lx,
+                Ly=Ly,
+                site_ind_id='k{},{}')
+    return T
+#def get_uniform_state(Lx,Ly,symmetry='z2',flat=True):
+#    if symmetry != 'z2':
+#        raise NotImplementedError
+#    from pyblock3.algebra.fermion_ops import uniform_z2 
+#    site_order = list(itertools.product(range(Lx),range(Ly)))
+#    tsrs = dict()
+#    for (i,j) in site_order:
+#        nvir = 4
+#        if i in (0,Lx-1):
+#            nvir -= 1
+#        if j in (0,Ly-1):
+#            nvir -= 1
+#        pattern = ''.join(['+']*(nvir+1))
+#        tsrs[i,j] = uniform_z2(pattern,flat=flat)
+#    M = 1
+#    I = get_bond_state(Lx,Ly,M,site_order=site_order,symmetry=symmetry,flat=flat,spin='a')
+#    T = get_projector_state(Lx,Ly,tsrs,M,site_order=site_order[::-1],spin='a')
+#    return get_fpeps_from_bra_ket(T,I,Lx,Ly)
+#    from ..tensor_2d import PEPS
+#    from .fermion_2d import FPEPS
+#    shape = 'urdlp'
+#    tn = PEPS.rand(Lx,Ly,bond_dim=1,phys_dim=1,shape=shape)
+#    patterns = get_patterns(Lx,Ly,shape=shape)
+#    ftn = FermionTensorNetwork([])
+#    for ix, iy in itertools.product(range(tn.Lx), range(tn.Ly)):
+#        T = tn[ix, iy]
+#        pattern = patterns[ix,iy]
+#        #put vaccum at site (ix, iy) and apply a^{\dagger}
+#        shape = (D,) * (len(pattern)-1) + (4,)
+#        data = peps_tensor_z2(shape,pattern,typ=typ,eps=eps,symmetry=symmetry,flat=flat,normalize=normalize)
+#        new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
+#        ftn.add_tensor(new_T, virtual=False)
+#    ftn.view_as_(FPEPS, like=tn)
+#    return ftn 
+ 
+def get_random_state(Lx,Ly,a=-1,b=1,symmetry='z2',flat=True,spinless=False,normalize=False):
+    assert symmetry=='z2' 
+    from pyblock3.algebra.fermion_ops import random 
     from ..tensor_2d import PEPS
     from .fermion_2d import FPEPS
     shape = 'urdlp'
@@ -484,8 +586,7 @@ def get_fpeps_z2(Lx,Ly,D,typ='one',eps=0,flat=True,normalize=False):
         T = tn[ix, iy]
         pattern = patterns[ix,iy]
         #put vaccum at site (ix, iy) and apply a^{\dagger}
-        shape = (D,) * (len(pattern)-1) + (4,)
-        data = peps_tensor_z2(shape, pattern,parity=0,typ=typ,eps=eps,flat=flat,normalize=normalize)
+        data = random(pattern,a=-1,b=1,symmetry=symmetry,flat=flat,normalize=normalize,spinless=spinless)
         new_T = FermionTensor(data, inds=T.inds, tags=T.tags)
         ftn.add_tensor(new_T, virtual=False)
     ftn.view_as_(FPEPS, like=tn)

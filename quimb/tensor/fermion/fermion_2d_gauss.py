@@ -3,9 +3,10 @@ import itertools,torch,h5py
 import scipy.optimize
 from pyblock3.algebra.fermion_ops import max_entangled_state,gauss
 from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
+from .fermion_2d_vmc import get_bond_state,get_projector_state,get_fpeps_from_bra_ket
 from .fermion_2d import FPEPS
 from .fermion_vmc import get_data_map
-from .product_vmc import config_to_ab
+from ..product_vmc import config_to_ab
 np.set_printoptions(suppress=True,linewidth=1000)
 #def inv_back(A,C,dC):
 #    # C = inv(A)
@@ -419,29 +420,31 @@ class SpinlessGaussianFPEPS: # for quadratic Hamiltonian only
                      options={'maxiter':maxiter})
         return result['x']
     def get_fixed_bond_state(self,symmetry='u1',flat=True,spin=None):
-        bond_state1 = max_entangled_state('++',symmetry=symmetry,flat=flat,spin=spin)
-        bond_state = bond_state1
-        for mode in range(1,self.M):
-            bond_state = np.tensordot(bond_state,bond_state1,axes=([],[]))
-        left_idx = tuple([2*mode for mode in range(self.M)])
-        U,_,V = bond_state.tensor_svd(left_idx)
-        tn = FermionTensorNetwork([])
-        for (i,j) in self.site_order: 
-            if i<self.Lx-1:
-                uix = tuple([f'I{i},{j}_u{mode}_{spin}' for mode in range(self.M)]) 
-                bix = (rand_uuid(),)
-                vix = tuple([f'I{i+1},{j}_d{mode}_{spin}' for mode in range(self.M)]) 
-                utag,vtag = f'I{i},{j}',f'I{i+1},{j}'
-                tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True) 
-                tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True) 
-            if j<self.Ly-1:
-                uix = tuple([f'I{i},{j}_r{mode}_{spin}' for mode in range(self.M)]) 
-                bix = (rand_uuid(),)
-                vix = tuple([f'I{i},{j+1}_l{mode}_{spin}' for mode in range(self.M)]) 
-                utag,vtag = f'I{i},{j}',f'I{i},{j+1}'
-                tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True)
-                tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True)
-        return tn 
+        #bond_state1 = max_entangled_state('++',symmetry=symmetry,flat=flat,spin=spin)
+        #bond_state = bond_state1
+        #for mode in range(1,self.M):
+        #    bond_state = np.tensordot(bond_state,bond_state1,axes=([],[]))
+        #left_idx = tuple([2*mode for mode in range(self.M)])
+        #U,_,V = bond_state.tensor_svd(left_idx)
+        #tn = FermionTensorNetwork([])
+        #for (i,j) in self.site_order: 
+        #    if i<self.Lx-1:
+        #        uix = tuple([f'I{i},{j}_u{mode}_{spin}' for mode in range(self.M)]) 
+        #        bix = (rand_uuid(),)
+        #        vix = tuple([f'I{i+1},{j}_d{mode}_{spin}' for mode in range(self.M)]) 
+        #        utag,vtag = f'I{i},{j}',f'I{i+1},{j}'
+        #        tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True) 
+        #        tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True) 
+        #    if j<self.Ly-1:
+        #        uix = tuple([f'I{i},{j}_r{mode}_{spin}' for mode in range(self.M)]) 
+        #        bix = (rand_uuid(),)
+        #        vix = tuple([f'I{i},{j+1}_l{mode}_{spin}' for mode in range(self.M)]) 
+        #        utag,vtag = f'I{i},{j}',f'I{i},{j+1}'
+        #        tn.add_tensor(FermionTensor(data=V.copy(),inds=bix+vix,tags=vtag),virtual=True)
+        #        tn.add_tensor(FermionTensor(data=U.copy(),inds=uix+bix,tags=utag),virtual=True)
+        #return tn 
+        return get_bond_state(self.Lx,self.Ly,self.M,site_order=self.site_order,
+                              symmetry=symmetry,flat=flat,spin=spin)
     def get_variational_bond_state(self,symmetry='u1',flat=True,spin=None):
         tn = FermionTensorNetwork([])
         left_inds = tuple(range(self.M))
@@ -477,41 +480,49 @@ class SpinlessGaussianFPEPS: # for quadratic Hamiltonian only
         fxn = self.get_fixed_bond_state if self.fix_bond else self.get_variational_bond_state 
         return fxn(symmetry=symmetry,flat=flat,spin=spin) 
     def get_projector_state(self,symmetry='u1',flat=True,spin=None):
-        tn = FermionTensorNetwork([])
+        #tn = FermionTensorNetwork([])
+        #for (i,j) in self.site_order: 
+        #    K = self.K[i,j]
+        #    U = self.cut_U(scipy.linalg.expm(K-K.T),i,j)
+        #    pattern = ''.join(['+']*U.shape[0])
+        #    data = gauss(pattern,U,symmetry=symmetry,flat=flat,spin=spin)
+
+        #    inds = [f'k{i},{j}'] if spin is None else [f'k{i},{j}_{spin}']
+        #    if i<self.Lx-1:
+        #        inds += [f'I{i},{j}_u{mode}_{spin}' for mode in range(self.M)]  
+        #    if j<self.Ly-1:
+        #        inds += [f'I{i},{j}_r{mode}_{spin}' for mode in range(self.M)]  
+        #    if i>0:
+        #        inds += [f'I{i},{j}_d{mode}_{spin}' for mode in range(self.M)]  
+        #    if j>0:
+        #        inds += [f'I{i},{j}_l{mode}_{spin}' for mode in range(self.M)]  
+        #    tags = f'I{i},{j}',f'ROW{i}',f'COL{j}'
+        #    tn.add_tensor(FermionTensor(data=data,inds=inds,tags=tags),virtual=True) 
+        #return tn
+        tsrs = dict() 
         for (i,j) in self.site_order: 
             K = self.K[i,j]
             U = self.cut_U(scipy.linalg.expm(K-K.T),i,j)
             pattern = ''.join(['+']*U.shape[0])
-            data = gauss(pattern,U,symmetry=symmetry,flat=flat,spin=spin)
-
-            inds = [f'k{i},{j}'] if spin is None else [f'k{i},{j}_{spin}']
-            if i<self.Lx-1:
-                inds += [f'I{i},{j}_u{mode}_{spin}' for mode in range(self.M)]  
-            if j<self.Ly-1:
-                inds += [f'I{i},{j}_r{mode}_{spin}' for mode in range(self.M)]  
-            if i>0:
-                inds += [f'I{i},{j}_d{mode}_{spin}' for mode in range(self.M)]  
-            if j>0:
-                inds += [f'I{i},{j}_l{mode}_{spin}' for mode in range(self.M)]  
-            tags = f'I{i},{j}',f'ROW{i}',f'COL{j}'
-            tn.add_tensor(FermionTensor(data=data,inds=inds,tags=tags),virtual=True) 
-        return tn
+            tsrs[i,j] = gauss(pattern,U,symmetry=symmetry,flat=flat,spin=spin)
+        return get_projector_state(self.Lx,self.Ly,tsrs,self.M,site_order=self.site_order)
     def get_fpeps(self,x,symmetry='u1',flat=True,spin=None):
         self.get_K(x) 
         tn = self.get_projector_state(symmetry=symmetry,flat=flat,spin=spin)
         tnI = self.get_bond_state(symmetry=symmetry,flat=flat,spin=spin) 
-        tn.add_tensor_network(tnI.H,virtual=True)
-        for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-            tn.contract_tags(f'I{i},{j}',inplace=True)
-        tn.view_as_(FPEPS,inplace=True,
-                    site_tag_id='I{},{}',
-                    row_tag_id='ROW{}',
-                    col_tag_id='COL{}',
-                    Lx=self.Lx,
-                    Ly=self.Ly,
-                    site_ind_id='k{},{}')
-        print(tn)
-        return tn
+        return get_fpeps_from_bra_ket(tn,tnI,self.Lx,self.Ly)
+        #tn.add_tensor_network(tnI.H,virtual=True)
+        #for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+        #    tn.contract_tags(f'I{i},{j}',inplace=True)
+        #tn.view_as_(FPEPS,inplace=True,
+        #            site_tag_id='I{},{}',
+        #            row_tag_id='ROW{}',
+        #            col_tag_id='COL{}',
+        #            Lx=self.Lx,
+        #            Ly=self.Ly,
+        #            site_ind_id='k{},{}')
+        #print(tn)
+        #return tn
     def init(self,config,eps=1e-2):
         self.config = config
         x1 = [None] * self.nsite
