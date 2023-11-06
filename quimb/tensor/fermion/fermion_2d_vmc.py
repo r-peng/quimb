@@ -117,12 +117,15 @@ class Hubbard(FermionModel2D):
             else:
                 self.gate = {None:((h1[0]+h1[1]),order)}
         self.spinless = spinless
+        self.sep = sep
 
         #self.pairs = self.pairs_nn()
         if self.deterministic:
             self.batched_pairs = dict()
-            self.batch_deterministic_nnh() 
-            self.batch_deterministic_nnv() 
+            self.get_batch_deterministic(0,self.Lx-1,0,1)
+            self.get_batch_deterministic(0,self.Lx-1,1,0)
+            #self.batch_deterministic_nnh() 
+            #self.batch_deterministic_nnv() 
         else:
             self.batch_plq_nn()
     def pair_key(self,site1,site2):
@@ -142,20 +145,28 @@ class Hubbard(FermionModel2D):
         return self.u*len(config[config==3])
     def pair_terms(self,i1,i2):
         if self.spinless:
-            return [(i2,i1,1)]
+            return [(i2,i1,1,None)]
         else:
             return self.pair_terms_full(i1,i2)
     def pair_terms_full(self,i1,i2):
         n1,n2 = pn_map[i1],pn_map[i2]
         nsum,ndiff = n1+n2,abs(n1-n2)
+        tag = None
         if ndiff==1:
             sign = 1 if nsum==1 else -1
-            return [(i2,i1,sign)]
+            if self.sep:
+                tag = 'a' if (i1+i2)%2==1 else 'b' 
+            return [(i2,i1,sign,tag)]
+        def _tag(i1,i2,i1_new,i2_new):
+            if not self.sep:
+                return None
+            tag = 'a' if (i2-i1)*(i2_new-i1_new)>0 else 'b'
+            return tag 
         if ndiff==2:
-            return [(1,2,-1),(2,1,1)] 
+            return [(1,2,-1,_tag(i1,i2,1,2)),(2,1,1,_tag(i1,i2,2,1))] 
         if ndiff==0:
             sign = i1-i2
-            return [(0,3,sign),(3,0,sign)]
+            return [(0,3,sign,_tag(i1,i2,0,3)),(3,0,sign,_tag(i1,i2,3,0))]
     def get_h(self):
         h = np.zeros((self.nsite,)*2)
         for ix1 in range(self.nsite):

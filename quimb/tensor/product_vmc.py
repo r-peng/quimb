@@ -63,13 +63,22 @@ class ProductAmplitudeFactory:
             if py[ix] is None:
                 return plq_new,None 
         return plq_new,sum(py)
-    def prob(self,config):
-        p = 1
+    #def prob(self,config):
+    #    p = 1
+    #    for ix,af in enumerate(self.af):
+    #        pix = af.prob(config[ix])
+    #        if pix is None:
+    #            return 0
+    #        p *= pix
+    #        #print(RANK,ix,pix)
+    #    return p 
+    def log_prob(self,config):
+        p = 0
         for ix,af in enumerate(self.af):
-            pix = af.prob(config[ix])
+            pix = af.log_prob(config[ix])
             if pix is None:
-                return 0
-            p *= pix
+                return None 
+            p += pix
             #print(RANK,ix,pix)
         return p 
     def replace_sites(self,tn,sites,cis):
@@ -89,7 +98,9 @@ class ProductAmplitudeFactory:
         Hvx = [af.extract_grad() for af in self.af] 
         return np.concatenate(Hvx) 
     def parse_energy(self,ex,batch_key,cx=None):
-        pairs = self.model.batched_pairs[batch_key][3]
+        pairs = self.model.batched_pairs[batch_key]
+        if not self.deterministic:
+            pairs = pairs[3]
         e = 0.
         p = 1 if cx is None else 0
         spins = ('a','b') if self.fermion else (None,)
@@ -117,11 +128,14 @@ class ProductAmplitudeFactory:
             if compute_Hv:
                 af.wfn2backend(backend='torch',requires_grad=True)
                 af.model.gate2backend('torch')
-            ex[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
-        #    print(ix)
-        #    print(ex[ix])
-        #    print(cx[ix])
-        #exit()
+            if af.is_tn:
+                ex[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
+            else:
+                pairs = self.model.batched_pairs[batch_key][3]
+                ex[ix],cx[ix] = af.batch_pair_energies(pairs)
+            print(RANK,ix,ex[ix])
+            print(RANK,ix,cx[ix])
+        exit()
 
         if compute_Hv:
             Hvx = self.propagate(self.parse_energy(ex,batch_key,cx=cx))
@@ -181,11 +195,70 @@ class ProductAmplitudeFactory:
         else:
             Hvx = None
         return cx,ex,vx,Hvx,err 
+    def batch_quantities_deterministic(self,batch_key,compute_Hv): # only used for Hessian
+        ex = [None] * self.naf
+        for ix,af in enumerate(self.af):
+            if compute_Hv:
+                af.wfn2backend(backend='torch',requires_grad=True)
+                af.model.gate2backend('torch')
+            if af.is_tn:
+                ex[ix] = af.batch_pair_energies_deterministic(batch_key,new_cache=compute_Hv)
+                ex[ix] = {key:(val,) for key,val in ex[ix].items()}
+            else:
+                pairs = self.model.batched_pairs[batch_key]
+                ex[ix] = af.batch_pair_energies(pairs,cx=self.cx[ix])[0]
+            #print(RANK,ix,ex[ix],self.cx[ix])
+        #exit()
+
+        ex = self.parse_energy(ex,batch_key,cx=self.cx)
+        if compute_Hv:
+            Hvx = self.propagate(ex)
+        else:
+            Hvx = 0.
+
+        ex = tensor2backend(ex,'numpy') 
+        if compute_Hv: 
+            self.wfn2backend()
+            for af in self.af:
+                af.model.gate2backend(self.backend)
+        return ex,Hvx
+    def compute_local_quantities_deterministic(self,compute_v,compute_Hv):
+        self.cx = [None] * self.naf 
+        if compute_v:
+            vx = [None] * self.naf
+            for ix,af in enumerate(self.af):
+                self.cx[ix],vx[ix] = af.get_grad_deterministic(af.config)
+                af.vx = None
+            vx = np.concatenate(vx)
+        else:
+            for ix,af in enumerate(self.af):
+                self.cx[ix] = af.unsigned_amplitude(af.config)
+                if af.is_tn:
+                    self.cx[ix] *= af.config_sign(self.config)
+            vx = None
+        cx = np.prod(np.array(self.cx))
+
+        ex = 0. 
+        Hvx = 0.
+        for key in self.model.batched_pairs:
+            ex_,Hvx_ = self.batch_quantities_deterministic(key,compute_Hv) 
+            ex += ex_
+            Hvx += Hvx_
+        eu = self.model.compute_local_energy_eigen(self.config)
+        ex = ex / cx + eu 
+        if compute_Hv: 
+            Hvx = Hvx / cx + eu * vx
+        else:
+            Hvx = None 
+        return cx,ex,vx,Hvx,0. 
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
         self.config = config 
         for af,config_ in zip(self.af,self.parse_config(config)):
             af.config = config_ 
-        return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
+        if self.deterministic:
+            return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
+        else:
+            return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
     #def batch_hessian_deterministic(self,config,batch_key):
     #    af = self.amplitude_factory
     #    af.wfn2backend(backend='torch',requires_grad=True)
@@ -291,6 +364,8 @@ class NN(AmplitudeFactory):
             c = tensor2backend(c,'numpy') 
             s = tensor2backend(s,'numpy') 
         return c,s
+    def log_prob(self,config):
+        return 2 * self.log_amplitude(config)[0]
     def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
         c = self._input(config)
         c = self.forward(c)
@@ -299,15 +374,15 @@ class NN(AmplitudeFactory):
         if to_numpy:
             c = tensor2backend(c,'numpy') 
         return c
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
-        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
-        jnp = torch if new_cache else np
+    def batch_pair_energies(self,pairs,cx=None):
         spins = ('a','b') if self.fermion else (None,)
-        if self.log_amp:
-            logcx,sx = self.log_amplitude(self.config,to_numpy=False)
-            cx = jnp.exp(logcx) * sx
-        else:
-            cx = self.unsigned_amplitude(self.config,to_numpy=False)
+        logcx = None
+        if cx is None:
+            if self.log_amp:
+                logcx,sx = self.log_amplitude(self.config,to_numpy=False)
+                cx = self.jnp.exp(logcx) * sx
+            else:
+                cx = self.unsigned_amplitude(self.config,to_numpy=False)
         ex = dict()
         for where in pairs:
             ix1,ix2 = [self.flatten(site) for site in where]
@@ -323,30 +398,35 @@ class NN(AmplitudeFactory):
                         config_new[ix2] = i2_new 
                         if self.log_amp:
                             logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
-                            cx_new = jnp.exp(logcx_new) * sx_new
-                            ex[where,spin] = cx_new,jnp.exp(logcx_new-logcx) * sx_new / sx 
+                            cx_new = self.jnp.exp(logcx_new) * sx_new
+                            ratio = cx_new / cx if logcx is None else \
+                                    self.jnp.exp(logcx_new-logcx) * sx_new / sx  
                         else:
                             cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
-                            ex[where,spin] = cx_new, cx_new/cx 
+                            ratio = cx_new / cx
+                        ex[where,spin] = cx_new, ratio 
             else:
                 for spin in spins:
                     ex[where,spin] = 0,0
-        return ex,cx,None
-    def get_grad_from_plq(self,plq=None):
+        return ex,cx
+    def get_grad_deterministic(self,config):
         if self.vx is not None:
-            return self.vx
+            return None,self.vx
         self.wfn2backend(backend='torch',requires_grad=True)
         if self.log_amp:
-            cx,_ = self.log_amplitude(self.config,to_numpy=False) 
-            _,self.vx = self.propagate(cx) 
+            cx,_ = self.log_amplitude(config,to_numpy=False) 
+            cx,self.vx = self.propagate(cx) 
+            cx = np.exp(cx) 
         else:
-            cx = self.unsigned_amplitude(self.config,to_numpy=False) 
+            cx = self.unsigned_amplitude(config,to_numpy=False) 
             cx,self.vx = self.propagate(cx) 
             self.vx /= cx
         #print(self.config,self.vx)
         #exit()
         self.wfn2backend()
-        return self.vx 
+        return cx,self.vx 
+    def get_grad_from_plq(self,plq=None):
+        return self.get_grad_deterministic(self.config)[1]
 class RBM(NN):
     def __init__(self,nv,nh,**kwargs):
         self.nv,self.nh = nv,nh
@@ -357,7 +437,7 @@ class RBM(NN):
         # small numbers initialized in range (a,b)
         c = b-a
         self.a = (np.random.rand(self.nv) * c + a) * eps 
-        self.b = (np.random.rand(self.nh) * c + a) * eps 
+        self.b = (np.random.rand(self.nh) * c + a) 
         self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps
         COMM.Bcast(self.a,root=0)
         COMM.Bcast(self.b,root=0)

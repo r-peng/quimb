@@ -54,15 +54,20 @@ def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
     return deltas,dE,wmin,eps
-def _newton_block_solve(H,E,S,g,cond):
+def _newton_block_solve(H,E,S,g,cond,eigen=True):
     # hessian 
     hess = H - E * S
-    # smallest eigenvalue
-    w = np.linalg.eigvals(hess)
-    idx = np.argmin(w.real)
-    wmin = w[idx]
-    # solve
-    deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
+    if eigen:
+        w,v = np.linalg.eig(hess)
+        wmin = np.amin(w.real)
+        w += max(0.,cond-wmin.real)
+        deltas = np.dot(v/w.reshape(1,len(g)),np.dot(v.T.conj(),g)).real
+    else:
+        # smallest eigenvalue
+        w = np.linalg.eigvals(hess)
+        wmin = np.amin(w.real)
+        # solve
+        deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
     return deltas,dE,wmin
@@ -86,8 +91,8 @@ def _select_eigenvector(w,v):
     #    idx = np.argmin(w)
     z0_sq = v[0,:] ** 2
     idx = np.argmax(z0_sq)
-    #v = v[1:,idx]/v[0,idx]
-    v = v[1:,idx]/np.sign(v[0,idx])
+    v = v[1:,idx]/v[0,idx]
+    #v = v[1:,idx]/np.sign(v[0,idx])
     return w[idx],v,idx
 def blocking_analysis(weights, energies, neql, printQ=False):
     nSamples = weights.shape[0] - neql
@@ -580,7 +585,20 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            self.deltas = np.linalg.solve(self.S,self.g)
+            n1 = 538
+            n2 = n1 + 18
+            n3 = n2 + 100
+            print('norm11=',np.linalg.norm(self.S[:n1,:n1]))
+            print('norm12=',np.linalg.norm(self.S[:n1,n1:n2]))
+            print('norm13=',np.linalg.norm(self.S[:n1,n2:n3]))
+            print('norm14=',np.linalg.norm(self.S[:n1,n3:]))
+            print('norm22=',np.linalg.norm(self.S[n1:n2,n1:n2]))
+            print('norm23=',np.linalg.norm(self.S[n1:n2,n2:n3]))
+            print('norm24=',np.linalg.norm(self.S[n1:n2,n3:]))
+            print('norm33=',np.linalg.norm(self.S[n2:n3,n2:n3]))
+            print('norm34=',np.linalg.norm(self.S[n2:n3,n3:]))
+            print('norm44=',np.linalg.norm(self.S[n3:,n3:]))
+            self.deltas = np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
         else:
             self.deltas = np.empty(self.nparam,dtype=self.dtype)
             for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
@@ -749,14 +767,15 @@ class TNVMC: # stochastic sampling
 
         if self.optimizer=='rgn':
             dE = self._transform_gradients_rgn(x0=deltas_sr)
+            if self.pure_newton:
+                xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+            else:
+                xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         elif self.optimizer=='lin':
             dE = self._transform_gradients_lin()
+            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         else:
             raise NotImplementedError
-        if self.pure_newton:
-            xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
-        else:
-            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
         deltas_rgn = self.deltas
         if self.check is None:
             return xnew_rgn
@@ -778,12 +797,14 @@ class TNVMC: # stochastic sampling
             self.deltas = deltas_sr
             return xnew_sr
     def _transform_gradients_lin(self,solve_dense=None,solve_full=None):
-        raise NotImplementedError
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
+        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
         if solve_dense:
             dE = self._transform_gradients_lin_dense(solve_full=solve_full)
         else:
+            raise NotImplementedError
             dE = self._transform_gradients_lin_iterative(solve_full=solve_full)
         return dE
     def _scale_eigenvector(self):
@@ -804,8 +825,8 @@ class TNVMC: # stochastic sampling
         print('\tscale2=',denom)
     def _transform_gradients_lin_dense(self,solve_full=None):
         if RANK>0:
-            return 
-        self.deltas = np.zeros_like(self.x)
+            return 0. 
+        self.deltas = np.zeros(self.nparam)
         solve_full = self.solve_full if solve_full is None else solve_full
         
         t0 = time.time()
@@ -1197,7 +1218,7 @@ class ExchangeSampler:
     def _burn_in(self,config=None,burn_in=None):
         if config is not None:
             self.config = config 
-        self.px = np.log(self.af.prob(self.af.parse_config(self.config)))
+        self.px = self.af.log_prob(self.af.parse_config(self.config))
 
         if RANK==0:
             print('\tlog prob=',self.px)
@@ -1488,10 +1509,13 @@ class AmplitudeFactory:
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
-    def prob(self, config):
+    def log_prob(self, config):
         """Calculate the probability of a configuration.
         """
-        return self.unsigned_amplitude(config) ** 2
+        cx = self.unsigned_amplitude(config)
+        if cx is None:
+            return None
+        return np.log(cx ** 2)
     def _new_log_prob_from_plq(self,plq,sites,cis):
         plq_new = self.replace_sites(plq.copy(),sites,cis) 
         cy = safe_contract(plq_new)
@@ -1618,12 +1642,13 @@ class AmplitudeFactory:
         if compute_Hv:
             self.wfn2backend(backend='torch',requires_grad=True)
         ex = self.batch_pair_energies_deterministic(batch_key,new_cache=compute_Hv)
+        if len(ex)==0:
+            return 0,0
+        ex = sum(ex.values())
+        Hvx = 0
         if compute_Hv:
             ex,Hvx = self.propagate(ex)
             self.wfn2backend()
-        else:
-            ex = 0. if len(ex)==0 else sum(ex.values()) 
-            Hvx = 0.
         return ex,Hvx
     def compute_local_quantities_deterministic(self,compute_v,compute_Hv):
         if compute_v:

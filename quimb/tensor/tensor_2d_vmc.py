@@ -379,42 +379,21 @@ class AmplitudeFactory2D(AmplitudeFactory):
         env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=self.rix1,imin=self.rix2)
 
         if env_bot is None and env_top is None:
-            cx = 0. if to_numpy else None
-            return cx 
+            return None
 
         try:
             tn = env_bot.copy()
             tn.add_tensor_network(env_top,virtual=False)
         except AttributeError:
-            cx = 0. if to_numpy else None
-            return cx 
+            return None 
 
         cx = safe_contract(tn)
+        if cx is None:
+            return None
         if to_numpy:
-            cx = 0. if cx is None else tensor2backend(cx,'numpy')
+            cx = tensor2backend(cx,'numpy')
         return cx  
 ##### hamiltonian methods #######
-    def pair_energy_deterministic(self,site1,site2,cache_bot=None,cache_top=None):
-        ix1,ix2 = [self.flatten(site) for site in (site1,site2)]
-        i1,i2 = self.config[ix1],self.config[ix2]
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return None 
-        ex = [] 
-        coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(site1,site2)
-        for i1_new,i2_new,coeff in self.model.pair_terms(i1,i2):
-            config_new = list(self.config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = self.parse_config(tuple(config_new))
-            sign_new = self.config_sign(config_new)
-
-            cx_new = self.unsigned_amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
-            if cx_new is None:
-                continue
-            ex.append(coeff * sign_new * cx_new)
-        if len(ex)==0:
-            return None
-        return sum(ex) * coeff_comm
     def batch_pair_energies_from_plq(self,batch_key,new_cache=False):
         fxn = self.batch_pair_energies_from_plq_pbc if self.pbc else \
               self.batch_pair_energies_from_plq_obc
@@ -477,7 +456,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
                     ex[where,tag] = 0,0
                 continue
             coeff_comm = self.model.pair_coeff(*where) * self.intermediate_sign(self.config,ix1,ix2)
-            for i1_new,i2_new,coeff in self.model.pair_terms(i1,i2):
+            for i1_new,i2_new,coeff,tag in self.model.pair_terms(i1,i2):
                 config_new = list(self.config)
                 config_new[ix1] = i1_new
                 config_new[ix2] = i2_new 
@@ -487,15 +466,38 @@ class AmplitudeFactory2D(AmplitudeFactory):
                 eij = _contract_3row(eij,i,x_bsz) * coeff * coeff_comm *  sign * sign_new 
                 ex[where,tag] = eij,eij/cij 
         return ex,cx,None
+    def update_pair_energy_deterministic(self,site1,site2,cache_bot=None,cache_top=None):
+        ix1,ix2 = [self.flatten(site) for site in (site1,site2)]
+        i1,i2 = self.config[ix1],self.config[ix2]
+        ex = dict() 
+        if not self.model.pair_valid(i1,i2): # term vanishes 
+            return ex 
+        coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(site1,site2)
+        for i1_new,i2_new,coeff,tag in self.model.pair_terms(i1,i2):
+            #print(i1,i2,i1_new,i2_new,tag)
+            config_new = list(self.config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = self.parse_config(tuple(config_new))
+            sign_new = self.config_sign(config_new)
+
+            cx_new = self.unsigned_amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
+            if cx_new is None:
+                continue
+            #if tag in ex:
+                #print(ex)
+            #    exit()
+            ex[tag] = coeff * sign_new * cx_new * coeff_comm
+        return ex
     def batch_pair_energies_deterministic(self,batch_key,new_cache=False):
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
 
         ex = dict() 
         for site1,site2 in self.model.batched_pairs[batch_key]:
-            eij = self.pair_energy_deterministic(site1,site2,cache_bot=cache_bot,cache_top=cache_top)
-            if eij is not None:
-                ex[site1,site2] = eij
+            ex_ij = self.update_pair_energy_deterministic(site1,site2,cache_bot=cache_bot,cache_top=cache_top)
+            for tag,eij in ex_ij.items():
+                ex[(site1,site2),tag] = eij 
         return ex
 ####################################################################
 # models
@@ -549,60 +551,83 @@ class Model2D(Model):
     #                    where = self.flat2site(min(ix1,ix2)),self.flat2site(max(ix1,ix2))
     #                    ls.append(where)
     #    return ls
-    def batch_deterministic_nnh(self,d=1):
-        for i in range(self.Lx):
-            ls = self.batched_pairs.get((i,i),[])
-            for j in range(self.Ly):
-                if j+d<self.Ly:
-                    where = (i,j),(i,j+d)
-                    ls.append(where)
-                elif self.pbc:
-                    where = (i,(j+d)%self.Ly),(i,j)
-                    ls.append(where)
-                else:
-                    pass
-            self.batched_pairs[i,i] = ls
-    def batch_deterministic_nnv(self,d=1):
-        for i in range(self.Lx-d):
-            ls = self.batched_pairs.get((i,i+d),[])
-            for j in range(self.Ly):
-                where = (i,j),(i+d,j)
-                ls.append(where)
-            self.batched_pairs[i,i+d] = ls
-        if not self.pbc:
-            return
-        ls = self.batched_pairs.get('pbc',[]) 
-        for (i,j) in itertools.product(range(self.Lx-d,self.Lx),range(self.Ly)):
-            where = ((i+d)%self.Lx,j),(i,j)
-            ls.append(where)
-        self.batched_pairs['pbc'] = ls
-    def batch_deterministic_diag(self):
-        for i in range(self.Lx-1):
-            ls = self.batched_pairs.get((i,i+1),[])
-            for j in range(self.Ly):
-                if i+1<self.Lx and j+1<self.Ly:
-                    where = (i,j),(i+1,j+1)
-                    ls.append(where)
-                    where = (i,j+1),(i+1,j)
-                    ls.append(where)
-                else:
-                    if self.pbc:
-                        where = (i,j),(i+1,(j+1)%self.Ly)
-                        ls.append(where)
-                        
-                        where = (i,(j+1)%self.Ly),(i+1,j)
-                        ls.append(where)
-            self.batched_pairs[i,i+1] = ls
-        if not self.pbc:
-            return
-        ls = self.batched_pairs.get('pbc',[])
-        for j in range(self.Ly):
-            where = (0,(j+1)%self.Ly),(self.Lx-1,j)
-            ls.append(where)
-            
-            where = (0,j),(self.Lx-1,(j+1)%self.Ly)
-            ls.append(where)
-        self.batched_pairs['pbc'] = ls 
+    #def batch_deterministic_nnh(self,d=1):
+    #    for i in range(self.Lx):
+    #        ls = self.batched_pairs.get((i,i),[])
+    #        for j in range(self.Ly):
+    #            if j+d<self.Ly:
+    #                where = (i,j),(i,j+d)
+    #                ls.append(where)
+    #            elif self.pbc:
+    #                where = (i,(j+d)%self.Ly),(i,j)
+    #                ls.append(where)
+    #            else:
+    #                pass
+    #        self.batched_pairs[i,i] = ls
+    #def batch_deterministic_nnv(self,d=1):
+    #    for i in range(self.Lx-d):
+    #        ls = self.batched_pairs.get((i,i+d),[])
+    #        for j in range(self.Ly):
+    #            where = (i,j),(i+d,j)
+    #            ls.append(where)
+    #        self.batched_pairs[i,i+d] = ls
+    #    if not self.pbc:
+    #        return
+    #    ls = self.batched_pairs.get('pbc',[]) 
+    #    for (i,j) in itertools.product(range(self.Lx-d,self.Lx),range(self.Ly)):
+    #        where = ((i+d)%self.Lx,j),(i,j)
+    #        ls.append(where)
+    #    self.batched_pairs['pbc'] = ls
+    #def batch_deterministic_diag(self):
+    #    for i in range(self.Lx-1):
+    #        ls = self.batched_pairs.get((i,i+1),[])
+    #        for j in range(self.Ly):
+    #            if i+1<self.Lx and j+1<self.Ly:
+    #                where = (i,j),(i+1,j+1)
+    #                ls.append(where)
+    #                where = (i,j+1),(i+1,j)
+    #                ls.append(where)
+    #            else:
+    #                if self.pbc:
+    #                    where = (i,j),(i+1,(j+1)%self.Ly)
+    #                    ls.append(where)
+    #                    
+    #                    where = (i,(j+1)%self.Ly),(i+1,j)
+    #                    ls.append(where)
+    #        self.batched_pairs[i,i+1] = ls
+    #    if not self.pbc:
+    #        return
+    #    ls = self.batched_pairs.get('pbc',[])
+    #    for j in range(self.Ly):
+    #        where = (0,(j+1)%self.Ly),(self.Lx-1,j)
+    #        ls.append(where)
+    #        
+    #        where = (0,j),(self.Lx-1,(j+1)%self.Ly)
+    #        ls.append(where)
+    #    self.batched_pairs['pbc'] = ls 
+    def get_batch_deterministic(self,imin,imax,dx,dy):
+        if imin is None:
+            key = 'pbc'
+            irange = range(self.Lx-dx,self.Lx)
+        else:
+            key = imin,imax
+            irange = range(imin,imax+1-dx)
+        if key not in self.batched_pairs:
+            self.batched_pairs[key] = []
+        for i,j in itertools.product(irange,range(self.Ly)):
+            site1 = i,j
+            if self.pbc:
+                site2 = i+dx,(j+dy)%self.Ly
+                ix1,ix2 = self.flatten(site1),self.flatten(site2)
+                if ix1>ix2:
+                    ix1,ix2 = ix2,ix1
+                where = self.flat2site(ix1),self.flat2site(ix2)
+                self.batched_pairs[key].append(where)
+            elif j+dy<self.Ly:
+                where = site1,(i+dx,j+dy)
+                self.batched_pairs[key].append(where)
+            else:
+                pass
     def batch_plq_nn(self):
         # OBC plqs
         self.batched_pairs = dict() 
@@ -1021,10 +1046,10 @@ class ExchangeSampler2D(ExchangeSampler):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return
-        cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
-        if cy is None:
+        #cy = self.af.unsigned_amplitude(self.af.parse_config(config_new))
+        py = self.af.log_prob(self.af.parse_config(config_new))
+        if py is None:
             return
-        py = np.log(tensor2backend(cy,'numpy')**2)
         acceptance = np.exp(py - self.px)
         if self.rng.uniform() < acceptance: # accept, update px & config & env_m
             self.px = py

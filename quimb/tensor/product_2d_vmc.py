@@ -32,7 +32,8 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):
-            af.update_cache(config_)
+            if af.is_tn:
+                af.update_cache(config_)
 ##### compress row methods  #####
     def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
         env_prev = [None] * self.naf 
@@ -93,7 +94,7 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
                              cache_bot=cache_bot_,cache_top=cache_top_,to_numpy=to_numpy)
             else:
                 cx[ix] = af.unsigned_amplitude(config[ix],to_numpy=to_numpy)
-        #print(config[2],cx)
+        #print(cx)
         #print(self.config_sign(config))
         #exit()
         return np.prod(cx)
