@@ -133,9 +133,9 @@ class ProductAmplitudeFactory:
             else:
                 pairs = self.model.batched_pairs[batch_key][3]
                 ex[ix],cx[ix] = af.batch_pair_energies(pairs)
-            print(RANK,ix,ex[ix])
-            print(RANK,ix,cx[ix])
-        exit()
+        #    print(RANK,ix,ex[ix])
+        #    print(RANK,ix,cx[ix])
+        #exit()
 
         if compute_Hv:
             Hvx = self.propagate(self.parse_energy(ex,batch_key,cx=cx))
@@ -437,7 +437,7 @@ class RBM(NN):
         # small numbers initialized in range (a,b)
         c = b-a
         self.a = (np.random.rand(self.nv) * c + a) * eps 
-        self.b = (np.random.rand(self.nh) * c + a) 
+        self.b = (np.random.rand(self.nh) * c + a) * eps 
         self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps
         COMM.Bcast(self.a,root=0)
         COMM.Bcast(self.b,root=0)

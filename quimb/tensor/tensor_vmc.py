@@ -1166,7 +1166,9 @@ class DenseSampler:
         plocal = [] 
         for config in configs:
             config = self.af.parse_config(config)
-            plocal.append(self.af.prob(config))
+            p = self.af.log_prob(config)
+            p = 0 if p is None else np.exp(p) 
+            plocal.append(p)
         #    print(RANK,plocal)
         #    exit()
         plocal = np.array(plocal)

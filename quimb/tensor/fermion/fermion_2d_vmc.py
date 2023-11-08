@@ -120,14 +120,17 @@ class Hubbard(FermionModel2D):
         self.sep = sep
 
         #self.pairs = self.pairs_nn()
+        self.batched_pairs = dict()
         if self.deterministic:
-            self.batched_pairs = dict()
             self.get_batch_deterministic(0,self.Lx-1,0,1)
             self.get_batch_deterministic(0,self.Lx-1,1,0)
             #self.batch_deterministic_nnh() 
             #self.batch_deterministic_nnv() 
         else:
-            self.batch_plq_nn()
+            self.get_batch_plq(0,self.Lx-1,0,1)
+            self.get_batch_plq(0,self.Lx-1,1,0)
+        #print(self.batched_pairs)
+        #exit()
     def pair_key(self,site1,site2):
         # site1,site2 -> (i0,j0),(x_bsz,y_bsz)
         dx = site2[0]-site1[0]
