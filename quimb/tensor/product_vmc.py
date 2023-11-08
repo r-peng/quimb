@@ -338,11 +338,15 @@ class NN(AmplitudeFactory):
         else:
             return i2,i1
     def input(self,config):
-        if self.fermion and self.to_spin:
-            ca,cb = config_to_ab(config) 
-            return np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+        if self.fermion:
+            if self.to_spin:
+                ca,cb = config_to_ab(config) 
+                config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+            else:
+                return np.array(config,dtype=float)
         else:
-            return np.array(config,dtype=float)
+            config = np.array(config,dtype=float)
+        return config * 2 - 1
     def set_backend(self,backend):
         if backend=='numpy':
             tsr = np.zeros(1)
