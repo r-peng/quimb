@@ -498,9 +498,8 @@ class RBM(NN):
         c = self.jnp.dot(self.a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,self.w) + self.b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nl,nf=1,afn='logcosh',scale=1,coeff=1,**kwargs):
+    def __init__(self,nv,nf=1,afn='logcosh',scale=1,coeff=1,**kwargs):
         self.nv = nv
-        self.nl = nl # number of hidden layer
         self.nf = nf
         assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
         self.afn = afn 
@@ -508,15 +507,10 @@ class FNN(NN):
         self.scale = scale
         super().__init__(**kwargs)
     def init(self,nn,eps,a=-1,b=1,fname=None): # nn is number of nodes in each hidden layer
-        if isinstance(nn,int):
-            nn = (nn,) * self.nl 
-        else:
-            assert len(nn)==self.nl
-
         self.w = []
         self.b = [] 
         c = b-a
-        for i in range(self.nl):
+        for i,ni in enumerate(nn):
             sh1 = self.nv if i==0 else nn[i-1]
             wi = (np.random.rand(sh1,nn[i]) * c + a) * eps 
             COMM.Bcast(wi,root=0)
@@ -543,8 +537,8 @@ class FNN(NN):
         self.w,self.b = w,b
         self.block_dict = []
         start = 0
-        for i in range(self.nl+1):
-            tsrs = [w[i]] if i==self.nl else [w[i],b[i]]
+        for i,wi in enumerate(self.w):
+            tsrs = [wi] if i==len(self.b) else [wi,b[i]]
             for tsr in tsrs:
                 stop = start + tsr.size
                 self.block_dict.append((start,stop))
@@ -580,16 +574,16 @@ class FNN(NN):
         self.b = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.b]
     def get_x(self):
         ls = []
-        for i in range(self.nl+1):
-            ls.append(tensor2backend(self.w[i],'numpy').flatten())
-            if i<self.nl: 
+        for i,wi in enumerate(self.w):
+            ls.append(tensor2backend(wi,'numpy').flatten())
+            if i<len(self.b): 
                 ls.append(tensor2backend(self.b[i],'numpy'))
         return np.concatenate(ls)
-    def load_from_disc(self,fname):
+    def load_from_disc(self,fname,nl):
         f = h5py.File(fname,'r')
         self.w = []
         self.b = []
-        for i in range(self.nl+1):
+        for i in range(nl):
             try:
                 self.w.append(f[f'w{i}'][:])
             except:
@@ -612,13 +606,13 @@ class FNN(NN):
                 pass
         f.close()
     def update(self,x,fname=None,root=0):
-        for i in range(self.nl+1):
+        for i in range(len(self.w)):
             start,stop = self.block_dict[2*i]
             size = stop-start
             xi,x = x[:size],x[size:]
             self.w[i] = xi.reshape(self.w[i].shape)
 
-            if i<self.nl:
+            if i<len(self.b):
                 start,stop = self.block_dict[2*i+1]
                 size = stop-start
                 xi,x = x[:size],x[size:]
@@ -628,13 +622,13 @@ class FNN(NN):
         self.wfn2backend()
     def extract_grad(self):
         ls = []
-        for i in range(self.nl+1):
-            ls.append(tensor2backend(self.tensor_grad(self.w[i]),'numpy').flatten())
-            if i<self.nl: 
+        for i,wi in enumerate(self.w):
+            ls.append(tensor2backend(self.tensor_grad(wi),'numpy').flatten())
+            if i<len(self.b): 
                 ls.append(tensor2backend(self.tensor_grad(self.b[i]),'numpy'))
         return np.concatenate(ls)
     def forward(self,c):
-        for i in range(self.nl):
+        for i in range(len(self.b)):
             c = self.jnp.matmul(c,self.w[i]) + self.b[i]    
             c = self._afn(c)
         return self.jnp.matmul(c,self.w[-1])

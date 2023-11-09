@@ -154,15 +154,11 @@ class Hubbard(FermionModel2D):
     def pair_terms_full(self,i1,i2):
         n1,n2 = pn_map[i1],pn_map[i2]
         nsum,ndiff = n1+n2,abs(n1-n2)
-        tag = None
         if ndiff==1:
             sign = 1 if nsum==1 else -1
-            if self.sep:
-                tag = 'a' if (i1+i2)%2==1 else 'b' 
+            tag = 'a' if (i1+i2)%2==1 else 'b' 
             return [(i2,i1,sign,tag)]
         def _tag(i1,i2,i1_new,i2_new):
-            if not self.sep:
-                return None
             tag = 'a' if (i2-i1)*(i2_new-i1_new)>0 else 'b'
             return tag 
         if ndiff==2:

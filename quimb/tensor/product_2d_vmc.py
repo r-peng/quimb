@@ -104,42 +104,53 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
 class FNN2D(FNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nl,**kwargs):
+    def __init__(self,Lx,Ly,nv,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,nl,**kwargs)
+        super().__init__(nv,**kwargs)
 class SIGN2D(SIGN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nl,**kwargs)
-class CNN2D(NN):
-    def __init__(self,Lx,Ly,kx,ky,**kwargs):
-        super().__init__(**kwargs)
-        self.Lx,self.Ly = Lx,Ly
-        self.kx,self.ky = kx,ky 
-    def init(self,eps,a=-1,b=1,fname=None):
-        self.nl = 1
-        Lx,Ly = self.Lx,self.Ly
-        self.psi = dict()
-        ksize = self.kx * self.ky
-        c = b-a
-        while Lx>1 and Ly>1:
-            for i,j in itertools.product(range(Lx-self.kx),range(Ly-self.ky)):
-                wij = np.random.rand(ksize) *  
-    def log_amplitude(self,config,to_numpy=True):
-        c = np.array(config,dtype=float).reshape((self.Lx,self.Ly)) 
-        jnp,c = self.get_backend(c=c)
-        for i in range(self.nl-1):
-            c = self.convolve(c,self.w[i],jnp) + self.b[i]
-            c = jnp.log(jnp.cosh(c)) 
-        c = jnp.dot(c,self.w[-1])
-        #exit()
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-        return c,0
-    def convolve(self,x,w,jnp):
-        v = jnp.zeros((self.Lx,self.Ly),requires_grad=True) 
-        for i,j in itertools.product(range(self.Lx-kx),range(self.Ly-ky)):
-            v[i:i+kx,j:j+ky] += jnp.matmul(w[i,j,:,:],x[i:i+kx,j:j+ky].flatten()).reshape((kx,ky))
-        return v 
+#class CNN2D(FNN,AmplitudeFactory2D):
+#    def __init__(self,Lx,Ly,nv,kx=2,ky=2,**kwargs):
+#        super().__init__(nv,None,**kwargs)
+#        self.Lx,self.Ly = Lx,Ly
+#        self.kx,self.ky = kx,ky 
+#        self.ksize = kx * ky
+#    def init(self,eps,a=-1,b=1,fname=None):
+#        Lx,Ly = self.Lx,self.Ly
+#        self.w = [] 
+#        c = b-a
+#        while Lx>self.kx and Ly>self.ky:
+#            Lx -= self.kx
+#            Ly -= self.ky
+#            nn = Lx * Ly
+# 
+#            wi = (np.random.rand(nn,self.ksize) * c + a) * eps
+#            COMM.Bcast(wi,root=0)
+#            self.w.append(wi)
+#
+#            bi = (np.random.rand(nn) * c + a) * eps
+#            COMM.Bcast(bi,root=0)
+#            self.b.append(bi)
+#        self.w.append(np.ones(ksize))    
+#    def load_from_disc(self,fname):
+#        return super.__init__(fname,min(self.Lx,self.Ly))
+#    def log_amplitude(self,config,to_numpy=True):
+#        c = np.array(config,dtype=float).reshape((self.Lx,self.Ly)) 
+#        jnp,c = self.get_backend(c=c)
+#        for i in range(self.nl-1):
+#            c = self.convolve(c,self.w[i],jnp) + self.b[i]
+#            c = jnp.log(jnp.cosh(c)) 
+#        c = jnp.dot(c,self.w[-1])
+#        #exit()
+#        if to_numpy:
+#            c = tensor2backend(c,'numpy') 
+#        return c,0
+#    def convolve(self,x,w,jnp):
+#        v = jnp.zeros((self.Lx,self.Ly),requires_grad=True) 
+#        for i,j in itertools.product(range(self.Lx-kx),range(self.Ly-ky)):
+#            v[i:i+kx,j:j+ky] += jnp.matmul(w[i,j,:,:],x[i:i+kx,j:j+ky].flatten()).reshape((kx,ky))
+#        return v 
