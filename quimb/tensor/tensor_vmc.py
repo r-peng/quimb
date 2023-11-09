@@ -585,19 +585,19 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            n1 = 538
-            n2 = n1 + 18
-            n3 = n2 + 100
-            print('norm11=',np.linalg.norm(self.S[:n1,:n1]))
-            print('norm12=',np.linalg.norm(self.S[:n1,n1:n2]))
-            print('norm13=',np.linalg.norm(self.S[:n1,n2:n3]))
-            print('norm14=',np.linalg.norm(self.S[:n1,n3:]))
-            print('norm22=',np.linalg.norm(self.S[n1:n2,n1:n2]))
-            print('norm23=',np.linalg.norm(self.S[n1:n2,n2:n3]))
-            print('norm24=',np.linalg.norm(self.S[n1:n2,n3:]))
-            print('norm33=',np.linalg.norm(self.S[n2:n3,n2:n3]))
-            print('norm34=',np.linalg.norm(self.S[n2:n3,n3:]))
-            print('norm44=',np.linalg.norm(self.S[n3:,n3:]))
+            #n1 = 538
+            #n2 = n1 + 18
+            #n3 = n2 + 100
+            #print('norm11=',np.linalg.norm(self.S[:n1,:n1]))
+            #print('norm12=',np.linalg.norm(self.S[:n1,n1:n2]))
+            #print('norm13=',np.linalg.norm(self.S[:n1,n2:n3]))
+            #print('norm14=',np.linalg.norm(self.S[:n1,n3:]))
+            #print('norm22=',np.linalg.norm(self.S[n1:n2,n1:n2]))
+            #print('norm23=',np.linalg.norm(self.S[n1:n2,n2:n3]))
+            #print('norm24=',np.linalg.norm(self.S[n1:n2,n3:]))
+            #print('norm33=',np.linalg.norm(self.S[n2:n3,n2:n3]))
+            #print('norm34=',np.linalg.norm(self.S[n2:n3,n3:]))
+            #print('norm44=',np.linalg.norm(self.S[n3:,n3:]))
             self.deltas = np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
         else:
             self.deltas = np.empty(self.nparam,dtype=self.dtype)

@@ -523,8 +523,20 @@ class Model2D(Model):
                     ix1,ix2 = ix2,ix1
                 where = self.flat2site(ix1),self.flat2site(ix2)
                 ls.append(where)
+                if not(dx==1 and dy==1):
+                    continue
+                site1,site2 = (i,(j+dy)%self.Ly),((i+dx)%self.Lx,j)
+                ix1,ix2 = self.flatten(site1),self.flatten(site2)
+                if ix1>ix2:
+                    ix1,ix2 = ix2,ix1
+                where = self.flat2site(ix1),self.flat2site(ix2)
+                ls.append(where)
             elif j+dy<self.Ly:
                 where = site1,(i+dx,j+dy)
+                ls.append(where)
+                if not(dx==1 and dy==1):
+                    continue
+                where = (i,j+dy),(i+dx,j)
                 ls.append(where)
             else:
                 pass
@@ -740,22 +752,32 @@ class J1J2(Model2D): # prototypical next nn model
         self.J1,self.J2 = J1,J2
         self.gate = {None:(get_gate2((1.,1.,0.)),'b1,k1,b2,k2')}
 
+        self.batched_pairs = dict()
         if self.deterministic:
-            self.batched_pairs = dict()
-            self.batch_deterministic_nnh() 
-            self.batch_deterministic_nnv() 
-            self.batch_deterministic_diag() 
+            self.get_batch_deterministic(0,self.Lx-1,0,1)
+            self.get_batch_deterministic(0,self.Lx-1,1,0)
+            self.get_batch_deterministic(0,self.Lx-1,1,1)
         else:
-            self.batch_plq_diag()
+            self.get_batch_plq(0,self.Lx-1,0,1)
+            self.get_batch_plq(0,self.Lx-1,1,0)
+            self.get_batch_plq(0,self.Lx-1,1,1)
     def pair_valid(self,i1,i2):
         if i1==i2:
             return False
         else:
             return True
     def pair_key(self,site1,site2):
-        i0 = min(site1[0],site2[0],self.Lx-2)
-        j0 = min(site1[1],site2[1],self.Ly-2)
-        return (i0,j0),(2,2) 
+        (i1,j1),(i2,j2) = site1,site2
+        if abs(i1-i2)==1 and abs(j1-j2)==1:
+            i0 = min(site1[0],site2[0],self.Lx-2)
+            j0 = min(site1[1],site2[1],self.Ly-2)
+            return (i0,j0),(2,2) 
+        elif i1==i2:
+            return (i1,j1),(1,2)
+        elif j1==j2:
+            return (i1,j1),(2,1)
+        else:
+            raise ValueError(f'pair={(site1,site2)}')
     def pair_coeff(self,site1,site2):
         # coeff for pair tsr
         dx = abs(site2[0]-site1[0])
@@ -796,7 +818,7 @@ class J1J2(Model2D): # prototypical next nn model
                     e2 += (-1)**(config[ix1]+config[ix2])
         return .25 * (e1 * self.J1 + e2 * self.J2) 
     def pair_terms(self,i1,i2):
-        return [(1-i1,1-i2,.5)]
+        return [(1-i1,1-i2,.5,None)]
 #class SpinDensity(Hamiltonian):
 #    def __init__(self,Lx,Ly):
 #        self.Lx,self.Ly = Lx,Ly 

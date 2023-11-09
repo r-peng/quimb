@@ -498,12 +498,14 @@ class RBM(NN):
         c = self.jnp.dot(self.a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,self.w) + self.b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nl,nf=1,afn='logcosh',**kwargs):
+    def __init__(self,nv,nl,nf=1,afn='logcosh',scale=1,coeff=1,**kwargs):
         self.nv = nv
         self.nl = nl # number of hidden layer
         self.nf = nf
         assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
         self.afn = afn 
+        self.coeff = coeff
+        self.scale = scale
         super().__init__(**kwargs)
     def init(self,nn,eps,a=-1,b=1,fname=None): # nn is number of nodes in each hidden layer
         if isinstance(nn,int):
@@ -558,7 +560,7 @@ class FNN(NN):
                 return 1./(1.+self.jnp.exp(-x))    
         elif self.afn=='tanh':
             def _afn(x):
-                return self.jnp.tanh(self.coeff * x)
+                return self.scale * self.jnp.tanh(self.coeff * x)
         elif self.afn=='softplus':
             def _afn(x):
                 return self.jnp.log(1.+self.jnp.exp(x))
