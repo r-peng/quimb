@@ -59,7 +59,7 @@ class ProductAmplitudeFactory:
             if af.is_tn:
                 plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,cis[ix])
             else:
-                py[ix] = 2 * af.log_amplitude(config_new[ix])[0]
+                py[ix] = af.log_prob(config_new[ix])
             if py[ix] is None:
                 return plq_new,None 
         return plq_new,sum(py)
@@ -317,10 +317,13 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class NN(AmplitudeFactory):
-    def __init__(self,backend='numpy',log_amp=True,fermion=False,to_spin=True,order='F'):
+    def __init__(self,backend='numpy',log=True,phase=False,fermion=False,to_spin=True,order='F'):
         self.backend = backend
         self.set_backend(backend)
-        self.log_amp = log_amp # if output is amplitude or log amplitude 
+        self.log = log # if output is amplitude or log amplitude 
+        self.phase = phase
+        if phase:
+            assert log
 
         self.is_tn = False
         self.spin = None
@@ -359,34 +362,27 @@ class NN(AmplitudeFactory):
                 return tensor2backend(self.input(config),backend) 
             self._input = _input
         ar.set_backend(tsr)
-    def log_amplitude(self,config,to_numpy=True):
-        c = self._input(config)
-        c,s = self.forward(c),1
-        if not self.log_amp: # NN outputs amplitude
-            c,s = self.jnp.log(jnp.abs(c)),self.jnp.sign(c)
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-            s = tensor2backend(s,'numpy') 
-        return c,s
     def log_prob(self,config):
-        return 2 * self.log_amplitude(config)[0]
-    def unsigned_amplitude(self,config,cache_top=None,cache_bot=None,to_numpy=True):
+        if self.phase:
+            return 1
         c = self._input(config)
         c = self.forward(c)
-        if self.log_amp: # NN outputs log amplitude
-            c = self.jnp.exp(c)
-        if to_numpy:
-            c = tensor2backend(c,'numpy') 
-        return c
+        c = tensor2backend(c,'numpy') 
+        if self.log:
+            return 2 * c 
+        else:
+            return np.log(c**2) 
     def batch_pair_energies(self,pairs,cx=None):
         spins = ('a','b') if self.fermion else (None,)
         logcx = None
         if cx is None:
-            if self.log_amp:
-                logcx,sx = self.log_amplitude(self.config,to_numpy=False)
-                cx = self.jnp.exp(logcx) * sx
-            else:
-                cx = self.unsigned_amplitude(self.config,to_numpy=False)
+            config = self._input(self.config)
+            cx = self.forward(config)
+            if self.log:
+                logcx = cx 
+                if self.phase: 
+                    logcx = 1j * logcx
+                cx = self.jnp.exp(logcx)
         ex = dict()
         for where in pairs:
             ix1,ix2 = [self.flatten(site) for site in where]
@@ -400,33 +396,38 @@ class NN(AmplitudeFactory):
                         config_new = list(self.config)
                         config_new[ix1] = i1_new
                         config_new[ix2] = i2_new 
-                        if self.log_amp:
-                            logcx_new,sx_new = self.log_amplitude(config_new,to_numpy=False) 
-                            cx_new = self.jnp.exp(logcx_new) * sx_new
+                        config_new = self._input(config_new)
+                        cx_new = self.forward(config_new) 
+                        if self.log:
+                            logcx_new = cx_new
+                            if self.phase:
+                                logcx_new = 1j * logcx_new
+                            cx_new = self.jnp.exp(logcx_new) 
                             ratio = cx_new / cx if logcx is None else \
-                                    self.jnp.exp(logcx_new-logcx) * sx_new / sx  
+                                    self.jnp.exp(logcx_new-logcx)   
                         else:
-                            cx_new = self.unsigned_amplitude(config_new,to_numpy=False)
                             ratio = cx_new / cx
                         ex[where,spin] = cx_new, ratio 
             else:
                 for spin in spins:
                     ex[where,spin] = 0,0
+        #print(RANK,self.phase,ex)
+        #exit()
         return ex,cx
     def get_grad_deterministic(self,config):
         if self.vx is not None:
             return None,self.vx
         self.wfn2backend(backend='torch',requires_grad=True)
-        if self.log_amp:
-            cx,_ = self.log_amplitude(config,to_numpy=False) 
-            cx,self.vx = self.propagate(cx) 
+        config = self._input(config)
+        cx = self.forward(config) 
+        cx,self.vx = self.propagate(cx) 
+        if self.log:
+            if self.phase:
+                self.vx = 1j * self.vx
+                cx = 1j * cx
             cx = np.exp(cx) 
         else:
-            cx = self.unsigned_amplitude(config,to_numpy=False) 
-            cx,self.vx = self.propagate(cx) 
             self.vx /= cx
-        #print(self.config,self.vx)
-        #exit()
         self.wfn2backend()
         return cx,self.vx 
     def get_grad_from_plq(self,plq=None):

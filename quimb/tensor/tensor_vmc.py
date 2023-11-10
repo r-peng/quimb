@@ -138,6 +138,7 @@ class TNVMC: # stochastic sampling
     def __init__(
         self,
         sampler,
+        dtype_o=float,
         normalize=False,
         optimizer='sr',
         solve_full=True,
@@ -151,8 +152,9 @@ class TNVMC: # stochastic sampling
         # parse wfn 
         self.nsite = self.sampler.af.nsite
         x = self.sampler.af.get_x()
-        self.nparam = len(x)
-        self.dtype = x.dtype
+        self.nparam = len(x) 
+        self.dtype_i = x.dtype
+        self.dtype_o = dtype_o
         self.init_norm = None
         if normalize:
             self.init_norm = np.linalg.norm(x)    
@@ -229,13 +231,13 @@ class TNVMC: # stochastic sampling
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
         save_local = self.save_local if save_local is None else save_local 
 
-        self.buf = np.zeros(4)
+        self.buf = np.zeros(4,dtype=self.dtype_o)
         self.terminate = np.array([0])
 
         self.buf[0] = RANK + .1
         if compute_v:
-            self.evsum = np.zeros(self.nparam,dtype=self.dtype)
-            self.vsum = np.zeros(self.nparam,dtype=self.dtype)
+            self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
+            self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.v = []
         if compute_Hv:
             self.Hvsum = np.zeros(self.nparam,dtype=self.dtype)
@@ -260,7 +262,7 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         while self.terminate[0]==0:
             COMM.Recv(self.buf,tag=0)
-            rank = int(self.buf[0])
+            rank = int(self.buf[0].real+.1)
             self.f.append(self.buf[1]) 
             self.e.append(self.buf[2])
             err_mean += self.buf[3]
@@ -296,19 +298,19 @@ class TNVMC: # stochastic sampling
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
             cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
-            if cx is None or np.fabs(ex) > DISCARD:
+            if cx is None or np.fabs(ex.real) > DISCARD:
                 print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = 0.
                 err = 0.
                 if compute_v:
-                    vx = np.zeros(self.nparam,dtype=self.dtype)
+                    vx = np.zeros(self.nparam,dtype=self.dtype_o)
                 if compute_Hv:
                     Hvx = np.zeros(self.nparam,dtype=self.dtype)
             self.buf[2] = ex
             self.buf[3] = err
             if compute_v:
                 self.vsum += vx
-                self.evsum += vx * ex
+                self.evsum += vx * ex.conj()
                 self.v.append(vx)
             if compute_Hv:
                 self.Hvsum += Hvx
@@ -353,7 +355,7 @@ class TNVMC: # stochastic sampling
             cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
             if cx is None:
                 raise ValueError
-            if np.fabs(ex)*p[ix] > DISCARD:
+            if np.fabs(ex.real)*p[ix] > DISCARD:
                 raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
             self.f.append(p[ix])
             self.buf[1] = p[ix]
@@ -361,7 +363,7 @@ class TNVMC: # stochastic sampling
             self.buf[3] = err
             if compute_v:
                 self.vsum += vx * p[ix]
-                self.evsum += vx * ex * p[ix]
+                self.evsum += vx * ex.conj() * p[ix]
                 self.v.append(vx)
             if compute_Hv:
                 self.Hvsum += Hvx * p[ix]
@@ -398,9 +400,9 @@ class TNVMC: # stochastic sampling
             self.n = len(self.e)
             self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
     def extract_gradient(self):
-        vmean = np.zeros(self.nparam,dtype=self.dtype)
+        vmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
-        evmean = np.zeros(self.nparam,dtype=self.dtype)
+        evmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
         self.g = None
         self.vsum = None
@@ -408,8 +410,10 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             vmean /= self.n
             evmean /= self.n
-            self.g = evmean - self.E * vmean
-            #print(evmean)
+            self.g = (evmean - self.E.conj() * vmean).real
+            n = 310
+            print('gnorms',np.linalg.norm(vmean.imag[:-n]),np.linalg.norm(vmean.real[-n:]))
+            print('gnorms',np.linalg.norm(self.g.real[:-n]),np.linalg.norm(self.g.real[-n:]))
             #print(vmean)
             #print(self.g)
             #print(self.E)
@@ -427,7 +431,7 @@ class TNVMC: # stochastic sampling
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         fxn = self._get_Smatrix if solve_dense else self._get_S_iterative
-        self.Sx1 = np.zeros(self.nparam,dtype=self.dtype)
+        self.Sx1 = np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full:
             self.S = fxn() 
         else:
@@ -450,19 +454,22 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         if RANK==0:
             sh = stop-start
-            vvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
+            vvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
         else:
             v = self.v[:,start:stop] 
             if self.exact_sampling:
-                vvsum_ = np.einsum('s,si,sj->ij',self.f,v,v)
+                vvsum_ = np.einsum('s,si,sj->ij',self.f,v.conj(),v)
             else:
-                vvsum_ = np.dot(v.T,v)
+                vvsum_ = np.dot(v.T.conj(),v)
+        vvsum_ = np.ascontiguousarray(vvsum_.real)
         vvsum = np.zeros_like(vvsum_)
         COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
         S = None
         if RANK==0:
             vmean = self.vmean[start:stop]
-            S = vvsum / self.n - np.outer(vmean,vmean)
+            S = vvsum / self.n - np.outer(vmean.conj(),vmean).real
+            n = 310
+            print('Snorm',np.linalg.norm(S[:-n,-n:]),np.linalg.norm(S[:-n,:-n]),np.linalg.norm(S[-n:,-n:]))
             print('\tcollect S matrix time=',time.time()-t0)
         return S
     def _get_Hmatrix(self,start=0,stop=None):
@@ -497,18 +504,21 @@ class TNVMC: # stochastic sampling
                 COMM.Bcast(x,root=0)
                 Sx1 = np.zeros_like(self.Sx1[start:stop])
                 COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
+                vmean = self.vmean[start:stop]
                 return self.Sx1[start:stop] / self.n \
-                     - self.vmean[start:stop] * np.dot(self.vmean[start:stop],x)
+                     - (vmean.conj() * np.dot(vmean,x)).real
         else: 
             def matvec(x):
                 COMM.Bcast(self.terminate,root=0)
                 if self.terminate[0]==1:
                     return 0 
                 COMM.Bcast(x,root=0)
+                v = self.v[:,start:stop]
                 if self.exact_sampling:
-                    Sx1 = np.dot(self.f * np.dot(self.v[:,start:stop],x),self.v[:,start:stop])
+                    Sx1 = np.dot(self.f * np.dot(v,x),v.conj())
                 else:
-                    Sx1 = np.dot(np.dot(self.v[:,start:stop],x),self.v[:,start:stop])
+                    Sx1 = np.dot(np.dot(v,x),v.conj())
+                Sx1 = np.ascontiguousarray(Sx1.real)
                 COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
                 return 0 
         return matvec
@@ -581,26 +591,13 @@ class TNVMC: # stochastic sampling
         return dE
     def _transform_gradients_sr_dense(self,solve_full=None):
         if RANK>0:
-            return np.zeros(self.nparam,dtype=self.dtype) 
+            return np.zeros(self.nparam,dtype=self.dtype_i) 
         t0 = time.time()
         solve_full = self.solve_full if solve_full is None else solve_full
         if solve_full:
-            #n1 = 538
-            #n2 = n1 + 18
-            #n3 = n2 + 100
-            #print('norm11=',np.linalg.norm(self.S[:n1,:n1]))
-            #print('norm12=',np.linalg.norm(self.S[:n1,n1:n2]))
-            #print('norm13=',np.linalg.norm(self.S[:n1,n2:n3]))
-            #print('norm14=',np.linalg.norm(self.S[:n1,n3:]))
-            #print('norm22=',np.linalg.norm(self.S[n1:n2,n1:n2]))
-            #print('norm23=',np.linalg.norm(self.S[n1:n2,n2:n3]))
-            #print('norm24=',np.linalg.norm(self.S[n1:n2,n3:]))
-            #print('norm33=',np.linalg.norm(self.S[n2:n3,n2:n3]))
-            #print('norm34=',np.linalg.norm(self.S[n2:n3,n3:]))
-            #print('norm44=',np.linalg.norm(self.S[n3:,n3:]))
             self.deltas = np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
         else:
-            self.deltas = np.empty(self.nparam,dtype=self.dtype)
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
             for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
                 S = self.S[ix] + self.cond1 * np.eye(stop-start)
                 self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
@@ -690,7 +687,7 @@ class TNVMC: # stochastic sampling
         return deltas
     def _transform_gradients_sr_iterative(self,solve_full=None):
         solve_full = self.solve_full if solve_full is None else solve_full
-        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full: 
             def R(x):
                 return self.S(x) + self.cond1 * x
@@ -704,7 +701,7 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             return self.update(self.rate1)
         else:
-            return np.zeros(self.nparam,dtype=self.dtype)
+            return np.zeros(self.nparam,dtype=self.dtype_i)
     def _transform_gradients_rgn_iterative(self,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
@@ -1276,7 +1273,7 @@ def safe_contract(tn):
 def contraction_error(cx,multiply=True):
     if len(cx)==0:
         return 0.,0.
-    cx = np.array(list(cx.values()))
+    cx = np.array(list(cx.values())).real
     max_,min_,mean_ = np.amax(cx),np.amin(cx),np.mean(cx)
     return mean_,np.fabs((max_-min_)/mean_)
 def list2dict(ls):
