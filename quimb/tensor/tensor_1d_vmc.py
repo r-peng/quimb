@@ -16,11 +16,10 @@ from .tensor_vmc import (
 )
 from .tensor_2d_vmc import AmplitudeFactory2D,ExchangeSampler2D 
 class AmplitudeFactory1D(AmplitudeFactory2D):
-    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,**compress_opts):
-        self.L = psi.L
-        self.Ly = psi.L
+    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,**compress_opts):
+        self.Lx,self.Ly = 1,psi.L
         self.nsite = psi.L
-        self.sites = list(range(self.L))
+        self.sites = list(range(self.nsite))
         psi.add_tag('KET')
         self.set_psi(psi)
         self.backend = backend 
@@ -40,6 +39,8 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
         self.nparam = len(self.get_x())
+    def flatten(self,site):
+        return site
     def site_tag(self,site):
         return self.psi.site_tag(site)
     def site_tags(self,site):
@@ -60,12 +61,12 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         psi = self.psi if psi is None else psi 
         row = psi.copy()
         # compute mid env for row i
-        for j in range(self.L-1,-1,-1):
+        for j in range(self.nsite-1,-1,-1):
             row.add_tensor(self.get_bra_tsr(config[j],j,append=append),virtual=True)
         return row
     def contract_mid_env(self,row):
         try: 
-            for j in range(self.L-1,-1,-1):
+            for j in range(self.nsite-1,-1,-1):
                 row.contract_tags(row.site_tag(j),inplace=True)
         except (ValueError,IndexError):
             row = None 
@@ -75,10 +76,10 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         cols = self.get_mid_env(config,psi=psi) 
         plq = dict()
         if self.pbc:
-            plq[self.L-1,self.L] = tn.copy()
-        cols,lenvs = self.get_all_envs(cols,1,stop=self.Ly-bsz,inplace=False)
+            plq[self.nsite-1,self.nsite] = cols.copy()
+        cols,lenvs = self.get_all_envs(cols,1,stop=self.nsite-bsz,inplace=False)
         cols,renvs = self.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
-        for j in range(self.L-bsz+1):
+        for j in range(self.nsite-bsz+1):
             plq[j,bsz] = self._get_plq(j,bsz,cols,lenvs,renvs)
         return plq 
     def unsigned_amplitude(self,config,to_numpy=True):
@@ -95,7 +96,9 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
     def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
-        pairs,plq_size = self.batched_pairs[batch_key]
+        pairs,plq_sz = self.model.batched_pairs[batch_key]
+        if isinstance(plq_sz,int):
+            plq_sz = [plq_sz]
         # form plqs
         plq = dict()
         for bsz in plq_sz:
@@ -106,7 +109,6 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         return ex,cx,plq
 class Model1D(Model):
     def __init__(self,L,pbc=False):
-        self.L = L
         self.nsite = L
         self.pbc = pbc
     def flatten(self,site):
@@ -115,19 +117,19 @@ class Model1D(Model):
         return ix
     def pairs_nn(self,d=1):
         ls,plq_size = self.batched_pairs.get('all',([],0)) 
-        for j in range(self.L):
-            if j+d<self.L:
+        for j in range(self.nsite):
+            if j+d<self.nsite:
                 where = j,j+d
                 ls.append(where)
             else:
                 if self.pbc:
-                    where = j,(j+d)%self.L
+                    where = j,(j+d)%self.nsite
                     ls.append(where)
         self.batched_pairs['all'] = ls,max(d+1,plq_size)
         return ls
 class J1J2(Model1D): 
-    def __init__(self,J1,J2,L):
-        super().__init__(L)
+    def __init__(self,J1,J2,L,**kwargs):
+        super().__init__(L,**kwargs)
         self.J1,self.J2 = J1,J2
 
         self.gate = get_gate2((1.,1.,0.))
@@ -137,7 +139,7 @@ class J1J2(Model1D):
         self.pairs_nn()
         self.pairs_nn(d=2)
     def pair_key(self,i,j):
-        return min(i,j,self.L-3),3
+        return min(i,j,self.nsite-3),3
     def pair_valid(self,i1,i2):
         if i1==i2:
             return False
@@ -152,19 +154,19 @@ class J1J2(Model1D):
     def compute_local_energy_eigen(self,config):
         e = np.zeros(2) 
         for d in (1,2):
-            for i in range(self.L):
+            for i in range(self.nsite):
                 s1 = (-1) ** config[i]
-                if i+d<self.L:
+                if i+d<self.nsite:
                     e[d-1] += s1 * (-1)**config[i+d]
                 else:
-                    if _PBC:
-                        e[d-1] += s1 * (-1)**config[(i+d)%self.L]
+                    if self.pbc:
+                        e[d-1] += s1 * (-1)**config[(i+d)%self.nsite]
         return .25 * (e[0]*self.J1 + e[1]*self.J2) 
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
 class ExchangeSampler1D(ExchangeSampler2D):
     def __init__(self,L,seed=None,burn_in=0):
-        self.L = L
+        self.Lx,self.Ly = 1,L
         self.nsite = L
 
         self.rng = np.random.default_rng(seed)
@@ -178,20 +180,20 @@ class ExchangeSampler1D(ExchangeSampler2D):
         return i
     def sweep_col_forward(self,cols,bsz):
         cols,renvs = self.af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
-        for j in range(self.L - bsz + 1): 
+        for j in range(self.nsite - bsz + 1): 
             plq = self.af._get_plq_forward(j,bsz,cols,renvs)
-            _,cols = self.update_plq(j,j+1,1,2,plq,cols) 
+            plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
             try:
                 cols = self.af._contract_cols(cols,(0,j))
             except (ValueError,IndexError):
                 return
     def sweep_col_backward(self,cols,bsz):
-        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.L-bsz,inplace=False)
-        for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
+        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.nsite-bsz,inplace=False)
+        for j in range(self.nsite - bsz,-1,-1): # Ly-1,...,1
             plq = self.af._get_plq_backward(j,bsz,cols,lenvs)
-            _,cols = self.update_plq(j,j+1,1,2,plq,cols) 
+            plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
             try:
-                cols = self.af._contract_cols(cols,(j+bsz-1,self.L-1))
+                cols = self.af._contract_cols(cols,(j+bsz-1,self.nsite-1))
             except (ValueError,IndexError):
                 return
     def sample(self):

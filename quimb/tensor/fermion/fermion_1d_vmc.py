@@ -25,8 +25,8 @@ class FermionExchangeSampler1D(FermionExchangeSampler,ExchangeSampler1D):
 class FermionAmplitudeFactory1D(FermionAmplitudeFactory,AmplitudeFactory1D): 
     def __init__(self,psi,blks=None,spinless=False,backend='numpy',pbc=False,symmetry='u1',flat=True,**compress_opts):
         # init wfn
-        self.L,self.Ly = psi.Ly,psi.Ly
-        self.nsite = self.L
+        self.Lx,self.Ly = psi.Lx,psi.Ly
+        self.nsite = self.Ly
         self.sites = list(range(self.Ly))
         psi.add_tag('KET')
         psi.reorder(direction='col',inplace=True)
@@ -63,6 +63,9 @@ class FermionAmplitudeFactory1D(FermionAmplitudeFactory,AmplitudeFactory1D):
         return self.psi.site_ind(0,site)
     def col_tag(self,col):
         return self.psi.col_tag(col)    
+    def get_all_envs(self,cols,step,stop=None,inplace=False,direction='col'):
+        cols.reorder('col',inplace=True)
+        return super().get_all_envs(cols,step,stop=stop,inplace=inplace,direction=direction)
 class Hubbard1D(Hubbard,Model1D):
     def __init__(self,t,u,L,spinless=False,spin=None,sep=False,symmetry='u1',flat=True,**kwargs):
         super().__init__(L,**kwargs)
@@ -72,12 +75,12 @@ class Hubbard1D(Hubbard,Model1D):
         self.batched_pairs = dict()
         self.pairs_nn()
     def pair_key(self,i,j):
-        return min(i,j,self.L-2),2
+        return min(i,j,self.nsite-2),2
     def get_h(self):
-        h = np.zeros((self.L,)*2)
-        for ix1 in range(self.L):
-            if ix1+1<self.L or self.pbc:
-                ix2 = (ix1+1)%self.L
+        h = np.zeros((self.nsite,)*2)
+        for ix1 in range(self.nsite):
+            if ix1+1<self.nsite or self.pbc:
+                ix2 = (ix1+1)%self.nsite
                 h[ix1,ix2] = -self.t
                 h[ix2,ix1] = -self.t
         return h
