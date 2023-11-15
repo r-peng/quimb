@@ -6,7 +6,7 @@ import numpy as np
 #SIZE = COMM.Get_size()
 #RANK = COMM.Get_rank()
 
-from .product_vmc import TNJastrow,BackFlow
+from .product_vmc import TNJastrow,BackFlow,Jastrow
 from ..tensor_2d import PEPS
 def get_gutzwiller(Lx,Ly,coeffs,bdim=1,eps=0.,normalize=False):
     if isinstance(coeffs,np.ndarray):
@@ -57,6 +57,11 @@ class BackFlow2D(BackFlow,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(mo,nv,nl,spin,**kwargs)
+class Jastrow2D(Jastrow,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(nv,**kwargs)
 #class CNN2D(FNN2D):
 #    def __init__(self,Lx,Ly,nl,kx,ky,**kwargs):
 #        self.kx,self.ky = kx,ky 

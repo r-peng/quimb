@@ -14,15 +14,13 @@ from ..tensor_2d_vmc import (
 )
 from .fermion_vmc import (
     FermionAmplitudeFactory,
-    FermionModel,
+    Hubbard,
     pn_map,
     get_data_map,
     config2pn,
     FermionExchangeSampler,
 )
 from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
-class FermionModel2D(FermionModel,Model2D):
-    pass 
 class FermionExchangeSampler2D(FermionExchangeSampler,ExchangeSampler2D):
     pass
 ####################################################################################
@@ -90,36 +88,12 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
         return super().get_all_envs(cols,step,stop=stop,inplace=inplace,direction=direction)
 
 from pyblock3.algebra.fermion_ops import H1
-class Hubbard(FermionModel2D):
+class Hubbard2D(Hubbard,Model2D):
     def __init__(self,t,u,Lx,Ly,spinless=False,spin=None,sep=False,symmetry='u1',flat=True,**kwargs):
         super().__init__(Lx,Ly,**kwargs)
         self.t,self.u = t,u
-        #self.gate = {spin:(H1(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless),'b1,b2,k1,k2')}
-        data_map = get_data_map(symmetry=symmetry,flat=flat,spinless=spinless) 
-        order = 'b1,k1,b2,k2'
-        if spinless:
-            cre = data_map['cre'] 
-            ann = data_map['ann'] 
-            h1 = np.tensordot(cre,ann,axes=([],[]))
-            h1 = h1 + h1.transpose((2,3,0,1))
-            h1.shape = (2,)*4
-            self.gate = {spin:(h1,order)}
-        else:
-            h1 = []
-            for spin in ('a','b'):
-                cre = data_map[f'cre_{spin}'] 
-                ann = data_map[f'ann_{spin}'] 
-                h1.append(np.tensordot(cre,ann,axes=([],[])))
-                h1[-1] = h1[-1] + h1[-1].transpose((2,3,0,1))
-                h1[-1].shape = (4,)*4
-            if sep:
-                self.gate = {'a':(h1[0],order),'b':(h1[1],order)}
-            else:
-                self.gate = {None:((h1[0]+h1[1]),order)}
-        self.spinless = spinless
-        self.sep = sep
+        self.get_gate(spinless=spinless,spin=spin,sep=sep,symmetry=symmetry,flat=flat)
 
-        #self.pairs = self.pairs_nn()
         self.batched_pairs = dict()
         if self.deterministic:
             self.get_batch_deterministic(0,self.Lx-1,0,1)
@@ -136,36 +110,6 @@ class Hubbard(FermionModel2D):
         dx = site2[0]-site1[0]
         dy = site2[1]-site1[1]
         return site1,(dx+1,dy+1)
-    def pair_valid(self,i1,i2):
-        if i1==i2:
-            return False
-        else:
-            return True
-    def pair_coeff(self,site1,site2):
-        return -self.t
-    def compute_local_energy_eigen(self,config):
-        config = np.array(config,dtype=int)
-        return self.u*len(config[config==3])
-    def pair_terms(self,i1,i2):
-        if self.spinless:
-            return [(i2,i1,1,None)]
-        else:
-            return self.pair_terms_full(i1,i2)
-    def pair_terms_full(self,i1,i2):
-        n1,n2 = pn_map[i1],pn_map[i2]
-        nsum,ndiff = n1+n2,abs(n1-n2)
-        if ndiff==1:
-            sign = 1 if nsum==1 else -1
-            tag = 'a' if (i1+i2)%2==1 else 'b' 
-            return [(i2,i1,sign,tag)]
-        def _tag(i1,i2,i1_new,i2_new):
-            tag = 'a' if (i2-i1)*(i2_new-i1_new)>0 else 'b'
-            return tag 
-        if ndiff==2:
-            return [(1,2,-1,_tag(i1,i2,1,2)),(2,1,1,_tag(i1,i2,2,1))] 
-        if ndiff==0:
-            sign = i1-i2
-            return [(0,3,sign,_tag(i1,i2,0,3)),(3,0,sign,_tag(i1,i2,3,0))]
     def get_h(self):
         h = np.zeros((self.nsite,)*2)
         for ix1 in range(self.nsite):
@@ -457,7 +401,7 @@ def create_particle(fpeps,site,spin,spinless=False,data_map=None):
     return fpeps
 def get_product_state(Lx,Ly,config,symmetry='u1',flat=True,spinless=False):
     fpeps = get_vaccum(Lx,Ly,symmetry=symmetry,flat=flat,spinless=spinless)
-    data_map = get_data_map(symmetry=_SYMMETRY,flat=_FLAT,spinless=spinless)
+    data_map = get_data_map(symmetry=symmetry,flat=flat,spinless=spinless)
     if spinless: 
         for ix,ci in enumerate(config):
             site = flat2site(ix,Ly)

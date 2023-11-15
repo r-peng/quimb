@@ -1,8 +1,5 @@
 import numpy as np
 import itertools
-class FermionModel:
-    def gate2backend(self,backend):
-        self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}
 from ..tensor_vmc import (
     safe_contract,
     DenseSampler,
@@ -307,3 +304,62 @@ class FermionAmplitudeFactory:
             self._tensor_compress_bond(T2,T1,absorb=absorb)
     def _add_gate(self,tn,gate,order,where):
         return _add_gate(tn,gate.copy(),order,where,self.site_ind,self.site_tag,contract=True)
+
+class Hubbard:
+    def gate2backend(self,backend):
+        self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}
+    def get_gate(self,spinless=False,spin=None,sep=False,symmetry='u1',flat=True):
+        data_map = get_data_map(symmetry=symmetry,flat=flat,spinless=spinless) 
+        order = 'b1,k1,b2,k2'
+        if spinless:
+            cre = data_map['cre'] 
+            ann = data_map['ann'] 
+            h1 = np.tensordot(cre,ann,axes=([],[]))
+            h1 = h1 + h1.transpose((2,3,0,1))
+            h1.shape = (2,)*4
+            self.gate = {spin:(h1,order)}
+        else:
+            h1 = []
+            for spin in ('a','b'):
+                cre = data_map[f'cre_{spin}'] 
+                ann = data_map[f'ann_{spin}'] 
+                h1.append(np.tensordot(cre,ann,axes=([],[])))
+                h1[-1] = h1[-1] + h1[-1].transpose((2,3,0,1))
+                h1[-1].shape = (4,)*4
+            if sep:
+                self.gate = {'a':(h1[0],order),'b':(h1[1],order)}
+            else:
+                self.gate = {None:((h1[0]+h1[1]),order)}
+        self.spinless = spinless
+        self.sep = sep
+    def pair_valid(self,i1,i2):
+        if i1==i2:
+            return False
+        else:
+            return True
+    def pair_coeff(self,site1,site2):
+        return -self.t
+    def compute_local_energy_eigen(self,config):
+        config = np.array(config,dtype=int)
+        return self.u*len(config[config==3])
+    def pair_terms(self,i1,i2):
+        if self.spinless:
+            return [(i2,i1,1,None)]
+        else:
+            return self.pair_terms_full(i1,i2)
+    def pair_terms_full(self,i1,i2):
+        n1,n2 = pn_map[i1],pn_map[i2]
+        nsum,ndiff = n1+n2,abs(n1-n2)
+        if ndiff==1:
+            sign = 1 if nsum==1 else -1
+            tag = 'a' if (i1+i2)%2==1 else 'b' 
+            return [(i2,i1,sign,tag)]
+        def _tag(i1,i2,i1_new,i2_new):
+            tag = 'a' if (i2-i1)*(i2_new-i1_new)>0 else 'b'
+            return tag 
+        if ndiff==2:
+            return [(1,2,-1,_tag(i1,i2,1,2)),(2,1,1,_tag(i1,i2,2,1))] 
+        if ndiff==0:
+            sign = i1-i2
+            return [(0,3,sign,_tag(i1,i2,0,3)),(3,0,sign,_tag(i1,i2,3,0))]
+

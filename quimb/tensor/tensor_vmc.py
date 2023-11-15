@@ -300,7 +300,7 @@ class TNVMC: # stochastic sampling
             cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
             if cx is None or np.fabs(ex.real) > DISCARD:
                 print(f'RANK={RANK},cx={cx},ex={ex}')
-                ex = 0.
+                ex = np.zeros(1)[0]
                 err = 0.
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype_o)
@@ -1166,8 +1166,6 @@ class DenseSampler:
             p = self.af.log_prob(config)
             p = 0 if p is None else np.exp(p) 
             plocal.append(p)
-        #    print(RANK,plocal)
-        #    exit()
         plocal = np.array(plocal)
         #print(RANK,plocal)
         #exit()

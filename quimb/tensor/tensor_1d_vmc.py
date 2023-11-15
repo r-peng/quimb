@@ -6,8 +6,6 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 np.set_printoptions(suppress=True,precision=4,linewidth=2000)
 
-import sys
-this = sys.modules[__name__]
 from .tensor_vmc import (
     tensor2backend,
     safe_contract,
@@ -17,12 +15,8 @@ from .tensor_vmc import (
     _add_gate,
 )
 from .tensor_2d_vmc import AmplitudeFactory2D,ExchangeSampler2D 
-def set_options(pbc=False,deterministic=False,backend='numpy'):
-    this._PBC = pbc
-    from .tensor_2d_vmc import set_options
-    set_options(pbc=pbc)
 class AmplitudeFactory1D(AmplitudeFactory2D):
-    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',**compress_opts):
+    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,**compress_opts):
         self.L = psi.L
         self.Ly = psi.L
         self.nsite = psi.L
@@ -33,7 +27,8 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
 
         self.data_map = self.get_data_map(phys_dim)
         self.wfn2backend()
-        self.pbc = _PBC
+        self.pbc = pbc 
+        self.deterministic = False
 
         if blks is None:
             blks = [self.sites]
@@ -89,51 +84,46 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
     def unsigned_amplitude(self,config,to_numpy=True):
         tn = self.get_mid_env(config)
         cx = safe_contract(tn)
+        if cx is None:
+            return None
         if to_numpy:
-            cx = 0. if cx is None else cx
+            cx = tensor2backend(cx,'numpy')
         return cx  
     def amplitude(self,config):
         raise NotImplementedError
         unsigned_cx = self.unsigned_amplitude(config)
         sign = self.compute_config_sign(config)
         return unsigned_cx * sign 
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=None,compute_v=True,to_vec=False):
+    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
+        pairs,plq_size = self.batched_pairs[batch_key]
         # form plqs
         plq = dict()
-        for bsz in self.model.plq_sz:
+        for bsz in plq_sz:
             plq.update(self.get_plq(self.config,bsz))
 
         # compute energy numerator 
-        ex,cx = self._pair_energies_from_plq(plq,pairs,config)
-        if compute_v:
-            vx = self.get_grad_from_plq(plq,to_vec=to_vec) 
-        else:
-            vx = None if to_vec else dict()
-        return ex,cx,vx
-    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
-        self.config = config
-        if compute_Hv:
-            return self.compute_local_energy_hessian_from_plq(config)
-        else:
-            return self.compute_local_energy_gradient_from_plq(config,compute_v=compute_v)
+        ex,cx = self.pair_energies_from_plq(plq,pairs)
+        return ex,cx,plq
 class Model1D(Model):
-    def __init__(self,L):
+    def __init__(self,L,pbc=False):
         self.L = L
         self.nsite = L
+        self.pbc = pbc
     def flatten(self,site):
         return site
     def flat2site(self,ix):
         return ix
     def pairs_nn(self,d=1):
-        ls = [] 
+        ls,plq_size = self.batched_pairs.get('all',([],0)) 
         for j in range(self.L):
             if j+d<self.L:
                 where = j,j+d
                 ls.append(where)
             else:
-                if _PBC:
+                if self.pbc:
                     where = j,(j+d)%self.L
                     ls.append(where)
+        self.batched_pairs['all'] = ls,max(d+1,plq_size)
         return ls
 class J1J2(Model1D): 
     def __init__(self,J1,J2,L):
@@ -143,9 +133,9 @@ class J1J2(Model1D):
         self.gate = get_gate2((1.,1.,0.))
         self.order = 'b1,k1,b2,k2'
 
-        self.pairs = self.pairs_nn() + self.pairs_nn(d=2)
-        self.batched_pairs = [None]
-        self.plq_sz = 3,
+        self.batched_pairs = dict()
+        self.pairs_nn()
+        self.pairs_nn(d=2)
     def pair_key(self,i,j):
         return min(i,j,self.L-3),3
     def pair_valid(self,i1,i2):
@@ -187,29 +177,27 @@ class ExchangeSampler1D(ExchangeSampler2D):
     def flat2site(self,i):
         return i
     def sweep_col_forward(self,cols,bsz):
-        af = self.amplitude_factory
-        cols,renvs = af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
+        cols,renvs = self.af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
         for j in range(self.L - bsz + 1): 
-            plq = af._get_plq_forward(j,bsz,cols,renvs)
-            _,cols = self._update_pair(j,j+1,plq,cols) 
+            plq = self.af._get_plq_forward(j,bsz,cols,renvs)
+            _,cols = self.update_plq(j,j+1,1,2,plq,cols) 
             try:
-                cols = af._contract_cols(cols,(0,j))
+                cols = self.af._contract_cols(cols,(0,j))
             except (ValueError,IndexError):
                 return
     def sweep_col_backward(self,cols,bsz):
-        af = self.amplitude_factory
-        cols,lenvs = af.get_all_envs(cols,1,stop=self.L-bsz,inplace=False)
+        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.L-bsz,inplace=False)
         for j in range(self.L - bsz,-1,-1): # Ly-1,...,1
-            plq = af._get_plq_backward(j,bsz,cols,lenvs)
-            _,cols = self._update_pair(j,j+1,plq,cols) 
+            plq = self.af._get_plq_backward(j,bsz,cols,lenvs)
+            _,cols = self.update_plq(j,j+1,1,2,plq,cols) 
             try:
-                cols = af._contract_cols(cols,(j+bsz-1,self.L-1))
+                cols = self.af._contract_cols(cols,(j+bsz-1,self.L-1))
             except (ValueError,IndexError):
                 return
     def sample(self):
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-        tn = self.amplitude_factory.get_mid_env(self.config)
+        tn = self.af.get_mid_env(self.config)
         sweep_col(tn,2)
         return self.config,self.px
 from .tensor_1d import MatrixProductState,MatrixProductOperator

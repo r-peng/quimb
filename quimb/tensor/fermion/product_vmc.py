@@ -1,18 +1,64 @@
 import numpy as np
 import torch
 from ..product_vmc import (
-        FNN,
-        tensor2backend,
-        pair_terms,
-        safe_contract
+    FNN,NN,
+    tensor2backend,
+    pair_terms,
+    safe_contract,
+    config_to_ab,
 )
-#from mpi4py import MPI
-#COMM = MPI.COMM_WORLD
-#SIZE = COMM.Get_size()
-#RANK = COMM.Get_rank()
+from mpi4py import MPI
+COMM = MPI.COMM_WORLD
+SIZE = COMM.Get_size()
+RANK = COMM.Get_rank()
 #######################################################################
 # some jastrow forms
 #######################################################################
+class Jastrow(NN):
+    def __init__(self,nv,**kwargs):
+        super().__init__(**kwargs)
+        self.nv = nv
+        self.nparam = nv ** 2
+        self.block_dict = [(0,self.nparam)] 
+    def init(self,eps,a=-1,b=1,fname=None):
+        c = b-a
+        self.J = (np.random.rand(self.nv,self.nv) * c + a) * eps 
+        COMM.Bcast(self.J,root=0)
+        if fname is not None: 
+            self.save_to_disc(self.J,fname) 
+        return self.J
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        self.set_backend(backend)
+        self.J = tensor2backend(self.J,backend,requires_grad=requires_grad) 
+    def get_x(self):
+        return tensor2backend(self.J,'numpy').flatten()
+    def load_from_disc(self,fname):
+        self.J = np.load(fname)
+        return self.J
+    def save_to_disc(self,J,fname,root=0):
+        if RANK!=root:
+            return
+        np.save(fname+'.npy',J)
+    def update(self,x,fname=None,root=0):
+        self.J = x.reshape(self.nv,self.nv) 
+        if fname is not None:
+            self.save_to_disc(self.J,fname,root=root)
+        self.wfn2backend()
+    def extract_grad(self):
+        return tensor2backend(self.tensor_grad(self.J),'numpy').flatten() 
+    def forward(self,c): # NN output
+        return self.jnp.dot(self.jnp.matmul(c,self.J),c)
+    def input(self,config):
+        if self.fermion:
+            if self.to_spin:
+                ca,cb = config_to_ab(config) 
+                config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+            else:
+                return np.array(config,dtype=float)
+        else:
+            config = np.array(config,dtype=float)
+        return config
 class TNJastrow:
     def update_pair_energy_from_plq(self,tn,where):
         ix1,ix2 = [self.flatten(site) for site in where]
