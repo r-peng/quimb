@@ -199,7 +199,7 @@ class ExchangeSampler1D(ExchangeSampler2D):
     def sample(self):
         cdir = self.rng.choice([-1,1]) 
         sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-        tn = self.af.get_mid_env(self.config)
+        tn = self.af.get_mid_env(self.af.parse_config(self.config))
         sweep_col(tn,2)
         return self.config,self.px
 from .tensor_1d import MatrixProductState,MatrixProductOperator

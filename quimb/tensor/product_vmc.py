@@ -100,7 +100,7 @@ class ProductAmplitudeFactory:
     def parse_energy(self,ex,batch_key,cx=None):
         pairs = self.model.batched_pairs[batch_key]
         if not self.deterministic:
-            pairs = pairs[3]
+            pairs = pairs[0]
         e = 0.
         p = 1 if cx is None else 0
         spins = ('a','b') if self.fermion else (None,)
@@ -131,7 +131,7 @@ class ProductAmplitudeFactory:
             if af.is_tn:
                 ex[ix],cx[ix],plq[ix] = af.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
             else:
-                pairs = self.model.batched_pairs[batch_key][3]
+                pairs = self.model.batched_pairs[batch_key][0]
                 ex[ix],cx[ix] = af.batch_pair_energies(pairs)
         #    print(RANK,ix,ex[ix])
         #    print(RANK,ix,cx[ix])
@@ -438,12 +438,17 @@ class RBM(NN):
         self.nparam = nv + nh + nv * nh 
         self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
         super().__init__(**kwargs)
-    def init(self,eps,a=-1,b=1,fname=None):
+    def init(self,eps,a=-1,b=1,fname=None,shift=[0,0,0]):
+        # va(config) = config
+        # vb(config) = tanh(w*config+b)
+        # vw(config) = tanh(w*config+b) * config
+
+        # rule of thumb
         # small numbers initialized in range (a,b)
         c = b-a
-        self.a = (np.random.rand(self.nv) * c + a) * eps 
-        self.b = (np.random.rand(self.nh) * c + a) * eps 
-        self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps
+        self.a = (np.random.rand(self.nv) * c + a) * eps + shift[0] 
+        self.b = (np.random.rand(self.nh) * c + a) * eps + shift[1]
+        self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps + shift[2]
         COMM.Bcast(self.a,root=0)
         COMM.Bcast(self.b,root=0)
         COMM.Bcast(self.w,root=0)

@@ -6,52 +6,19 @@ import numpy as np
 #SIZE = COMM.Get_size()
 #RANK = COMM.Get_rank()
 
-from .product_vmc import (
-    NN,RBM,FNN,SIGN,
-    ProductAmplitudeFactory,
-)
-class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
-    def __init__(self,af,fermion=False):
-        self.af = af 
-        self.get_sections()
-
-        self.Lx,self.Ly = self.af[0].Lx,self.af[0].Ly
-        self.sites = self.af[0].sites
-        self.model = self.af[0].model
-        self.nsite = self.af[0].nsite
-        self.backend = self.af[0].backend
-
-        self.pbc = self.af[0].pbc 
-        self.deterministic = self.af[0].deterministic 
-        #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-
-        self.fermion = fermion 
-        if self.fermion:
-            self.spinless = self.af[0].spinless
-##### wfn methods #####
-    def update_cache(self,config):
-        for af,config_ in zip(self.af,config):
-            if af.is_tn:
-                af.update_cache(config_)
+from .product_2d_vmc import ProductAmplitudeFactory2D 
+class ProductAmplitudeFactory1D(ProductAmplitudeFactory2D):
 ##### compress row methods  #####
-    def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
-        env_prev = [None] * self.naf 
-        for ix,af in enumerate(self.af):
-            if not af.is_tn:
-                continue
-            psi_ = af.psi if psi is None else psi[ix]
-            cache_ = af.get_cache(direction,step) if cache is None else cache[ix]
-            env_prev[ix] = af._get_all_benvs(config[ix],step,psi=psi_,cache=cache_,
-                               start=start,stop=stop,append=append,direction=direction)
-        return env_prev
-    def get_mid_env(self,config,append='',psi=None):
-        envs = [None] * self.naf 
-        for ix,af in enumerate(self.af):
-            if not af.is_tn:
-                continue
-            psi_ = af.psi if psi is None else psi[ix]
-            envs[ix] = af.get_mid_env(config[ix],append=append,psi=psi_)
-        return envs
+    #def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
+    #    env_prev = [None] * self.naf 
+    #    for ix,af in enumerate(self.af):
+    #        if not af.is_tn:
+    #            continue
+    #        psi_ = af.psi if psi is None else psi[ix]
+    #        cache_ = af.get_cache(direction,step) if cache is None else cache[ix]
+    #        env_prev[ix] = af._get_all_benvs(config[ix],step,psi=psi_,cache=cache_,
+    #                           start=start,stop=stop,append=append,direction=direction)
+    #    return env_prev
     def _contract_cols(self,cols,js,direction='col'):
         for ix,af in enumerate(self.af):
             if not af.is_tn:
@@ -105,8 +72,6 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
         #print(self.config_sign(config))
         #exit()
         return np.prod(cx)
-from .tensor_2d_vmc import AmplitudeFactory2D 
-from .tensor_1d_vmc import AmplitudeFactory1D 
 class RBM2D(RBM,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nh,**kwargs):
         self.Lx = Lx
@@ -121,18 +86,6 @@ class SIGN2D(SIGN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nl,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,nl,**kwargs)
-class RBM1D(RBM,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,nh,**kwargs):
-        self.nsite = nsite 
-        super().__init__(nv,nh,**kwargs)
-class FNN1D(FNN,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,**kwargs):
-        self.nsite = nsite 
-        super().__init__(nv,**kwargs)
-class SIGN1D(SIGN,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,nl,**kwargs):
-        self.nsite = nsite 
         super().__init__(nv,nl,**kwargs)
 #class CNN2D(FNN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,kx=2,ky=2,**kwargs):

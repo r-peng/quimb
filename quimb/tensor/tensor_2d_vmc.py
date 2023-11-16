@@ -399,7 +399,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
               self.batch_pair_energies_from_plq_obc
         return fxn(batch_key,new_cache=new_cache) 
     def batch_pair_energies_from_plq_obc(self,batch_key,new_cache=False):
-        bix,tix,plq_types,pairs,direction = self.model.batched_pairs[batch_key]
+        pairs,plq_types,bix,tix,direction = self.model.batched_pairs[batch_key]
         assert direction=='row'
         cache_bot = dict() if new_cache else None
         cache_top = dict() if new_cache else None
@@ -560,12 +560,12 @@ class Model2D(Model):
             plq_types = []
             pairs = []
         else:
-            bix,tix,plq_types,pairs,_ = self.batched_pairs[key]    
+            pairs,plq_types,bix,tix,_ = self.batched_pairs[key]    
         bix = max(bix,imax-dx-1)
         tix = min(tix,imin+dx+1)
         plq_types.append((imin,imax-dx,dx+1,dy+1))
         pairs += self.get_batch_pairs(dx,dy,irange)
-        self.batched_pairs[key] = bix,tix,plq_types,pairs,direction 
+        self.batched_pairs[key] = pairs,plq_types,bix,tix,direction 
     def get_batch_plq_ver(self,dx,dy):
         key = 'pbc'
         direction = 'col'
@@ -576,12 +576,12 @@ class Model2D(Model):
             plq_types = []
             pairs = []
         else:
-            bix,tix,plq_types,pairs,_ = self.batched_pairs[key]    
+            pairs,plq_types,bix,tix,_ = self.batched_pairs[key]    
         bix = max(bix,imax-dy-1)
         tix = min(tix,imin+dy+1)
         plq_types.append((imin,imax-dy,dy+1,dx+1))
         pairs += self.get_batch_pairs(dx,dy,irange,jrange=jrange)
-        self.batched_pairs[key] = bix,tix,plq_types,pairs,direction 
+        self.batched_pairs[key] = pairs,plq_types,bix,tix,direction 
     #def batch_plq_nn(self):
     #    # OBC plqs
     #    self.batched_pairs = dict() 
