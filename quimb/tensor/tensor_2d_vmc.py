@@ -54,6 +54,8 @@ class AmplitudeFactory2D(AmplitudeFactory):
     def flatten(self,site):
         i,j = site
         return flatten(i,j,self.Ly) 
+    def flat2site(self,ix):
+        return flat2site(ix,self.Ly)
     def site_tag(self,site):
         return self.psi.site_tag(*site)
     def site_tags(self,site):

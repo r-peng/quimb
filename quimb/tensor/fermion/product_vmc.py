@@ -1,5 +1,5 @@
 import numpy as np
-import torch
+import torch,h5py
 from ..product_vmc import (
     FNN,NN,
     tensor2backend,
@@ -15,40 +15,64 @@ RANK = COMM.Get_rank()
 # some jastrow forms
 #######################################################################
 class Jastrow(NN):
-    def __init__(self,nv,**kwargs):
+    def __init__(self,nv,nb=2,**kwargs):
         super().__init__(**kwargs)
         self.nv = nv
-        self.nparam = nv ** 2
-        self.block_dict = [(0,self.nparam)] 
-    def init(self,eps,a=-1,b=1,fname=None):
+        self.nb = nb
+
+        self.block_dict = []
+        start = 0
+        for n in range(2,nb+1):
+            sz = nv ** n
+            stop = start + sz
+            self.block_dict.append((start,stop))
+            start = stop
+        self.nparam = stop 
+    def init(self,eps,a=-1,b=1,fname=None,J=[]):
         c = b-a
-        self.J = (np.random.rand(self.nv,self.nv) * c + a) * eps 
-        COMM.Bcast(self.J,root=0)
+        self.J = J 
+        for n in range(len(J)+2,self.nb+1):
+            sz = (self.nv,) * n 
+            tsr = (np.random.rand(*sz) * c + a) * eps
+            COMM.Bcast(tsr,root=0)
+            self.J.append(tsr) 
         if fname is not None: 
             self.save_to_disc(self.J,fname) 
         return self.J
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
-        self.J = tensor2backend(self.J,backend,requires_grad=requires_grad) 
+        self.J = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.J] 
     def get_x(self):
-        return tensor2backend(self.J,'numpy').flatten()
+        return np.concatenate([tensor2backend(tsr,'numpy').flatten() for tsr in self.J])
     def load_from_disc(self,fname):
-        self.J = np.load(fname)
+        self.J = []
+        f = h5py.File(fname,'r')
+        for n in range(2,self.nb+1): 
+            self.J.append(f[str(n)][:])
+        f.close()
         return self.J
     def save_to_disc(self,J,fname,root=0):
         if RANK!=root:
             return
-        np.save(fname+'.npy',J)
+        f = h5py.File(fname+'.hdf5','w')
+        for n in range(2,self.nb+1):
+            f.create_dataset(str(n),data=self.J[n-2])
+        f.close()
     def update(self,x,fname=None,root=0):
-        self.J = x.reshape(self.nv,self.nv) 
+        self.J = []
+        for n,(start,stop) in enumerate(self.block_dict):
+            self.J.append(np.reshape(x[start:stop],(self.nv,)*(n+2)))
         if fname is not None:
             self.save_to_disc(self.J,fname,root=root)
         self.wfn2backend()
     def extract_grad(self):
-        return tensor2backend(self.tensor_grad(self.J),'numpy').flatten() 
+        return np.concatenate([tensor2backend(self.tensor_grad(tsr),'numpy').flatten() for tsr in self.J])
     def forward(self,c): # NN output
-        return self.jnp.dot(self.jnp.matmul(c,self.J),c)
+        logc = self.jnp.dot(self.jnp.matmul(c,self.J[0]),c)
+        if self.nb==3:
+            logc += self.jnp.einsum('ijk,i,j,k->',self.J[1],c,c,c) 
+        return logc
     def input(self,config):
         if self.fermion:
             if self.to_spin:

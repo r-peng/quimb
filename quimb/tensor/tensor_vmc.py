@@ -240,7 +240,7 @@ class TNVMC: # stochastic sampling
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.v = []
         if compute_Hv:
-            self.Hvsum = np.zeros(self.nparam,dtype=self.dtype)
+            self.Hvsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.Hv = [] 
 
         if RANK==0:
@@ -305,7 +305,7 @@ class TNVMC: # stochastic sampling
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype_o)
                 if compute_Hv:
-                    Hvx = np.zeros(self.nparam,dtype=self.dtype)
+                    Hvx = np.zeros(self.nparam,dtype=self.dtype_o)
             self.buf[2] = ex
             self.buf[3] = err
             if compute_v:
@@ -411,16 +411,9 @@ class TNVMC: # stochastic sampling
             vmean /= self.n
             evmean /= self.n
             self.g = (evmean - self.E.conj() * vmean).real
-            n = 310
-            print('gnorms',np.linalg.norm(vmean.imag[:-n]),np.linalg.norm(vmean.real[-n:]))
-            print('gnorms',np.linalg.norm(self.g.real[:-n]),np.linalg.norm(self.g.real[-n:]))
-            #print(vmean)
-            #print(self.g)
-            #print(self.E)
-            #exit()
             self.vmean = vmean
     def _extract_Hvmean(self):
-        Hvmean = np.zeros(self.nparam,dtype=self.dtype)
+        Hvmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.Hvsum,Hvmean,op=MPI.SUM,root=0)
         self.Hvsum = None
         if RANK==0:
@@ -442,7 +435,7 @@ class TNVMC: # stochastic sampling
         solve_full = self.solve_full if solve_full is None else solve_full
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
-        self.Hx1 = np.zeros(self.nparam,dtype=self.dtype)
+        self.Hx1 = np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full:
             self.H = fxn() 
         else:
@@ -477,7 +470,7 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         if RANK==0:
             sh = stop-start
-            vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype)
+            vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
         else:
             v = self.v[:,start:stop] 
             Hv = self.Hv[:,start:stop] 
@@ -704,7 +697,7 @@ class TNVMC: # stochastic sampling
             return np.zeros(self.nparam,dtype=self.dtype_i)
     def _transform_gradients_rgn_iterative(self,solve_full=None,x0=None):
         solve_full = self.solve_full if solve_full is None else solve_full
-        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         E = self.E if RANK==0 else 0
         if RANK==0:
             print('pure_newton=',self.pure_newton)
@@ -729,7 +722,7 @@ class TNVMC: # stochastic sampling
                 dE = np.dot(self.deltas,hessp)
         else:
             dE = 0.
-            self.deltas = np.empty(self.nparam,dtype=self.dtype)
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
             for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
                 if RANK==0:
                     print(f'ix={ix},sh={stop-start}')
@@ -765,12 +758,12 @@ class TNVMC: # stochastic sampling
         if self.optimizer=='rgn':
             dE = self._transform_gradients_rgn(x0=deltas_sr)
             if self.pure_newton:
-                xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+                xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
             else:
-                xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+                xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         elif self.optimizer=='lin':
             dE = self._transform_gradients_lin()
-            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype)
+            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         else:
             raise NotImplementedError
         deltas_rgn = self.deltas

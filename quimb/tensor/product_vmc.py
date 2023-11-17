@@ -107,16 +107,18 @@ class ProductAmplitudeFactory:
         for where,spin in itertools.product(pairs,spins):
             term = 1.
             for ix,ex_ in enumerate(ex):
+                #print(ex_)
+                #exit()
                 if (where,spin) in ex_:
-                    term *= ex_[where,spin][p] 
+                    term = term * ex_[where,spin][p] 
                 else:
                     if p==1:
                         continue 
                     if isinstance(cx[ix],dict):
-                        term *= cx[ix][where][0]
+                        term = term * cx[ix][where][0]
                     else:
-                        term *= cx[ix]
-            e += term
+                        term = term * cx[ix]
+            e = e + term
         if p==1:
             e = tensor2backend(e,'numpy')
         return e
@@ -504,14 +506,23 @@ class RBM(NN):
         c = self.jnp.dot(self.a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,self.w) + self.b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nf=1,afn='logcosh',scale=1,coeff=1,**kwargs):
+    def __init__(self,nv,nf=1,afn='logcosh',scale=1,coeff=1,change_basis=False,**kwargs):
         self.nv = nv
         self.nf = nf
         assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
         self.afn = afn 
         self.coeff = coeff
         self.scale = scale
+        self.change_basis = change_basis
         super().__init__(**kwargs)
+    def input(self,config):
+        if not self.change_basis: 
+            return super().input(config)
+        if not self.fermion:
+            return np.array(config,dtype=float)
+        config = [tuple(np.where(np.array(c))[0]) for c in config_to_ab(config)]
+        config = np.array([[self.flat2site(ix) for ix in c] for c in config],dtype=float)
+        return config.flatten()
     def init(self,nn,eps,a=-1,b=1,fname=None): # nn is number of nodes in each hidden layer
         self.w = []
         self.b = [] 
