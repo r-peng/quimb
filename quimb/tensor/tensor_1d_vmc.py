@@ -165,7 +165,7 @@ class J1J2(Model1D):
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
 class ExchangeSampler1D(ExchangeSampler2D):
-    def __init__(self,L,seed=None,burn_in=0):
+    def __init__(self,L,seed=None,burn_in=0,nsweep=1):
         self.Lx,self.Ly = 1,L
         self.nsite = L
 
@@ -174,6 +174,7 @@ class ExchangeSampler1D(ExchangeSampler2D):
         self.dense = False
         self.burn_in = burn_in 
         self.amplitude_factory = None
+        self.nsweep = nsweep
     def flatten(self,i):
         return i
     def flat2site(self,i):
@@ -198,9 +199,11 @@ class ExchangeSampler1D(ExchangeSampler2D):
                 return
     def sample(self):
         cdir = self.rng.choice([-1,1]) 
-        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-        tn = self.af.get_mid_env(self.af.parse_config(self.config))
-        sweep_col(tn,2)
+        for _ in range(self.nsweep):
+            sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
+            tn = self.af.get_mid_env(self.af.parse_config(self.config))
+            sweep_col(tn,2)
+            cdir *= -1
         return self.config,self.px
 from .tensor_1d import MatrixProductState,MatrixProductOperator
 from .tensor_core import Tensor,TensorNetwork,rand_uuid

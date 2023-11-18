@@ -135,9 +135,6 @@ class ProductAmplitudeFactory:
             else:
                 pairs = self.model.batched_pairs[batch_key][0]
                 ex[ix],cx[ix] = af.batch_pair_energies(pairs)
-        #    print(RANK,ix,ex[ix])
-        #    print(RANK,ix,cx[ix])
-        #exit()
 
         if compute_Hv:
             Hvx = self.propagate(self.parse_energy(ex,batch_key,cx=cx))
@@ -209,8 +206,6 @@ class ProductAmplitudeFactory:
             else:
                 pairs = self.model.batched_pairs[batch_key]
                 ex[ix] = af.batch_pair_energies(pairs,cx=self.cx[ix])[0]
-            #print(RANK,ix,ex[ix],self.cx[ix])
-        #exit()
 
         ex = self.parse_energy(ex,batch_key,cx=self.cx)
         if compute_Hv:
@@ -261,46 +256,6 @@ class ProductAmplitudeFactory:
             return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
         else:
             return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
-    #def batch_hessian_deterministic(self,config,batch_key):
-    #    af = self.amplitude_factory
-    #    af.wfn2backend(backend='torch',requires_grad=True)
-    #    ex = self.batch_pair_energies_deterministic(config,batch_key,new_cache=True)
-    #    _,ex,Hvx = af.compute_hessian(ex)
-    #    af.wfn2backend()
-    #    return ex,Hvx
-    #def compute_local_energy_hessian_deterministic(self,config):
-    #    af = self.amplitude_factory
-    #    cx,vx = af.get_grad_deterministic(config)
-
-    #    ex = 0. 
-    #    Hvx = 0.
-    #    for key in self.model.batched_pairs:
-    #        ex_,Hvx_ = self.batch_hessian_deterministic(config,key) 
-    #        ex += ex_
-    #        Hvx += Hvx_
-    #     
-    #    eu = self.model.compute_local_energy_eigen(config)
-    #    return af.parse_hessian_deterministic(Hvx,vx,ex,eu,cx)
-    #def compute_local_energy_gradient_deterministic(self,config,compute_v=True):
-    #    af = self.amplitude_factory
-    #    ex = dict() 
-    #    for key in self.model.batched_pairs:
-    #        ex_ = self.batch_pair_energies_deterministic(config,key)
-    #        ex.update(ex_)
-
-    #    if compute_v:
-    #        cx,vx = af.get_grad_deterministic(config)
-    #    else:
-    #        cx = af.unsigned_amplitude(config)
-    #        sign = af.config_sign(config)
-    #        cx *= sign
-    #        vx = None
-    #    if cx is None:
-    #        return 0.,0.,vx,None,0.
-    #    ex,cx = af.parse_energy_deterministic(ex,cx) 
-    #    eu = self.model.compute_local_energy_eigen(config)
-    #    ex += eu
-    #    return cx,ex,vx,None,0.
 import autoray as ar
 import torch
 import h5py

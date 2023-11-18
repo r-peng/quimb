@@ -1,6 +1,7 @@
 import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
+import scipy.optimize as opt
 from .tfqmr import tfqmr
 
 from quimb.utils import progbar as Progbar
@@ -164,16 +165,18 @@ class TNVMC: # stochastic sampling
         self.solve_full = solve_full
         self.solve_dense = solve_dense
         self.compute_Hv = False
-        if self.optimizer in ['rgn','lin']:
+        if self.optimizer in ['rgn','lin','trust']:
             self.compute_Hv = True
         if self.optimizer=='rgn':
             solver = kwargs.get('solver','lgmres')
             self.solver = {'lgmres':spla.lgmres,
                            'tfqmr':tfqmr}[solver] 
             self.pure_newton = kwargs.get('pure_newton',True)
- 
         if self.optimizer=='lin':
             self.xi = kwargs.get('xi',0.5)
+        if self.optimizer=='trust':
+            self.trust_sz = kwargs.get('trust_sz',None)
+            self.trust_method = kwargs.get('trust_method','slsqp')
 
         # to be set before run
         self.tmpdir = None
@@ -183,7 +186,7 @@ class TNVMC: # stochastic sampling
         self.rate2 = None # rate for LIN,RGN
         self.cond1 = None
         self.cond2 = None
-        self.check = None 
+        self.check = [1] 
 
         self.progbar = False
         self.save_local = False
@@ -379,7 +382,7 @@ class TNVMC: # stochastic sampling
         t0 = time.time()
         self.extract_energy()
         self.extract_gradient()
-        if self.optimizer in ['rgn','lin']:
+        if self.optimizer in ['rgn','lin','trust']:
             self._extract_Hvmean()
         if RANK==0:
             try:
@@ -461,8 +464,6 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             vmean = self.vmean[start:stop]
             S = vvsum / self.n - np.outer(vmean.conj(),vmean).real
-            n = 310
-            print('Snorm',np.linalg.norm(S[:-n,-n:]),np.linalg.norm(S[:-n,:-n]),np.linalg.norm(S[-n:,-n:]))
             print('\tcollect S matrix time=',time.time()-t0)
         return S
     def _get_Hmatrix(self,start=0,stop=None):
@@ -542,8 +543,8 @@ class TNVMC: # stochastic sampling
     def transform_gradients(self):
         if self.optimizer=='sr':
             x = self._transform_gradients_sr()
-        elif self.optimizer in ['rgn','lin']:
-            x = self._transform_gradients_o2()
+        elif self.optimizer in ['rgn','lin','trust']:
+            x = self._transform_gradients_linesearch()
         else:
             x = self._transform_gradients_sgd()
         if RANK==0:
@@ -656,6 +657,39 @@ class TNVMC: # stochastic sampling
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
         return dE
+    def _transform_gradients_trust(self,x0=None):
+        solve_full = True
+        solve_dense = True
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
+        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
+        if RANK>0:
+            return 0 
+        def model(d):
+            return 2 * np.dot(self.g,d) + .5 * np.dot(d,np.dot(self.H,d)), 2 * self.g + np.dot(self.H,d)
+        def hessp(d):
+            return np.dot(self.H,d)
+        def bound(d):
+            return np.dot(d,np.dot(self.S,d))
+        def jac_bound(d):
+            return 2 * np.dot(self.S,d)
+        if x0 is None:
+            x0 = self.rate1 * np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
+        self.trust_sz = bound(x0) 
+        if self.trust_method=='trust-constr':
+            nc = opt.NonLinearConstraint(fun=bound,lb=0.,ub=self.trust_sz,jac=jac_bound,hess=self.S)
+        else:
+            def _bound(d):
+                return self.trust_sz - bound(d)
+            nc = {'type':'ineq','fun':_bound}
+            if self.trust_method=='slsqp':
+                def _jac_bound(d):
+                    return -jac_bound(d)
+                nc['jac'] = _jac_bound
+        res = opt.minimize(fun=model,x0=x0,method=self.trust_method,jac=True,hessp=hessp,constraints=nc)
+        print(res['message'])
+        dEm = res['fun']
+        self.deltas = - res['x'] 
+        return dEm
     def solve_iterative(self,A,b,symm,x0=None):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)
@@ -750,39 +784,62 @@ class TNVMC: # stochastic sampling
             return - np.dot(self.g,self.deltas) + .5 * dE
         else:
             return 0. 
-    def _transform_gradients_o2(self,full_sr=True,dense_sr=False):
-        # SR
-        xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
-        deltas_sr = self.deltas
+    def _transform_gradients_linesearch(self,full_sr=True,dense_sr=False):
+        deltas_sr = None
+        if self.check is not None or self.optimizer=='rgn':
+            xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
+            deltas_sr = self.deltas
 
         if self.optimizer=='rgn':
-            dE = self._transform_gradients_rgn(x0=deltas_sr)
-            if self.pure_newton:
-                xnew_rgn = self.update(self.rate2) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
-            else:
-                xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+            dEm = self._transform_gradients_rgn(x0=deltas_sr)
         elif self.optimizer=='lin':
-            dE = self._transform_gradients_lin()
-            xnew_rgn = self.update(1.) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+            dEm = self._transform_gradients_lin()
+        elif self.optimizer=='trust':
+            x0 = deltas_sr * self.rate1 if RANK==0 else None
+            dEm = self._transform_gradients_trust(x0=x0)
         else:
             raise NotImplementedError
         deltas_rgn = self.deltas
+  
+        rate = self.rate2 if self.optimizer=='rgn' and self.pure_newton else 1.
         if self.check is None:
+            xnew_rgn = self.update(rate) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
             return xnew_rgn
-        
+
         if RANK==0:
             g = self.g
-        COMM.Bcast(xnew_rgn,root=0) 
-        self.sampler.af.update(xnew_rgn)
-        if self.check=='energy':
-            update_rgn = self._check_by_energy(dE)
-        else:
-            raise NotImplementedError
-        if RANK==0:
-            self.g = g
-        if update_rgn: 
+            E,Eerr = self.E,self.Eerr
+            Enew = [None] * len(self.check)
+            Eerr_new = [None] * len(self.check)
+        config = self.sampler.config
+        xnew_rgn = [None] * len(self.check)
+        for ix,scale in enumerate(self.check): 
             self.deltas = deltas_rgn
-            return xnew_rgn
+            xnew_rgn[ix] = self.update(rate*scale) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+            COMM.Bcast(xnew_rgn[ix],root=0) 
+            self.sampler.af.update(xnew_rgn[ix])
+            self.sampler.config = config
+
+            self.free_quantities()
+            self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+            self.extract_energy()
+            if RANK==0:
+                Enew[ix] = self.E
+                Eerr_new[ix] = self.Eerr
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)
+        self.g = g
+        self.E = E
+        self.Eerr = Eerr
+        self.sampler.config = config
+
+        dE = np.array(Enew) - E
+        Eerr_new = np.array(Eerr_new)
+        print(f'\tpredict={dEm},actual={(dE,Eerr_new)}')
+        idx = np.argmin(dE) 
+        if dE[idx]<0:
+            self.deltas = deltas_rgn
+            return xnew_rgn[idx]
         else:
             self.deltas = deltas_sr
             return xnew_sr
@@ -894,22 +951,6 @@ class TNVMC: # stochastic sampling
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
         return w - self.E
-    def _check_by_energy(self,dEm):
-        if RANK==0:
-            E,Eerr = self.E,self.Eerr
-        self.free_quantities()
-        config = self.sampler.config
-        self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
-        self.sampler.config = config
-        self.extract_energy()
-        if RANK>0:
-            return True 
-        if self.Eerr is None:
-            return False
-        dE = self.E - E
-        err = (Eerr**2 + self.Eerr**2)**.5
-        print(f'\tpredict={dEm},actual={(dE,err)}')
-        return (dE < 0.) 
     def measure(self,fname=None):
         self.sample(compute_v=False,compute_Hv=False)
 
