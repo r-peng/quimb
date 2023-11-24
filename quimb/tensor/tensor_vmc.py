@@ -2,6 +2,10 @@ import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
 import scipy.optimize as opt
+#from scipy.optimize.optimize import (
+#    _line_search_wolfe12,
+#    _LineSearchError,
+#)
 from .tfqmr import tfqmr
 
 from quimb.utils import progbar as Progbar
@@ -16,6 +20,79 @@ MAXITER = 100
 ##################################################################################################
 # VMC utils
 ##################################################################################################
+def _cubic_interpolation(fun,alpha1,alpha2,alpha3,xk,pk):
+    M = np.zeros((3,3))
+    b = np.zeros(3)
+    for i,alpha in enumerate([alpha1,alpha2,alpha3]):
+        b[i] = fun(xk+alpha*pk)
+        for j,p in enumerate([3,2,1]):
+            M[i,j] = alpha**p
+    a,b,c = np.linalg.solve(M,b)
+    sq = b**2-3*a*c
+    if sq<0:
+        return -1 
+    roots = [(-b+sign*np.sqrt(sq))/(3*a) for sign in [1,-1]] 
+    if a>0:
+        return roots[1]
+    else:
+        return roots[0]
+def _3point_interpolation(fun,alpha_k,xk,pk):
+    s = .5,1.,1.1
+    if xk[-1]+s[-1]*alpha_k*pk[-1]<0:
+        smax = -xk[-1]/pk[-1]/alpha_k
+        s = np.array([.2,.5,.9])*smax
+    x = [xk+si*alpha_k*pk for si in s]
+    b = np.array([fun(xi) for xi in x])
+    ix = np.argmin(b) 
+    return alpha_k*s[ix],b[ix],x[ix]
+def _minimize(update,x0,ctr_mu=True,alpha_0=.1,maxiter=None):
+    maxiter = MAXITER if maxiter is None else maxiter
+    xk = x0
+    alpha_k = alpha_0
+    for i in range(maxiter):
+        fk,gk,pk,status = update(xk)
+        gnorm = np.linalg.norm(gk)
+        print(f'iter={i},gnorm={gnorm},fval={fk},constr={gk[-1]},mu={xk[-1]}')
+        dEm = fk - xk[-1] * gk[-1]
+        if gnorm < CG_TOL:
+            return xk,dEm,0
+        if status!=0:
+            return xk,dEm,3
+
+        xkp1 = xk + alpha_k * pk
+        #if ctr_mu and xkp1[-1]<0:
+        #    return xk,dEm,2
+        xk = xkp1
+    return xk,dEm,1 
+#def _minimize(fun,jac,hess,x0,ctr_mu=True,alpha0=1e-2):
+#    xk = x0
+#    gk = jac(x0)
+#    old_fval = fun(x0)
+#    old_old_fval = old_fval + np.linalg.norm(gk)/2
+#    for i in range(MAXITER):
+#        Hk = hess(xk) 
+#        pk = -np.linalg.solve(Hk,gk) 
+#        ls = _line_search_wolfe12
+#        if ctr_mu and pk[-1] < 0:
+#            ls = functools.partial(ls,amax=-xk[-1]/pk[-1]) 
+#        try:
+#            alpha_k,_,_,old_fval,old_old_fval,gk =  ls(fun,jac,xk,pk,gk,old_fval,old_old_fval)
+#        except _LineSearchError:
+#            alpha_k = alpha0
+#            if ctr_mu and pk[-1] < 0:
+#                alpha_k = min(alpha_k,-xk[-1]/pk[-1])
+#            return xk,2
+#        
+#        xk += alpha_k * pk
+#        if ctr_mu and xk[-1]<0:
+#            return xk,3
+#        if gk is None:
+#            gk = jac(xk)
+#        gnorm = np.linalg.norm(gk)
+#        print(f'iter={i},gnorm={gnorm},fval={old_fval},alpha_k={alpha_k}')
+#        if gnorm < CG_TOL:
+#            return xk,0
+#    return xk,1 
 def __rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     sh = len(g)
     hess = H - E * S 
@@ -55,20 +132,22 @@ def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
     return deltas,dE,wmin,eps
-def _newton_block_solve(H,E,S,g,cond,eigen=True):
+def _newton_block_solve(H,E,S,g,cond,eigen=True,enforce_pos=True):
     # hessian 
     hess = H - E * S
     if eigen:
         w,v = np.linalg.eig(hess)
         wmin = np.amin(w.real)
-        w += max(0.,cond-wmin.real)
+        tau = max(0.,cond-wmin) if enforce_pos else cond
+        w += tau 
         deltas = np.dot(v/w.reshape(1,len(g)),np.dot(v.T.conj(),g)).real
     else:
         # smallest eigenvalue
         w = np.linalg.eigvals(hess)
         wmin = np.amin(w.real)
+        tau = max(0.,cond-wmin) if enforce_pos else cond
         # solve
-        deltas = np.linalg.solve(hess+max(0.,cond-wmin.real)*np.eye(len(g)),g)
+        deltas = np.linalg.solve(hess+tau*np.eye(len(g)),g)
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
     return deltas,dE,wmin
@@ -135,20 +214,19 @@ def blocking_analysis(weights, energies, neql, printQ=False):
 ##################################################################################################
 # VMC engine 
 ##################################################################################################
-class TNVMC: # stochastic sampling
+class SGD: # stochastic sampling
     def __init__(
         self,
         sampler,
         dtype_o=float,
         normalize=False,
-        optimizer='sr',
+        optimizer='sgd',
         solve_full=True,
         solve_dense=False,
-        **kwargs,
+        maxiter=None,
     ):
         # parse sampler
         self.sampler = sampler
-        self.exact_sampling = sampler.exact
 
         # parse wfn 
         self.nsite = self.sampler.af.nsite
@@ -165,35 +243,20 @@ class TNVMC: # stochastic sampling
         self.solve_full = solve_full
         self.solve_dense = solve_dense
         self.compute_Hv = False
-        if self.optimizer in ['rgn','lin','trust']:
-            self.compute_Hv = True
-        if self.optimizer=='rgn':
-            solver = kwargs.get('solver','lgmres')
-            self.solver = {'lgmres':spla.lgmres,
-                           'tfqmr':tfqmr}[solver] 
-            self.pure_newton = kwargs.get('pure_newton',True)
-        if self.optimizer=='lin':
-            self.xi = kwargs.get('xi',0.5)
-        if self.optimizer=='trust':
-            self.trust_sz = kwargs.get('trust_sz',None)
-            self.trust_method = kwargs.get('trust_method','slsqp')
+        self.maxiter = MAXITER if maxiter is None else maxiter
 
         # to be set before run
         self.tmpdir = None
         self.batchsize = None
         self.batchsize_small = None
         self.rate1 = None # rate for SGD,SR
-        self.rate2 = None # rate for LIN,RGN
-        self.cond1 = None
-        self.cond2 = None
-        self.check = [1] 
 
         self.progbar = False
         self.save_local = False
         self.save_grad_hess = False
-
-        self.free_quantities()
     def free_quantities(self):
+        if RANK==0: 
+            self.Eold = self.E
         self.f = None
         self.e = None
         self.g = None
@@ -213,12 +276,14 @@ class TNVMC: # stochastic sampling
             x *= self.init_norm / norm    
         return x
     def run(self,start,stop,save_wfn=True):
-        self.Eold = 0.
+        self.Eold = None 
         for step in range(start,stop):
             self.step = step
             self.sample()
             self.extract_energy_gradient()
             x = self.transform_gradients()
+            if RANK==0:
+                print(f'\tg={np.linalg.norm(self.g)},del={np.linalg.norm(self.deltas)},dot={np.dot(self.deltas,self.g)},x={np.linalg.norm(x)}')
             self.free_quantities()
             COMM.Bcast(x,root=0) 
             fname = self.tmpdir+f'psi{step+1}' if save_wfn else None
@@ -226,7 +291,7 @@ class TNVMC: # stochastic sampling
     def sample(self,samplesize=None,save_local=None,compute_v=True,compute_Hv=None,save_config=True):
         self.sampler.preprocess()
 
-        if self.exact_sampling:
+        if self.sampler.exact:
             samplesize = len(self.sampler.nonzeros)
             save_config = False
         else:
@@ -249,7 +314,7 @@ class TNVMC: # stochastic sampling
         if RANK==0:
             self._ctr(samplesize,save_config)
         else:
-            if self.exact_sampling:
+            if self.sampler.exact:
                 self._sample_exact(compute_v,compute_Hv)
             else:
                 self._sample_stochastic(compute_v,compute_Hv,save_config,save_local)
@@ -386,16 +451,16 @@ class TNVMC: # stochastic sampling
             self._extract_Hvmean()
         if RANK==0:
             try:
-                print(f'step={self.step},E={self.E/self.nsite},dE={(self.E-self.Eold)/self.nsite},err={self.Eerr/self.nsite},gmax={np.amax(np.fabs(self.g))}')
+                dE = 0 if self.Eold is None else self.E-self.Eold
+                print(f'step={self.step},E={self.E/self.nsite},dE={dE/self.nsite},err={self.Eerr/self.nsite},gmax={np.amax(np.fabs(self.g))}')
             except TypeError:
                 print('E=',self.E)
                 print('Eerr=',self.Eerr)
             print('\tcollect g,Hv time=',time.time()-t0)
-            self.Eold = self.E
     def extract_energy(self):
         if RANK>0:
             return
-        if self.exact_sampling:
+        if self.sampler.exact:
             self.n = 1.
             self.E = np.dot(self.f,self.e)
             self.Eerr = 0.
@@ -415,145 +480,10 @@ class TNVMC: # stochastic sampling
             evmean /= self.n
             self.g = (evmean - self.E.conj() * vmean).real
             self.vmean = vmean
-    def _extract_Hvmean(self):
-        Hvmean = np.zeros(self.nparam,dtype=self.dtype_o)
-        COMM.Reduce(self.Hvsum,Hvmean,op=MPI.SUM,root=0)
-        self.Hvsum = None
-        if RANK==0:
-            Hvmean /= self.n
-            #print(Hvmean)
-            self.Hvmean = Hvmean
-    def extract_S(self,solve_full=None,solve_dense=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        fxn = self._get_Smatrix if solve_dense else self._get_S_iterative
-        self.Sx1 = np.zeros(self.nparam,dtype=self.dtype_i)
-        if solve_full:
-            self.S = fxn() 
-        else:
-            self.S = [None] * self.nsite
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                self.S[ix] = fxn(start=start,stop=stop)
-    def extract_H(self,solve_full=None,solve_dense=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
-        self.Hx1 = np.zeros(self.nparam,dtype=self.dtype_i)
-        if solve_full:
-            self.H = fxn() 
-        else:
-            self.H = [None] * self.nsite
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                self.H[ix] = fxn(start=start,stop=stop)
-    def _get_Smatrix(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop
-        t0 = time.time()
-        if RANK==0:
-            sh = stop-start
-            vvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
-        else:
-            v = self.v[:,start:stop] 
-            if self.exact_sampling:
-                vvsum_ = np.einsum('s,si,sj->ij',self.f,v.conj(),v)
-            else:
-                vvsum_ = np.dot(v.T.conj(),v)
-        vvsum_ = np.ascontiguousarray(vvsum_.real)
-        vvsum = np.zeros_like(vvsum_)
-        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
-        S = None
-        if RANK==0:
-            vmean = self.vmean[start:stop]
-            S = vvsum / self.n - np.outer(vmean.conj(),vmean).real
-            print('\tcollect S matrix time=',time.time()-t0)
-        return S
-    def _get_Hmatrix(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop
-        t0 = time.time()
-        if RANK==0:
-            sh = stop-start
-            vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
-        else:
-            v = self.v[:,start:stop] 
-            Hv = self.Hv[:,start:stop] 
-            if self.exact_sampling:
-                vHvsum_ = np.einsum('s,si,sj->ij',self.f,v,Hv)
-            else:
-                vHvsum_ = np.dot(v.T,Hv)
-        vHvsum = np.zeros_like(vHvsum_)
-        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
-        H = None
-        if RANK==0:
-            #print(start,stop,np.linalg.norm(vHvsum-vHvsum.T))
-            Hvmean = self.Hvmean[start:stop]
-            vmean = self.vmean[start:stop]
-            g = self.g[start:stop]
-            H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
-            print('\tcollect H matrix time=',time.time()-t0)
-        return H
-    def _get_S_iterative(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop 
-        if RANK==0:
-            def matvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                COMM.Bcast(x,root=0)
-                Sx1 = np.zeros_like(self.Sx1[start:stop])
-                COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
-                vmean = self.vmean[start:stop]
-                return self.Sx1[start:stop] / self.n \
-                     - (vmean.conj() * np.dot(vmean,x)).real
-        else: 
-            def matvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                if self.terminate[0]==1:
-                    return 0 
-                COMM.Bcast(x,root=0)
-                v = self.v[:,start:stop]
-                if self.exact_sampling:
-                    Sx1 = np.dot(self.f * np.dot(v,x),v.conj())
-                else:
-                    Sx1 = np.dot(np.dot(v,x),v.conj())
-                Sx1 = np.ascontiguousarray(Sx1.real)
-                COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
-                return 0 
-        return matvec
-    def _get_H_iterative(self,start=0,stop=None):
-        stop = self.nparam if stop is None else stop 
-        if RANK==0:
-            def matvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                COMM.Bcast(x,root=0)
-                Hx1 = np.zeros_like(self.Hx1[start:stop])
-                COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
-                return self.Hx1[start:stop] / self.n \
-                     - self.vmean[start:stop] * np.dot(self.Hvmean[start:stop],x) \
-                     - self.g[start:stop] * np.dot(self.vmean[start:stop],x)
-        else:
-            def matvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                if self.terminate[0]==1:
-                    return 0 
-                COMM.Bcast(x,root=0)
-                if self.exact_sampling:
-                    Hx1 = np.dot(self.f * np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
-                else:
-                    Hx1 = np.dot(np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
-                COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
-                return 0 
-        return matvec
-    def transform_gradients(self):
-        if self.optimizer=='sr':
-            x = self._transform_gradients_sr()
-        elif self.optimizer in ['rgn','lin','trust']:
-            x = self._transform_gradients_linesearch()
-        else:
-            x = self._transform_gradients_sgd()
-        if RANK==0:
-            print(f'\tg={np.linalg.norm(self.g)},del={np.linalg.norm(self.deltas)},dot={np.dot(self.deltas,self.g)},x={np.linalg.norm(x)}')
-        return x
     def update(self,rate):
         x = self.sampler.af.get_x()
         return self.normalize(x - rate * self.deltas)
-    def _transform_gradients_sgd(self):
+    def transform_gradients(self):
         if RANK>0:
             return np.zeros(self.nparam,dtype=self.dtype) 
         if self.optimizer=='sgd':
@@ -565,392 +495,6 @@ class TNVMC: # stochastic sampling
         else:
             raise NotImplementedError
         return self.update(self.rate1)
-    def _transform_gradients_sr(self,solve_dense=None,solve_full=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
-        if solve_dense:
-            return self._transform_gradients_sr_dense(solve_full=solve_full)
-        else:
-            return self._transform_gradients_sr_iterative(solve_full=solve_full)
-    def _transform_gradients_rgn(self,solve_dense=None,solve_full=None,x0=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
-        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
-        if solve_dense:
-            dE = self._transform_gradients_rgn_dense(solve_full=solve_full)
-        else:
-            dE = self._transform_gradients_rgn_iterative(solve_full=solve_full,x0=x0)
-        return dE
-    def _transform_gradients_sr_dense(self,solve_full=None):
-        if RANK>0:
-            return np.zeros(self.nparam,dtype=self.dtype_i) 
-        t0 = time.time()
-        solve_full = self.solve_full if solve_full is None else solve_full
-        if solve_full:
-            self.deltas = np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
-        else:
-            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                S = self.S[ix] + self.cond1 * np.eye(stop-start)
-                self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
-        print('\tSR solver time=',time.time()-t0)
-        if self.save_grad_hess:
-            if self.solve_full:
-                S = self.S
-            else:
-                S = np.zeros((self.nparam,self.nparam))
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('S',data=S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return self.update(self.rate1)
-    def _transform_gradients_rgn_dense(self,solve_full=None):
-        if RANK>0:
-            return 0. 
-        t0 = time.time()
-        solve_full = self.solve_full if solve_full is None else solve_full
-        if solve_full:
-            if self.pure_newton:
-                self.deltas,dE,w = _newton_block_solve(self.H,self.E,self.S,self.g,self.cond2) 
-                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
-            else:
-                self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
-                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w},eps={eps}')
-        else:
-            blk_dict = self.sampler.af.block_dict
-            w = [None] * len(blk_dict)
-            dE = np.zeros(len(blk_dict))  
-            self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(blk_dict):
-                if self.pure_newton:
-                    self.deltas[start:stop],dE[ix],w[ix] = _newton_block_solve(
-                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2)
-                    print(f'ix={ix},eigval={w[ix]}')
-                else:
-                    self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
-                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2)
-                    print(f'ix={ix},eigval={w[ix]},eps={eps}')
-            w = min(np.array(w).real)
-            dE = np.sum(dE)
-            print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
-        if self.save_grad_hess:
-            if self.solve_full:
-                H = self.H
-                S = self.S
-            else:
-                H = np.zeros((self.nparam,self.nparam))
-                S = np.zeros((self.nparam,self.nparam))
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    H[start:stop,start:stop] = self.H[ix] 
-                    S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('H',data=H) 
-            f.create_dataset('S',data=S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return dE
-    def _transform_gradients_trust(self,x0=None):
-        solve_full = True
-        solve_dense = True
-        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
-        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
-        if RANK>0:
-            return 0 
-        def model(d):
-            return 2 * np.dot(self.g,d) + .5 * np.dot(d,np.dot(self.H,d)), 2 * self.g + np.dot(self.H,d)
-        def hessp(d):
-            return np.dot(self.H,d)
-        def bound(d):
-            return np.dot(d,np.dot(self.S,d))
-        def jac_bound(d):
-            return 2 * np.dot(self.S,d)
-        if x0 is None:
-            x0 = self.rate1 * np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
-        self.trust_sz = bound(x0) 
-        if self.trust_method=='trust-constr':
-            nc = opt.NonLinearConstraint(fun=bound,lb=0.,ub=self.trust_sz,jac=jac_bound,hess=self.S)
-        else:
-            def _bound(d):
-                return self.trust_sz - bound(d)
-            nc = {'type':'ineq','fun':_bound}
-            if self.trust_method=='slsqp':
-                def _jac_bound(d):
-                    return -jac_bound(d)
-                nc['jac'] = _jac_bound
-        res = opt.minimize(fun=model,x0=x0,method=self.trust_method,jac=True,hessp=hessp,constraints=nc)
-        print(res['message'])
-        dEm = res['fun']
-        self.deltas = - res['x'] 
-        return dEm
-    def solve_iterative(self,A,b,symm,x0=None):
-        self.terminate = np.array([0])
-        deltas = np.zeros_like(b)
-        sh = len(b)
-        if RANK==0:
-            t0 = time.time()
-            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=b.dtype)
-            if symm:
-                deltas,info = spla.minres(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
-            else: 
-                deltas,info = self.solver(LinOp,b,x0=x0,tol=CG_TOL,maxiter=MAXITER)
-            self.terminate[0] = 1
-            COMM.Bcast(self.terminate,root=0)
-            print(f'\tsolver time={time.time()-t0},exit status={info}')
-        else:
-            nit = 0
-            while self.terminate[0]==0:
-                nit += 1
-                A(deltas)
-            if RANK==1:
-                print('niter=',nit)
-        return deltas
-    def _transform_gradients_sr_iterative(self,solve_full=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
-        if solve_full: 
-            def R(x):
-                return self.S(x) + self.cond1 * x
-            self.deltas = self.solve_iterative(R,g,True,x0=g)
-        else:
-            self.deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                def R(x):
-                    return self.S[ix](x) + self.cond1 * x
-                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
-        if RANK==0:
-            return self.update(self.rate1)
-        else:
-            return np.zeros(self.nparam,dtype=self.dtype_i)
-    def _transform_gradients_rgn_iterative(self,solve_full=None,x0=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
-        E = self.E if RANK==0 else 0
-        if RANK==0:
-            print('pure_newton=',self.pure_newton)
-        if solve_full: 
-            def A(x):
-                if self.terminate[0]==1:
-                    return 0
-                Hx = self.H(x)
-                if self.terminate[0]==1:
-                    return 0
-                Sx = self.S(x)
-                if self.terminate[0]==1:
-                    return 0
-                if self.pure_newton:
-                    return Hx - E * Sx + self.cond2 * x
-                else:
-                    return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
-            self.deltas = self.solve_iterative(A,g,False,x0=x0)
-            self.terminate[0] = 0
-            hessp = A(self.deltas)
-            if RANK==0:
-                dE = np.dot(self.deltas,hessp)
-        else:
-            dE = 0.
-            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                if RANK==0:
-                    print(f'ix={ix},sh={stop-start}')
-                def A(x):
-                    if self.terminate[0]==1:
-                        return 0
-                    Hx = self.H[ix](x)
-                    if self.terminate[0]==1:
-                        return 0
-                    Sx = self.S[ix](x)
-                    if self.terminate[0]==1:
-                        return 0
-                    if self.pure_newton:
-                        return Hx - E * Sx + self.cond2 * x
-                    else:
-                        return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
-                x0_ = None if x0 is None else x0[start:stop]
-                deltas = self.solve_iterative(A,g[start:stop],False,x0=x0_)
-                self.deltas[start:stop] = deltas 
-                self.terminate[0] = 0
-                hessp = A(deltas)
-                if RANK==0:
-                    dE += np.dot(hessp,deltas)
-        if RANK==0:
-            return - np.dot(self.g,self.deltas) + .5 * dE
-        else:
-            return 0. 
-    def _transform_gradients_linesearch(self,full_sr=True,dense_sr=False):
-        deltas_sr = None
-        if self.check is not None or self.optimizer=='rgn':
-            xnew_sr = self._transform_gradients_sr(solve_full=full_sr,solve_dense=dense_sr)
-            deltas_sr = self.deltas
-
-        if self.optimizer=='rgn':
-            dEm = self._transform_gradients_rgn(x0=deltas_sr)
-        elif self.optimizer=='lin':
-            dEm = self._transform_gradients_lin()
-        elif self.optimizer=='trust':
-            x0 = deltas_sr * self.rate1 if RANK==0 else None
-            dEm = self._transform_gradients_trust(x0=x0)
-        else:
-            raise NotImplementedError
-        deltas_rgn = self.deltas
-  
-        rate = self.rate2 if self.optimizer=='rgn' and self.pure_newton else 1.
-        if self.check is None:
-            xnew_rgn = self.update(rate) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
-            return xnew_rgn
-
-        if RANK==0:
-            g = self.g
-            E,Eerr = self.E,self.Eerr
-            Enew = [None] * len(self.check)
-            Eerr_new = [None] * len(self.check)
-        config = self.sampler.config
-        xnew_rgn = [None] * len(self.check)
-        for ix,scale in enumerate(self.check): 
-            self.deltas = deltas_rgn
-            xnew_rgn[ix] = self.update(rate*scale) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
-            COMM.Bcast(xnew_rgn[ix],root=0) 
-            self.sampler.af.update(xnew_rgn[ix])
-            self.sampler.config = config
-
-            self.free_quantities()
-            self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
-            self.extract_energy()
-            if RANK==0:
-                Enew[ix] = self.E
-                Eerr_new[ix] = self.Eerr
-        if RANK>0:
-            return np.zeros(self.nparam,dtype=self.dtype_i)
-        self.g = g
-        self.E = E
-        self.Eerr = Eerr
-        self.sampler.config = config
-
-        dE = np.array(Enew) - E
-        Eerr_new = np.array(Eerr_new)
-        print(f'\tpredict={dEm},actual={(dE,Eerr_new)}')
-        idx = np.argmin(dE) 
-        if dE[idx]<0:
-            self.deltas = deltas_rgn
-            return xnew_rgn[idx]
-        else:
-            self.deltas = deltas_sr
-            return xnew_sr
-    def _transform_gradients_lin(self,solve_dense=None,solve_full=None):
-        solve_full = self.solve_full if solve_full is None else solve_full
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
-        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
-        if solve_dense:
-            dE = self._transform_gradients_lin_dense(solve_full=solve_full)
-        else:
-            raise NotImplementedError
-            dE = self._transform_gradients_lin_iterative(solve_full=solve_full)
-        return dE
-    def _scale_eigenvector(self):
-        if self.xi is None:
-            Ns = self.vmean
-        else:
-            if self.solve_full:
-                Sp = np.dot(self.S,self.deltas) if self.solve_dense else self.S(self.deltas)
-            else:
-                Sp = np.zeros_like(self.x)
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    Sp[start:stop] = np.dot(self.S[ix],self.deltas[start:stop]) if self.solve_dense else \
-                                     self.S[ix](self.deltas[start:stop])
-            Ns  = - (1.-self.xi) * Sp 
-            Ns /= 1.-self.xi + self.xi * (1.+np.dot(self.deltas,Sp))**.5
-        denom = 1. - np.dot(Ns,self.deltas)
-        self.deltas /= -denom
-        print('\tscale2=',denom)
-    def _transform_gradients_lin_dense(self,solve_full=None):
-        if RANK>0:
-            return 0. 
-        self.deltas = np.zeros(self.nparam)
-        solve_full = self.solve_full if solve_full is None else solve_full
-        
-        t0 = time.time()
-        if solve_full:
-            w,self.deltas,v0,inorm = \
-                _lin_block_solve(self.H,self.E,self.S,self.g,self.Hvmean,self.vmean,self.cond2) 
-        else:
-            w = np.zeros(self.nsite)
-            v0 = np.zeros(self.nsite)
-            inorm = np.zeros(self.nsite)
-            self.deltas = np.zeros_like(self.x)
-            for ix,(start,stop) in enumerate(self.block_dict):
-                w[ix],self.deltas[start:stop],v0[ix],inorm[ix] = \
-                    _lin_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],
-                                     self.Hvmean[start:stop],self.vmean[start:stop],self.cond2) 
-            inorm = inorm.sum()
-            w = w.sum()
-        print(f'\tLIN solver time={time.time()-t0},inorm={inorm},eigenvalue={w},scale1={v0}')
-        self._scale_eigenvector()
-        if self.save_grad_hess:
-            Hi0 = self.g
-            H0j = self.Hvmean - self.E * self.vmean
-            if self.solve_full:
-                H = self.H
-                S = self.S
-            else:
-                H = np.zeros((self.nparam,self.nparam))
-                S = np.zeros((self.nparam,self.nparam))
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    H[start:stop,start:stop] = self.H[ix] 
-                    S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('H',data=H) 
-            f.create_dataset('S',data=S) 
-            f.create_dataset('Hi0',data=Hi0) 
-            f.create_dataset('H0j',data=H0j) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return w-self.E 
-    def _transform_gradients_lin_iterative(self,cond):
-        Hi0 = self.g
-        H0j = self.Hvmean - self.E * self.vmean
-        def A(x):
-            x0,x1 = x[0],x[1:]
-            y = np.zeros_like(x)
-            y[0] = self.E * x0 + np.dot(H0j,x1)
-            y[1:] = Hi0 * x0 + self.H(x1) 
-            return y
-        def B(x):
-            x0,x1 = x[0],x[1:]
-            y = np.zeros_like(x)
-            y[0] = x0
-            y[1:] = self.S(x1) + cond * x1
-            return y
-        x0 = np.zeros(1+self.nparam)
-        x0[0] = 1.
-        if self.solver == 'davidson':
-            w,v = self.davidson(A,B,x0,self.E)
-            self.deltas = v[1:]/v[0]
-            print('\teigenvalue =',w)
-            print('\tscale1=',v[0])
-        else:
-            A = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=A,dtype=self.x.dtype)
-            B = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=B,dtype=self.x.dtype)
-            w,v = spla.eigs(A,k=1,M=B,sigma=self.E,v0=x0,tol=CG_TOL)
-            w,self.deltas = w[0].real,v[1:,0].real/v[0,0].real
-            print('\timaginary norm=',np.linalg.norm(v[:,0].imag))
-            print('\teigenvalue =',w)
-            print('\tscale1=',v[0,0].real)
-        if self.tmpdir is not None:
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
-        return w - self.E
     def measure(self,fname=None):
         self.sample(compute_v=False,compute_Hv=False)
 
@@ -1124,7 +668,7 @@ class TNVMC: # stochastic sampling
                 if self.terminate[0]==1:
                     return 0 
                 COMM.Bcast(x,root=0)
-                if self.exact_sampling:
+                if self.sampler.exact:
                     xH1 = np.dot(self.f * np.dot(self.v,x),self.Hv)
                 else:
                     xH1 = np.dot(np.dot(self.v,x),self.Hv)
@@ -1156,6 +700,795 @@ class TNVMC: # stochastic sampling
         w = self._eig_iterative(MM,symm=True)
         if RANK==0:
             print(w,np.sqrt(w))
+class SR(SGD):
+    def __init__(self,sampler,eigen_thresh=None,**kwargs):
+        super().__init__(sampler,**kwargs) 
+        self.optimizer = 'sr' 
+        self.eigen_thresh = eigen_thresh 
+    def extract_S(self,solve_full,solve_dense):
+        fxn = self._get_Smatrix if solve_dense else self._get_S_iterative
+        self.Sx1 = np.zeros(self.nparam,dtype=self.dtype_i)
+        if solve_full:
+            self.S = fxn() 
+        else:
+            self.S = [None] * self.nsite
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                self.S[ix] = fxn(start=start,stop=stop)
+    def _get_Smatrix(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop
+        t0 = time.time()
+        if RANK==0:
+            sh = stop-start
+            vvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
+        else:
+            v = self.v[:,start:stop] 
+            if self.sampler.exact:
+                vvsum_ = np.einsum('s,si,sj->ij',self.f,v.conj(),v)
+            else:
+                vvsum_ = np.dot(v.T.conj(),v)
+        vvsum_ = np.ascontiguousarray(vvsum_.real)
+        vvsum = np.zeros_like(vvsum_)
+        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
+        S = None
+        if RANK==0:
+            vmean = self.vmean[start:stop]
+            S = vvsum / self.n - np.outer(vmean.conj(),vmean).real
+            print('\tcollect S matrix time=',time.time()-t0)
+        return S
+    def _get_S_iterative(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop 
+        if RANK==0:
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                Sx1 = np.zeros_like(self.Sx1[start:stop])
+                COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
+                vmean = self.vmean[start:stop]
+                return self.Sx1[start:stop] / self.n \
+                     - (vmean.conj() * np.dot(vmean,x)).real
+        else: 
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
+                    return 0 
+                COMM.Bcast(x,root=0)
+                v = self.v[:,start:stop]
+                if self.sampler.exact:
+                    Sx1 = np.dot(self.f * np.dot(v,x),v.conj())
+                else:
+                    Sx1 = np.dot(np.dot(v,x),v.conj())
+                Sx1 = np.ascontiguousarray(Sx1.real)
+                COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
+                return 0 
+        return matvec
+    def transform_gradients(self):
+        return self._transform_gradients_sr(self.solve_full,self.solve_dense)
+    def _transform_gradients_sr(self,solve_full,solve_dense):
+        self.extract_S(solve_full,solve_dense)
+        if solve_dense:
+            return self._transform_gradients_sr_dense(solve_full)
+        else:
+            return self._transform_gradients_sr_iterative(solve_full)
+    def _transform_gradients_sr_dense(self,solve_full):
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i) 
+        t0 = time.time()
+        if solve_full:
+            if self.eigen_thresh is None:
+                self.deltas = np.linalg.solve(self.S + self.cond1 * np.eye(self.nparam),self.g)
+            else:
+                w,v = np.linalg.eigh(self.S)
+                w = w[w>self.eigen_thresh*w[-1]]
+                print(f'\tnonzero={len(w)},wmax={w[-1]}')
+                v = v[:,-len(w):]
+                self.deltas = np.dot(v/w.reshape(1,len(w)),np.dot(v.T,self.g)) 
+        else:
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                S = self.S[ix] + self.cond1 * np.eye(stop-start)
+                self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
+        print('\tSR solver time=',time.time()-t0)
+        if self.save_grad_hess:
+            if self.solve_full:
+                S = self.S
+            else:
+                S = np.zeros((self.nparam,self.nparam))
+                for ix,(start,stop) in enumerate(self.block_dict):
+                    S[start:stop,start:stop] = self.S[ix]
+            f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+            f.create_dataset('S',data=S) 
+            f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return self.update(self.rate1)
+    def _transform_gradients_sr_iterative(self,solve_full):
+        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+        if solve_full: 
+            def R(x):
+                return self.S(x) + self.cond1 * x
+            self.deltas = self.solve_iterative(R,g,True,x0=g)
+        else:
+            self.deltas = np.empty(self.nparam,dtype=self.dtype)
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                def R(x):
+                    return self.S[ix](x) + self.cond1 * x
+                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
+        if RANK==0:
+            return self.update(self.rate1)
+        else:
+            return np.zeros(self.nparam,dtype=self.dtype_i)
+    def solve_iterative(self,A,b,symm,x0=None):
+        self.terminate = np.array([0])
+        deltas = np.zeros_like(b)
+        sh = len(b)
+        if RANK==0:
+            t0 = time.time()
+            LinOp = spla.LinearOperator((sh,sh),matvec=A,dtype=b.dtype)
+            if symm:
+                deltas,info = spla.minres(LinOp,b,x0=x0,tol=CG_TOL,maxiter=self.maxiter)
+            else: 
+                deltas,info = self.solver(LinOp,b,x0=x0,tol=CG_TOL,maxiter=self.maxiter)
+            self.terminate[0] = 1
+            COMM.Bcast(self.terminate,root=0)
+            print(f'\tsolver time={time.time()-t0},exit status={info}')
+        else:
+            nit = 0
+            while self.terminate[0]==0:
+                nit += 1
+                A(deltas)
+            if RANK==1:
+                print('niter=',nit)
+        return deltas
+class RGN(SR):
+    def __init__(self,sampler,pure_newton=False,solver='lgmres',**kwargs):
+        super().__init__(sampler,**kwargs) 
+        self.optimizer = 'rgn' 
+        self.compute_Hv = True
+        self.pure_newton = pure_newton
+        self.solver = {'lgmres':spla.lgmres,
+                       'tfqmr':tfqmr}[solver] 
+
+        self.rate2 = None # rate for LIN,RGN
+        self.cond2 = None
+        self.check = [1] 
+    def _extract_Hvmean(self):
+        Hvmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Reduce(self.Hvsum,Hvmean,op=MPI.SUM,root=0)
+        self.Hvsum = None
+        if RANK==0:
+            Hvmean /= self.n
+            #print(Hvmean)
+            self.Hvmean = Hvmean
+    def extract_H(self,solve_full,solve_dense):
+        fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
+        self.Hx1 = np.zeros(self.nparam,dtype=self.dtype_i)
+        if solve_full:
+            self.H = fxn() 
+        else:
+            self.H = [None] * self.nsite
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                self.H[ix] = fxn(start=start,stop=stop)
+    def _get_Hmatrix(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop
+        t0 = time.time()
+        if RANK==0:
+            sh = stop-start
+            vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
+        else:
+            v = self.v[:,start:stop] 
+            Hv = self.Hv[:,start:stop] 
+            if self.sampler.exact:
+                vHvsum_ = np.einsum('s,si,sj->ij',self.f,v,Hv)
+            else:
+                vHvsum_ = np.dot(v.T,Hv)
+        vHvsum = np.zeros_like(vHvsum_)
+        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
+        H = None
+        if RANK==0:
+            #print(start,stop,np.linalg.norm(vHvsum-vHvsum.T))
+            Hvmean = self.Hvmean[start:stop]
+            vmean = self.vmean[start:stop]
+            g = self.g[start:stop]
+            H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
+            print('\tcollect H matrix time=',time.time()-t0)
+        return H
+    def _get_H_iterative(self,start=0,stop=None):
+        stop = self.nparam if stop is None else stop 
+        if RANK==0:
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                Hx1 = np.zeros_like(self.Hx1[start:stop])
+                COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
+                return self.Hx1[start:stop] / self.n \
+                     - self.vmean[start:stop] * np.dot(self.Hvmean[start:stop],x) \
+                     - self.g[start:stop] * np.dot(self.vmean[start:stop],x)
+        else:
+            def matvec(x):
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
+                    return 0 
+                COMM.Bcast(x,root=0)
+                if self.sampler.exact:
+                    Hx1 = np.dot(self.f * np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
+                else:
+                    Hx1 = np.dot(np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
+                COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
+                return 0 
+        return matvec
+    def transform_gradients(self):
+        return self._transform_gradients_rgn(self.solve_full,self.solve_dense)
+    def _transform_gradients_rgn(self,solve_full,solve_dense,sr=None,enforce_pos=True):
+        if sr is None:
+            xnew_sr = self._transform_gradients_sr(True,False)
+            deltas_sr = self.deltas
+        else:
+            xnew_sr,deltas_sr = sr
+
+        self.extract_S(solve_full,solve_dense)
+        self.extract_H(solve_full,solve_dense)
+        if solve_dense:
+            dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
+        else:
+            dEm = self._transform_gradients_rgn_iterative(solve_full,delta_sr)
+        deltas_rgn = self.deltas
+
+        rate = self.rate2 if self.pure_newton else 1.
+        if self.check is None:
+            xnew_rgn = self.update(rate) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+            return xnew_rgn
+
+        if RANK==0:
+            g,E,Eerr = self.g,self.E,self.Eerr
+            Enew = [None] * len(self.check)
+            Eerr_new = [None] * len(self.check)
+        config = self.sampler.config
+        xnew_rgn = [None] * len(self.check)
+        for ix,scale in enumerate(self.check): 
+            self.deltas = deltas_rgn
+            xnew_rgn[ix] = self.update(rate*scale) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+            COMM.Bcast(xnew_rgn[ix],root=0) 
+            self.sampler.af.update(xnew_rgn[ix])
+            self.sampler.config = config
+
+            self.free_quantities()
+            self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+            self.extract_energy()
+            if RANK==0:
+                Enew[ix] = self.E
+                Eerr_new[ix] = self.Eerr
+        self.sampler.config = config
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)
+        self.g,self.E,self.Eerr = g,E,Eerr
+        dE = np.array(Enew) - E
+        Eerr_new = np.array(Eerr_new)
+        print(f'\tpredict={dEm},actual={(dE,Eerr_new)}')
+        idx = np.argmin(dE) 
+        if dE[idx]<0:
+            self.deltas = deltas_rgn
+            return xnew_rgn[idx]
+        else:
+            self.deltas = deltas_sr
+            return xnew_sr
+    def _transform_gradients_rgn_dense(self,solve_full,enforce_pos):
+        if RANK>0:
+            return 0. 
+        t0 = time.time()
+        if solve_full:
+            if self.pure_newton:
+                self.deltas,dE,w = _newton_block_solve(self.H,self.E,self.S,self.g,self.cond2,eigen=self.sampler.exact,enforce_pos=enforce_pos) 
+                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
+            else:
+                self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2,enforce_pos=enforce_pos) 
+                print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w},eps={eps}')
+        else:
+            blk_dict = self.sampler.af.block_dict
+            w = [None] * len(blk_dict)
+            dE = np.zeros(len(blk_dict))  
+            self.deltas = np.empty(self.nparam,dtype=self.dtype)
+            for ix,(start,stop) in enumerate(blk_dict):
+                if self.pure_newton:
+                    self.deltas[start:stop],dE[ix],w[ix] = _newton_block_solve(
+                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2,enforce_pos=enforce_pos)
+                    print(f'ix={ix},eigval={w[ix]}')
+                else:
+                    self.deltas[start:stop],dE[ix],w[ix],eps = _rgn_block_solve(
+                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond1,self.rate2,enforce_pos=enforce_pos)
+                    print(f'ix={ix},eigval={w[ix]},eps={eps}')
+            w = min(np.array(w).real)
+            dE = np.sum(dE)
+            print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
+        if self.save_grad_hess:
+            if self.solve_full:
+                H = self.H
+                S = self.S
+            else:
+                H = np.zeros((self.nparam,self.nparam))
+                S = np.zeros((self.nparam,self.nparam))
+                for ix,(start,stop) in enumerate(self.block_dict):
+                    H[start:stop,start:stop] = self.H[ix] 
+                    S[start:stop,start:stop] = self.S[ix]
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('H',data=H) 
+            f.create_dataset('S',data=S) 
+            f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return dE
+    def _transform_gradients_rgn_iterative(self,solve_full,x0):
+        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+        E = self.E if RANK==0 else 0
+        if RANK==0:
+            print('pure_newton=',self.pure_newton)
+        if solve_full: 
+            def A(x):
+                if self.terminate[0]==1:
+                    return 0
+                Hx = self.H(x)
+                if self.terminate[0]==1:
+                    return 0
+                Sx = self.S(x)
+                if self.terminate[0]==1:
+                    return 0
+                if self.pure_newton:
+                    return Hx - E * Sx + self.cond2 * x
+                else:
+                    return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+            self.deltas = self.solve_iterative(A,g,False,x0=x0)
+            self.terminate[0] = 0
+            hessp = A(self.deltas)
+            if RANK==0:
+                dE = np.dot(self.deltas,hessp)
+        else:
+            dE = 0.
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                if RANK==0:
+                    print(f'ix={ix},sh={stop-start}')
+                def A(x):
+                    if self.terminate[0]==1:
+                        return 0
+                    Hx = self.H[ix](x)
+                    if self.terminate[0]==1:
+                        return 0
+                    Sx = self.S[ix](x)
+                    if self.terminate[0]==1:
+                        return 0
+                    if self.pure_newton:
+                        return Hx - E * Sx + self.cond2 * x
+                    else:
+                        return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+                x0_ = None if x0 is None else x0[start:stop]
+                deltas = self.solve_iterative(A,g[start:stop],False,x0=x0_)
+                self.deltas[start:stop] = deltas 
+                self.terminate[0] = 0
+                hessp = A(deltas)
+                if RANK==0:
+                    dE += np.dot(hessp,deltas)
+        if RANK==0:
+            return - np.dot(self.g,self.deltas) + .5 * dE
+        else:
+            return 0. 
+class TrustRegion:
+    def minimize_iterative(self,update,_apply,x0):
+        self.terminate = np.array([0])
+        x,dEm = x0,0
+        if RANK==0:
+            t0 = time.time()
+            x,dEm,info = _minimize(update,x0,maxiter=self.maxiter)
+            self.terminate[0] = 1
+            COMM.Bcast(self.terminate,root=0)
+            print(f'\tsolver time={time.time()-t0},exit status={info}')
+        else:
+            nit = 0
+            while self.terminate[0]==0:
+                nit += 1
+                _apply(x)
+            if RANK==1:
+                print('niter=',nit)
+        return x,dEm
+class TrustRegionSR(SR,TrustRegion):
+    def transform_gradients(self):
+        self.extract_S(self.solve_full,self.solve_dense)
+        if RANK==0:
+            if self.Eold is not None and self.dEm is not None:
+                dE = self.E - self.Eold
+                ratio = dE/self.dEm
+                print(f'\tdE={dE},dEm={self.dEm}')
+                if ratio > 1:
+                    self.trust_sz *= self.trust_scale[0] 
+                elif ratio < .5:
+                    self.trust_sz *= self.trust_scale[1]
+            
+        if self.solve_dense:
+            self.dEm = self._transform_gradients_trust_dense()
+        else:
+            self.dEm = self._transform_gradients_trust_iterative()
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)
+        print('\tnorm after=', np.sum(self.deltas**2))
+        return self.update(1)
+    def _transform_gradients_trust_dense(self):
+        if RANK>0:
+            return 0 
+        print('\ttrust size=',self.trust_sz)
+        x0 = - self.g * self.rate1 
+        print('\tnorm before=', np.sum(x0**2))
+        R = self.S + self.cond1 * np.eye(self.nparam)
+        angle = np.dot(x0,np.dot(R,x0))
+        print('\tangle before=', angle)
+        if angle < self.trust_sz:
+            x0 *= np.sqrt(self.trust_sz/angle) * 1.1
+        g = self.g 
+        def update(x):
+            x,mu = x[:-1],x[-1]
+            Rx = np.dot(R,x)
+            c = np.dot(x,Rx)/2 - self.trust_sz/2
+
+            fk = np.dot(g,x) + mu * c 
+            
+            Lx = g + mu*Rx
+            gk = np.concatenate([Lx,c*np.ones(1)])
+
+            Lxx = mu * R
+            Lmx = Rx
+            Hk = np.block([[Lxx,Lmx.reshape(self.nparam,1)],
+                 [Lmx.reshape(1,self.nparam),np.zeros((1,1))]]) 
+            pk = np.linalg.solve(Hk,gk)
+            return fk,gk,-pk,0
+        
+        x0 = np.concatenate([x0,np.ones(1)*self.nsite])
+        x,dEm,status = _minimize(update,x0,maxiter=self.maxiter)
+        print('\tstatus=',status)
+        self.deltas = -x[:-1] 
+        return dEm 
+class TrustRegionRGN(RGN,TrustRegion):
+    def transform_gradients(self):
+        xnew_sr = self._transform_gradients_sr(True,False)
+        deltas_sr = self.deltas
+        
+        if self.trust_init=='rgn':
+            check = self.check
+            self.check = None
+            self._transform_gradients_rgn(self.solve_full,self.solve_dense,(xnew_sr,deltas_sr),enforce_pos=False)
+            self.check = check
+        else:
+            self.extract_S(self.solve_full,self.solve_dense)
+            self.extract_H(self.solve_full,self.solve_dense)
+            if self.trust_init=='sr': 
+                self.deltas *= self.rate1
+            else:
+                self.deltas = self.g * self.rate1
+
+        if RANK==0:
+            print('\ttrust size=',self.trust_sz)
+            print('\tnorm before=', np.sum(self.deltas**2))
+        if self.solve_dense:
+            dEm = self._transform_gradients_trust_dense(-self.deltas)
+        else:
+            dEm = self._transform_gradients_trust_iterative(-self.deltas)
+        if RANK==0:
+            print('\tnorm after=', np.sum(self.deltas**2))
+        xnew_trust = self.update(1) if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+        deltas_trust = self.deltas
+
+        if RANK==0:
+            g,E,Eerr = self.g,self.E,self.Eerr
+        config = self.sampler.config
+        COMM.Bcast(xnew_trust,root=0) 
+        self.sampler.af.update(xnew_trust)
+        self.free_quantities()
+        self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+        self.extract_energy()
+        self.sampler.config = config
+        if RANK>0:
+            return xnew_trust 
+        Enew,Eerr_new = self.E,self.Eerr
+        dE = Enew - E 
+        print(f'\tpredict={dEm},actual={(dE,Eerr_new)}')
+        self.g,self.E,self.Eerr = g,E,Eerr
+        if dE<0:
+            ratio = dE/dEm
+            if ratio > 1:
+                self.trust_sz *= self.trust_scale[0] 
+            elif ratio < .5:
+                self.trust_sz *= self.trust_scale[1]
+            self.deltas = deltas_trust
+            return xnew_trust
+        else:
+            self.trust_sz *= self.trust_scale[1]
+            self.deltas = deltas_sr
+            return xnew_sr
+    def _transform_gradients_trust_dense(self,x0):
+        if RANK>0:
+            return 0 
+        R = self.S + self.cond1 * np.eye(self.nparam)
+        angle = np.dot(x0,np.dot(R,x0))
+        print('\tangle before=', angle)
+        g = self.g 
+        H = (self.H - self.E * self.S) 
+        H = (H + H.T) / 2
+        def update(x):
+            x,mu = x[:-1],x[-1]
+            Hx = np.dot(H,x)
+            Rx = np.dot(R,x)
+            c = np.dot(x,Rx)/2 - self.trust_sz/2
+
+            fk = np.dot(g,x)+np.dot(x,Hx)/2 + mu * c 
+            
+            Lx = g + Hx + mu*Rx
+            gk = np.concatenate([Lx,c*np.ones(1)])
+
+            Lxx = H + mu * R
+            Lmx = Rx
+            Hk = np.block([[Lxx,Lmx.reshape(self.nparam,1)],
+                 [Lmx.reshape(1,self.nparam),np.zeros((1,1))]]) 
+            pk = np.linalg.solve(Hk,gk)
+            return fk,gk,-pk,0
+        
+        x0 = np.concatenate([x0,np.ones(1)*self.nsite])
+        x,dEm,status = _minimize(update,x0,maxiter=self.maxiter)
+        print('\tstatus=',status)
+        self.deltas = -x[:-1] 
+        return dEm 
+    def _transform_gradients_trust_iterative(self,x0):
+        Rx0 = self.S(x0) + self.cond1 * x0
+        data = np.array([np.dot(x0,Rx0),self.trust_sz])
+        COMM.Bcast(data,root=0)
+        angle,self.trust_sz = data
+        if RANK==0:
+            print('\tangle before=', angle)
+        g = self.g / self.nsite if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+        E = self.E if RANK==0 else 0
+        sh = self.nparam + 1
+        def _apply(x):
+            if self.terminate[0]==1:
+                return 0
+            x,mu = x[:-1],x[-1]
+            Hx = self.H(x)
+            if self.terminate[0]==1:
+                return 0
+            Sx = self.S(x)
+            if self.terminate[0]==1:
+                return 0
+            return x,mu,Hx,Sx
+        def update(x):
+            info = _apply(x)  
+            if info == 0:
+                return 0 
+            x,mu,Hx,Sx = info
+
+            Hx = (Hx - E * Sx) / self.nsite
+            Rx = Sx + self.cond1 * x
+            c = np.dot(x,Rx)/2 - self.trust_sz/2
+
+            fk = np.dot(g,x)+np.dot(x,HRx)/2-mu*self.trust_sz/2
+
+            Lx = g + Hx+mu*Rx
+            gk = np.concatenate([Lx,c*np.ones(1)])
+
+            def hessp(p):
+                info = _apply(p)
+                if info == 0:
+                    return 0
+                px,pm,Hpx,Spx = info 
+
+                Hpx = (Hpx - E * Spx) / self.nsite
+                Rpx = Spx + self.cond1 * px
+
+                Lpx = Hpx + mu * Rpx + Rx * pmu 
+                Lpm = np.dot(Rx,px)
+                return np.concatenate([Lpx,Lpm*np.ones(1)]) 
+            LinOp = spla.LinearOperator((sh,sh),matvec=hessp,dtype=gk.dtype)
+            pk,info = self.solver(LinOp,gk,x0=gk,tol=CG_TOL,maxiter=self.maxiter)
+            return fk,gk,-pk,info 
+        x0 = np.concatenate([x0,np.ones(1)])
+        x,dEm = self.minimize_iterative(update,_apply,x0)
+        self.deltas = -x[:-1] 
+        return dEm * self.nsite
+class BFGS(TrustRegionSR):
+    def __init__(self,sampler,**kwargs):
+        super().__init__(sampler,solve_full=True,solve_dense=True,**kwargs)
+        self.Bk = None 
+        self.gk = None
+        self.sk = None
+        self.dEm = None
+    def load(self,step):
+        f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','r')
+        self.Bk = f['Bk'][:]
+        self.gk = f['gk'][:]
+        self.sk = f['sk'][:]
+        f.close()
+    def normalize(self,x):
+        return x
+    def transform_gradients(self):
+        if self.Bk is None:
+            x = self._transform_gradients_sr(True,True)
+            if RANK==0:
+                self.deltas *= self.rate1
+                self.Bk = self.S + self.cond1 * np.eye(self.nparam)
+        else:
+            if RANK==0:
+                if self.gk is not None:
+                    yk = self.g - self.gk
+                    ny = np.linalg.norm(yk)
+                    yk /= ny
+                    denom1 = np.dot(yk,self.sk) / ny
+                    print('\tdenom1=',denom1)
+                    if np.fabs(denom1)<self.denom_thresh[0]:
+                        denom1 = self.denom_thresh[0]
+                    yy = np.outer(yk,yk) / denom1 
+
+                    ns = np.linalg.norm(self.sk)
+                    self.sk /= ns
+                    Bs = np.dot(self.Bk,self.sk)
+                    denom2 = np.dot(self.sk,Bs)
+                    print(f'\tdenom2=',denom2)
+                    if np.fabs(denom2)<self.denom_thresh[1]:
+                        denom2 = self.denom_thresh[1]
+                    ss = np.outer(Bs,Bs) / denom2 
+                    self.Bk += yy - ss
+            x = super().transform_gradients()
+        if RANK==0:
+            self.sk = - self.deltas
+            self.gk = self.g
+            f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','a')
+            f.create_dataset('Bk',data=self.Bk) 
+            f.create_dataset('sk',data=self.sk) 
+            f.create_dataset('gk',data=self.gk) 
+            f.close()
+        return x
+    def _transform_gradients_trust_dense(self):
+        if RANK>0:
+            return 0 
+        print('\ttrust size=',self.trust_sz)
+        x0 = - self.g * self.rate1
+        R = self.S + self.cond1 * np.eye(self.nparam)
+        angle = np.dot(x0,np.dot(R,x0))
+        print('\tangle before=', angle)
+        if angle < self.trust_sz:
+            x0 *= np.sqrt(self.trust_sz/angle) * 1.1
+        g = self.g 
+        H = self.Bk
+        def update(x):
+            x,mu = x[:-1],x[-1]
+            Hx = np.dot(H,x)
+            Rx = np.dot(R,x)
+            c = np.dot(x,Rx)/2 - self.trust_sz/2
+
+            fk = np.dot(g,x)+np.dot(x,Hx)/2 + mu * c 
+            
+            Lx = g + Hx + mu*Rx
+            gk = np.concatenate([Lx,c*np.ones(1)])
+
+            Lxx = H + mu * R
+            Lmx = Rx
+            Hk = np.block([[Lxx,Lmx.reshape(self.nparam,1)],
+                 [Lmx.reshape(1,self.nparam),np.zeros((1,1))]]) 
+            pk = np.linalg.solve(Hk,gk)
+            return fk,gk,-pk,0
+        
+        x0 = np.concatenate([x0,np.ones(1)*self.nsite])
+        x,dEm,status = _minimize(update,x0,maxiter=self.maxiter)
+        print('\tstatus=',status)
+        self.deltas = -x[:-1] 
+        return dEm 
+class LinearMethod(RGN):
+    def __init__(self,sampler,xi=.5,**kwargs):
+        super().__init__(sampler,**kwargs) 
+        self.optimizer = 'lin' 
+        self.xi = xi
+    def _transform_gradients_lin(self,solve_dense=None,solve_full=None):
+        solve_full = self.solve_full if solve_full is None else solve_full
+        solve_dense = self.solve_dense if solve_dense is None else solve_dense
+        self.extract_S(solve_full=solve_full,solve_dense=solve_dense)
+        self.extract_H(solve_full=solve_full,solve_dense=solve_dense)
+        if solve_dense:
+            dE = self._transform_gradients_lin_dense(solve_full=solve_full)
+        else:
+            raise NotImplementedError
+            dE = self._transform_gradients_lin_iterative(solve_full=solve_full)
+        return dE
+    def _scale_eigenvector(self):
+        if self.xi is None:
+            Ns = self.vmean
+        else:
+            if self.solve_full:
+                Sp = np.dot(self.S,self.deltas) if self.solve_dense else self.S(self.deltas)
+            else:
+                Sp = np.zeros_like(self.x)
+                for ix,(start,stop) in enumerate(self.block_dict):
+                    Sp[start:stop] = np.dot(self.S[ix],self.deltas[start:stop]) if self.solve_dense else \
+                                     self.S[ix](self.deltas[start:stop])
+            Ns  = - (1.-self.xi) * Sp 
+            Ns /= 1.-self.xi + self.xi * (1.+np.dot(self.deltas,Sp))**.5
+        denom = 1. - np.dot(Ns,self.deltas)
+        self.deltas /= -denom
+        print('\tscale2=',denom)
+    def _transform_gradients_lin_dense(self,solve_full=None):
+        if RANK>0:
+            return 0. 
+        self.deltas = np.zeros(self.nparam)
+        solve_full = self.solve_full if solve_full is None else solve_full
+        
+        t0 = time.time()
+        if solve_full:
+            w,self.deltas,v0,inorm = \
+                _lin_block_solve(self.H,self.E,self.S,self.g,self.Hvmean,self.vmean,self.cond2) 
+        else:
+            w = np.zeros(self.nsite)
+            v0 = np.zeros(self.nsite)
+            inorm = np.zeros(self.nsite)
+            self.deltas = np.zeros_like(self.x)
+            for ix,(start,stop) in enumerate(self.block_dict):
+                w[ix],self.deltas[start:stop],v0[ix],inorm[ix] = \
+                    _lin_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],
+                                     self.Hvmean[start:stop],self.vmean[start:stop],self.cond2) 
+            inorm = inorm.sum()
+            w = w.sum()
+        print(f'\tLIN solver time={time.time()-t0},inorm={inorm},eigenvalue={w},scale1={v0}')
+        self._scale_eigenvector()
+        if self.save_grad_hess:
+            Hi0 = self.g
+            H0j = self.Hvmean - self.E * self.vmean
+            if self.solve_full:
+                H = self.H
+                S = self.S
+            else:
+                H = np.zeros((self.nparam,self.nparam))
+                S = np.zeros((self.nparam,self.nparam))
+                for ix,(start,stop) in enumerate(self.block_dict):
+                    H[start:stop,start:stop] = self.H[ix] 
+                    S[start:stop,start:stop] = self.S[ix]
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('H',data=H) 
+            f.create_dataset('S',data=S) 
+            f.create_dataset('Hi0',data=Hi0) 
+            f.create_dataset('H0j',data=H0j) 
+            f.create_dataset('E',data=np.array([self.E])) 
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return w-self.E 
+    def _transform_gradients_lin_iterative(self,cond):
+        Hi0 = self.g
+        H0j = self.Hvmean - self.E * self.vmean
+        def A(x):
+            x0,x1 = x[0],x[1:]
+            y = np.zeros_like(x)
+            y[0] = self.E * x0 + np.dot(H0j,x1)
+            y[1:] = Hi0 * x0 + self.H(x1) 
+            return y
+        def B(x):
+            x0,x1 = x[0],x[1:]
+            y = np.zeros_like(x)
+            y[0] = x0
+            y[1:] = self.S(x1) + cond * x1
+            return y
+        x0 = np.zeros(1+self.nparam)
+        x0[0] = 1.
+        if self.solver == 'davidson':
+            w,v = self.davidson(A,B,x0,self.E)
+            self.deltas = v[1:]/v[0]
+            print('\teigenvalue =',w)
+            print('\tscale1=',v[0])
+        else:
+            A = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=A,dtype=self.x.dtype)
+            B = spla.LinearOperator((self.nparam+1,self.nparam+1),matvec=B,dtype=self.x.dtype)
+            w,v = spla.eigs(A,k=1,M=B,sigma=self.E,v0=x0,tol=CG_TOL)
+            w,self.deltas = w[0].real,v[1:,0].real/v[0,0].real
+            print('\timaginary norm=',np.linalg.norm(v[:,0].imag))
+            print('\teigenvalue =',w)
+            print('\tscale1=',v[0,0].real)
+        if self.tmpdir is not None:
+            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f.create_dataset('g',data=self.g) 
+            f.create_dataset('deltas',data=self.deltas) 
+            f.close()
+        return w - self.E
 ##############################################################################################
 # sampler
 #############################################################################################

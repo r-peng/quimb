@@ -376,9 +376,11 @@ class AmplitudeFactory2D(AmplitudeFactory):
             if cols is not None:
                 plq = self.update_plq_from_3row(plq,cols,i,x_bsz,y_bsz,psi=psi,direction=direction_)
         return plq
-    def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True): 
+    def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True,imax=None,imin=None): 
+        imax = self.rix1 if imax is None else imax
+        imin = self.rix2 if imin is None else imin
         # always contract rows into the middle
-        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=self.rix1,imin=self.rix2)
+        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=imax,imin=imin)
 
         if env_bot is None and env_top is None:
             return None
