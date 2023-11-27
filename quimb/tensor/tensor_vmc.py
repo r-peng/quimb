@@ -1529,8 +1529,7 @@ class DenseSampler:
 
         plocal = [] 
         for config in configs:
-            config = self.af.parse_config(config)
-            p = self.af.log_prob(config)
+            p = self.af.log_prob(self.af.parse_config(config))
             p = 0 if p is None else np.exp(p) 
             plocal.append(p)
         plocal = np.array(plocal)
@@ -1582,7 +1581,7 @@ class ExchangeSampler:
     def _burn_in(self,config=None,burn_in=None):
         if config is not None:
             self.config = config 
-        self.px = self.af.log_prob(self.af.parse_config(self.config))
+        self.px = self.af.log_prob(self.config)
 
         if RANK==0:
             print('\tlog prob=',self.px)
@@ -1826,6 +1825,8 @@ class AmplitudeFactory:
         g = tn.contract(output_inds=ket.inds,tags=all)
         return g.data 
     def replace_sites(self,tn,sites,cis):
+        if cis is None:
+            return tn
         for site,ci in zip(sites,cis): 
             bra = tn[self.site_tag(site),'BRA']
             bra_target = self.get_bra_tsr(ci,site)
@@ -1880,12 +1881,17 @@ class AmplitudeFactory:
         if cx is None:
             return None
         return np.log(cx ** 2)
-    def _new_log_prob_from_plq(self,plq,sites,cis):
-        plq_new = self.replace_sites(plq.copy(),sites,cis) 
+    def _new_amp_from_plq(self,plq,sites,config_sites):
+        if plq is None:
+            return None,0
+        plq_new = self.replace_sites(plq.copy(),sites,config_sites) 
         cy = safe_contract(plq_new)
         if cy is None:
             return plq_new,None
-        return plq_new,2*np.log(np.fabs(tensor2backend(cy,'numpy')))
+        return plq_new,tensor2backend(cy,'numpy')
+    def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
+        plq_new,cx = self._new_amp_from_plq(plq,sites,config_sites,config_new)
+        return plq_new,np.log(cx**2)
     def extract_grad(self):
         vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
         return self.dict2vec(vx)
@@ -1909,16 +1915,22 @@ class AmplitudeFactory:
             cx *= sign
         self.wfn2backend()
         return cx,vx
-    def get_grad_from_plq(self,plq):
+    def get_grad_from_plq(self,plq,ratio=True):
         if plq is None:
             return 
         for plq_key,tn in plq.items():
-            cij = self.cx[plq_key]
+            if ratio:
+                cij = tensor2backend(self.cx[plq_key],'numpy')
             sites = self.plq_sites(plq_key)
             for site in sites:
                 if site in self.vx:
                     continue
-                self.vx[site] = self.tensor2backend(self.site_grad(tn.copy(),site)/cij,'numpy')
+                try:
+                    self.vx[site] = self.tensor2backend(self.site_grad(tn.copy(),site),'numpy')
+                except (ValueError,IndexError):
+                    continue 
+                if ratio:
+                    self.vx[site] /= cij
         return self.vx
 ##### ham methods #####
     def _add_gate(self,tn,gate,order,where):
@@ -1933,7 +1945,9 @@ class AmplitudeFactory:
         for tag,(gate,order) in self.model.gate.items():
             ex_ij = self._add_gate(tn.copy(),gate,order,where) 
             if ex_ij is None:
-                ex_ij = 0
+                continue
+            if RANK==18:
+                print(where,tag,ex_ij*coeff)
             ex[tag] = ex_ij * coeff 
         return ex 
     def pair_energies_from_plq(self,plq,pairs):
@@ -1957,6 +1971,7 @@ class AmplitudeFactory:
             self.wfn2backend(backend='torch',requires_grad=True)
             self.model.gate2backend('torch')
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
+        exit()
 
         if compute_Hv:
             ex_num = sum([eij for eij,_ in ex.values()])

@@ -12,22 +12,8 @@ from .product_vmc import (
 )
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
     def __init__(self,af,fermion=False):
-        self.af = af 
-        self.get_sections()
-
-        self.Lx,self.Ly = self.af[0].Lx,self.af[0].Ly
-        self.sites = self.af[0].sites
-        self.model = self.af[0].model
-        self.nsite = self.af[0].nsite
-        self.backend = self.af[0].backend
-
-        self.pbc = self.af[0].pbc 
-        self.deterministic = self.af[0].deterministic 
-        #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
-
-        self.fermion = fermion 
-        if self.fermion:
-            self.spinless = self.af[0].spinless
+        self.Lx,self.Ly = af[0].Lx,af[0].Ly
+        super().__init__(af,fermion=fermion)
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):

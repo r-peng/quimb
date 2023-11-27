@@ -19,7 +19,28 @@ def config_to_ab(config):
     return tuple(config % 2), tuple(config // 2)
 def config_from_ab(config_a,config_b):
     return tuple(np.array(config_a) + np.array(config_b) * 2)
-class ProductAmplitudeFactory:
+class CompoundAmplitudeFactory(AmplitudeFactory):
+    def __init__(self,af,fermion=False):
+        self.af = af 
+        self.get_sections()
+
+        self.Lx,self.Ly = self.af[0].Lx,self.af[0].Ly
+        self.sites = self.af[0].sites
+        self.model = self.af[0].model
+        self.nsite = self.af[0].nsite
+        self.backend = self.af[0].backend
+
+        self.pbc = self.af[0].pbc 
+        self.deterministic = self.af[0].deterministic 
+        #self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
+
+        self.fermion = fermion 
+        if self.fermion:
+            self.spinless = self.af[0].spinless
+
+        self.flatten = self.af[0].flatten
+        self.flat2site = self.af[0].flat2site
+        self.intermediate_sign = self.af[0].intermediate_sign
     def parse_config(self,config):
         if self.fermion:
             ca,cb = config_to_ab(config)
@@ -45,19 +66,29 @@ class ProductAmplitudeFactory:
         for ix,af in enumerate(self.af):
             fname_ = None if fname is None else fname+f'_{ix}' 
             af.update(x[ix],fname=fname_,root=root)
+    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
+        config = (2, 2, 3, 1, 1, 0, 0, 0, 0)
+        self.config = config 
+        
+        for af,config_ in zip(self.af,self.parse_config(config)):
+            af.config = config_ 
+        if self.deterministic:
+            return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
+        else:
+            return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
+class ProductAmplitudeFactory(CompoundAmplitudeFactory):
     def get_grad_deterministic(self,config,unsigned=False):
         cx = [None] * self.naf
         vx = [None] * self.naf 
         for ix,af in enumerate(self.af):
             cx[ix],vx[ix] = af.get_grad_deterministic(config[ix],unsigned=unsigned)
         return np.array(cx),np.concatenate(vx)
-    def _new_log_prob_from_plq(self,plq,sites,cis):
+    def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
         py = [None] * self.naf 
         plq_new = [None] * self.naf
-        config_new = self.parse_config(self.config_new)
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,cis[ix])
+                plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,config_new[ix],None)
             else:
                 py[ix] = af.log_prob(config_new[ix])
             if py[ix] is None:
@@ -122,7 +153,7 @@ class ProductAmplitudeFactory:
         if p==1:
             e = tensor2backend(e,'numpy')
         return e
-    def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): # only used for Hessian
+    def batch_quantities_from_plq(self,batch_key,compute_v,compute_Hv): 
         ex = [None] * self.naf
         cx = [None] * self.naf
         plq = [None] * self.naf
@@ -248,14 +279,6 @@ class ProductAmplitudeFactory:
         else:
             Hvx = None 
         return cx,ex,vx,Hvx,0. 
-    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
-        self.config = config 
-        for af,config_ in zip(self.af,self.parse_config(config)):
-            af.config = config_ 
-        if self.deterministic:
-            return self.compute_local_quantities_deterministic(compute_v,compute_Hv)
-        else:
-            return self.compute_local_quantities_from_plq(compute_v,compute_Hv)
 import autoray as ar
 import torch
 import h5py
@@ -329,6 +352,14 @@ class NN(AmplitudeFactory):
             return 2 * c 
         else:
             return np.log(c**2) 
+    def amp(self,config,to_numpy=True):
+        if self.log:
+            raise ValueError('NN should output amplitude.')
+        c = self._input(config)
+        c = self.forward(c)
+        if to_numpy:
+            c = tensor2backend(c,'numpy')
+        return c 
     def batch_pair_energies(self,pairs,cx=None):
         spins = ('a','b') if self.fermion else (None,)
         logcx = None

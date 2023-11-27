@@ -402,7 +402,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         fxn = self.batch_pair_energies_from_plq_pbc if self.pbc else \
               self.batch_pair_energies_from_plq_obc
         return fxn(batch_key,new_cache=new_cache) 
-    def batch_pair_energies_from_plq_obc(self,batch_key,new_cache=False):
+    def batch_plq_obc(self,batch_key,new_cache):
         pairs,plq_types,bix,tix,direction = self.model.batched_pairs[batch_key]
         assert direction=='row'
         cache_bot = dict() if new_cache else None
@@ -414,8 +414,9 @@ class AmplitudeFactory2D(AmplitudeFactory):
         plq = dict()
         for imin,imax,x_bsz,y_bsz in plq_types:
             plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
-
-        # compute energy numerator 
+        return plq,pairs
+    def batch_pair_energies_from_plq_obc(self,batch_key,new_cache=False):
+        plq,pairs = self.batch_plq_obc(batch_key,new_cache) 
         ex,cx = self.pair_energies_from_plq(plq,pairs)
         return ex,cx,plq
     def batch_pair_energies_from_plq_pbc(self,batch_key,new_cache=False):
@@ -901,8 +902,8 @@ class ExchangeSampler2D(ExchangeSampler):
         if config_sites is None:
             return plq,cols
         config_sites = self.af.parse_config(config_sites)
-        self.af.config_new = config_new
-        plq_new,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites)
+        config_new_ = self.af.parse_config(config_new)
+        plq_new,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,config_new_)
         if py is None:
             return plq,cols
         acceptance = np.exp(py - self.px)
