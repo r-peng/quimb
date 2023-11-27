@@ -1581,7 +1581,7 @@ class ExchangeSampler:
     def _burn_in(self,config=None,burn_in=None):
         if config is not None:
             self.config = config 
-        self.px = self.af.log_prob(self.config)
+        self.px = self.af.log_prob(self.af.parse_config(self.config))
 
         if RANK==0:
             print('\tlog prob=',self.px)
@@ -1881,7 +1881,7 @@ class AmplitudeFactory:
         if cx is None:
             return None
         return np.log(cx ** 2)
-    def _new_amp_from_plq(self,plq,sites,config_sites):
+    def _new_amp_from_plq(self,plq,sites,config_sites,config_new):
         if plq is None:
             return None,0
         plq_new = self.replace_sites(plq.copy(),sites,config_sites) 
@@ -1891,6 +1891,8 @@ class AmplitudeFactory:
         return plq_new,tensor2backend(cy,'numpy')
     def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
         plq_new,cx = self._new_amp_from_plq(plq,sites,config_sites,config_new)
+        if cx is None:
+            return plq_new,None
         return plq_new,np.log(cx**2)
     def extract_grad(self):
         vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
@@ -1945,9 +1947,9 @@ class AmplitudeFactory:
         for tag,(gate,order) in self.model.gate.items():
             ex_ij = self._add_gate(tn.copy(),gate,order,where) 
             if ex_ij is None:
-                continue
-            if RANK==18:
-                print(where,tag,ex_ij*coeff)
+                ex_ij = 0
+            #if RANK==18:
+            #    print(where,tag,ex_ij*coeff)
             ex[tag] = ex_ij * coeff 
         return ex 
     def pair_energies_from_plq(self,plq,pairs):
@@ -1971,7 +1973,7 @@ class AmplitudeFactory:
             self.wfn2backend(backend='torch',requires_grad=True)
             self.model.gate2backend('torch')
         ex,cx,plq = self.batch_pair_energies_from_plq(batch_key,new_cache=compute_Hv)
-        exit()
+        #exit()
 
         if compute_Hv:
             ex_num = sum([eij for eij,_ in ex.values()])

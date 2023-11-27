@@ -67,7 +67,7 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
             fname_ = None if fname is None else fname+f'_{ix}' 
             af.update(x[ix],fname=fname_,root=root)
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
-        config = (2, 2, 3, 1, 1, 0, 0, 0, 0)
+        #config = (2, 2, 3, 1, 1, 0, 0, 0, 0)
         self.config = config 
         
         for af,config_ in zip(self.af,self.parse_config(config)):
@@ -88,7 +88,7 @@ class ProductAmplitudeFactory(CompoundAmplitudeFactory):
         plq_new = [None] * self.naf
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,config_new[ix],None)
+                plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,config_sites[ix],None)
             else:
                 py[ix] = af.log_prob(config_new[ix])
             if py[ix] is None:
