@@ -9,11 +9,9 @@ import numpy as np
 from .product_vmc import (
     NN,RBM,FNN,SIGN,
     ProductAmplitudeFactory,
+    SumAmplitudeFactory,
 )
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
-    def __init__(self,af,fermion=False):
-        self.Lx,self.Ly = af[0].Lx,af[0].Ly
-        super().__init__(af,fermion=fermion)
 ##### wfn methods #####
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):
@@ -77,20 +75,8 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
             tn[ix] = af.build_3row_tn(config[ix],i,x_bsz,psi=psi_,
                          cache_bot=cache_bot_,cache_top=cache_top_,direction=direction) 
         return tn
-    def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True):
-        cx = np.zeros(self.naf) 
-        for ix,af in enumerate(self.af):
-            if af.is_tn:
-                cache_top_ = af.cache_top if cache_top is None else cache_top[ix]
-                cache_bot_ = af.cache_bot if cache_bot is None else cache_bot[ix]
-                cx[ix] = af.unsigned_amplitude(config[ix],
-                             cache_bot=cache_bot_,cache_top=cache_top_,to_numpy=to_numpy)
-            else:
-                cx[ix] = af.unsigned_amplitude(config[ix],to_numpy=to_numpy)
-        #print(cx)
-        #print(self.config_sign(config))
-        #exit()
-        return np.prod(cx)
+#class SumAmplitudeFactory2D(SumAmplitudeFactory):
+
 from .tensor_2d_vmc import AmplitudeFactory2D 
 from .tensor_1d_vmc import AmplitudeFactory1D 
 class RBM2D(RBM,AmplitudeFactory2D):
