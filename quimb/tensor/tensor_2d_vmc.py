@@ -432,7 +432,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         cache_bot,cache_top = self.batch_benvs(batch_key,new_cache) 
         if not self.from_plq:
             for where in b.pairs:
-                i = min([i for i_,in where])
+                i = min([i for i,_ in where])
                 if i not in self.cx:
                     self.cx[i] = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,i=i,to_numpy=False)
                 cij = self.cx[i]
@@ -460,26 +460,6 @@ class AmplitudeFactory2D(AmplitudeFactory):
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cij,eij/cij
         return ex,plq
-    def update_pair_energy_from_benvs(self,where,cache_bot,cache_top,direction='row',i=None):
-        ix1,ix2 = [self.flatten(site) for site in where]
-        assert ix1<ix2
-        i1,i2 = self.config[ix1],self.config[ix2]
-        if not self.model.pair_valid(i1,i2): # term vanishes 
-            return {tag:0 for tag in self.model.gate}
-        coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(*where)
-        ex = dict()
-        for i1_new,i2_new,coeff,tag in self.model.pair_terms(i1,i2):
-            config_new = list(self.config)
-            config_new[ix1] = i1_new
-            config_new[ix2] = i2_new 
-            config_new = self.parse_config(tuple(config_new)) 
-            ex[tag] = self.amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,direction=direction,i=i,to_numpy=False) 
-            if ex[tag] is None:
-                ex[tag] = 0
-            ex[tag] *= coeff_comm * coeff 
-            if RANK==18:
-                print(where,tag,ex[tag])
-        return ex 
 ####################################################################
 # models
 ####################################################################

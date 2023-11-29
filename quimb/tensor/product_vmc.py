@@ -9,6 +9,7 @@ from .tensor_vmc import (
     safe_contract,
     contraction_error,
     AmplitudeFactory,
+    scale_wfn,
 )
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -75,6 +76,7 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         config = self.parse_config(self.config)
         for af,config_ in zip(self.af,config):
             af.set_config(config_,compute_v)
+        return config
     def amplitude2scalar(self):
         for af in self.af:
             af.amplitude2scalar()
@@ -84,15 +86,16 @@ class ProductAmplitudeFactory(CompoundAmplitudeFactory):
             cache_bot = (None,) * self.naf
         if cache_top is None:
             cache_top = (None,) * self.naf
-        cx = [None] * self.naf 
+        cx = 1 
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                cx[ix] = af.amplitude(config[ix],sign=sign,cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy)
-                if cx[ix] is None:
-                    cx[ix] = 0
+                cx_ix = af.amplitude(config[ix],sign=sign,cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy)
+                if cx_ix is None:
+                    return None 
             else:
-                cx[ix] = af.amplitude(config[ix],to_numpy=to_numpy)
-        return np.prod(np.array(cx))
+                cx_ix = af.amplitude(config[ix],to_numpy=to_numpy)
+            cx = cx * cx_ix
+        return cx 
     def get_grad_deterministic(self,config):
         cx = [None] * self.naf
         vx = [None] * self.naf 
@@ -171,7 +174,18 @@ class ProductAmplitudeFactory(CompoundAmplitudeFactory):
             sign.append(af.config_sign(config_))
         return np.array(sign) 
 class SumAmplitudeFactory(CompoundAmplitudeFactory):
-    def amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True,i=None,direction='row'):
+    def check(self,configs,n=10):
+        if RANK>0:
+            return
+        if configs.shape[0] == 1:
+            rng = np.random.default_rng()
+            config = configs[0,:]
+            configs = np.array([config] + [rng.permuted(config) for _ in range(n)])
+        for i in range(configs.shape[0]):
+            config_i = tuple(configs[i,:])
+            cx = self.amplitude(self.parse_config(config_i),_sum=False)
+            print(config_i,cx)
+    def amplitude(self,config,_sum=True,cache_bot=None,cache_top=None,to_numpy=True,**kwargs):
         if cache_bot is None:
             cache_bot = (None,) * self.naf
         if cache_top is None:
@@ -180,22 +194,27 @@ class SumAmplitudeFactory(CompoundAmplitudeFactory):
         cx = [0] * self.naf 
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                cx[ix] = af.amplitude(config[ix],cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy,i=i,direction=direction)
+                cx[ix] = af.amplitude(config[ix],cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy,**kwargs)
                 if cx[ix] is None:
                     cx[ix] = 0
             else:
-                cy[ix] = af.amplitude(config[ix],to_numpy=to_numpy)
-        return sum(cy)
+                cx[ix] = af.amplitude(config[ix],to_numpy=to_numpy)
+        if _sum:
+            cx = sum(cx)
+        return cx 
+    def unsigned_amplitude(self,config,**kwargs):
+        return self.amplitude(config,**kwargs)
     def get_grad_deterministic(self,config):
+        self.wfn2backend(backend='torch',requires_grad=True)
         cache_bot = [None] * self.naf 
         cache_top = [None] * self.naf 
         for ix,af in enumerate(self.af):
-            af.wfn2backend(backend='torch',requires_grad=True)
             if af.is_tn:
                 cache_bot[ix] = dict() 
                 cache_top[ix] = dict() 
         cx = self.amplitude(config,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
         cx,vx = self.propagate(cx)
+        self.wfn2backend()
         return cx,vx/cx 
     def get_grad_from_plq(self,plq):
         pass
@@ -203,16 +222,20 @@ class SumAmplitudeFactory(CompoundAmplitudeFactory):
         for ix,af in enumerate(self.af):
             af.cx = None
             af.vx = None
-    def batch_pair_energies(batch_key,compute_Hv):
+    def batch_pair_energies(self,batch_key,compute_Hv):
         cache_bot = [None] * self.naf
         cache_top = [None] * self.naf
-        cache_bot[ix],cache_top[ix] = af.batch_benvs(batch_key,compute_Hv)
+        for ix,af in enumerate(self.af):
+            if not af.is_tn:
+                continue
+            cache_bot[ix],cache_top[ix] = af.batch_benvs(batch_key,compute_Hv)
         ex = dict() 
         b = self.model.batched_pairs[batch_key]
-        cx = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,to_numpy=False)
+        config = [af.config for af in self.af]
+        cx = self.amplitude(config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,to_numpy=False)
         self.cx['deterministic'] = cx
         for where in b.pairs:
-            i = min([i for i_,in where])
+            i = min([i for i,_ in where])
             ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cx,eij/cx
@@ -453,7 +476,7 @@ class FNN(NN):
         config = [tuple(np.where(np.array(c))[0]) for c in config_to_ab(config)]
         config = np.array([[self.flat2site(ix) for ix in c] for c in config],dtype=float)
         return config.flatten()
-    def init(self,nn,eps,a=-1,b=1,fname=None): # nn is number of nodes in each hidden layer
+    def init(self,nn,eps,a=-1,b=1,fname=None,iprint=0): # nn is number of nodes in each hidden layer
         self.w = []
         self.b = [] 
         c = b-a
@@ -466,6 +489,10 @@ class FNN(NN):
             bi = (np.random.rand(nn[i]) * c + a) * eps 
             COMM.Bcast(bi,root=0)
             self.b.append(bi)
+            if iprint>0 and RANK==0:
+                print(i)
+                print(wi)
+                print(bi)
         self.w.append(np.ones((nn[-1],self.nf)))
         if fname is not None: 
             self.save_to_disc(self.w,self.b,fname)

@@ -1949,6 +1949,24 @@ class AmplitudeFactory:
                 ex[tag] = 0
             ex[tag] *= coeff 
         return ex 
+    def update_pair_energy_from_benvs(self,where,cache_bot,cache_top,**kwargs):
+        ix1,ix2 = [self.flatten(site) for site in where]
+        assert ix1<ix2
+        i1,i2 = self.config[ix1],self.config[ix2]
+        if not self.model.pair_valid(i1,i2): # term vanishes 
+            return {tag:0 for tag in self.model.gate}
+        coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(*where)
+        ex = dict()
+        for i1_new,i2_new,coeff,tag in self.model.pair_terms(i1,i2):
+            config_new = list(self.config)
+            config_new[ix1] = i1_new
+            config_new[ix2] = i2_new 
+            config_new = self.parse_config(tuple(config_new)) 
+            ex[tag] = self.amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False,**kwargs) 
+            if ex[tag] is None:
+                ex[tag] = 0
+            ex[tag] *= coeff_comm * coeff 
+        return ex 
     def amplitude2scalar(self):
         self.cx = {key:tensor2backend(cij,'numpy') for key,cij in self.cx.items()}
     def parse_energy(self,ex,batch_key,ratio):
@@ -1960,8 +1978,6 @@ class AmplitudeFactory:
         if compute_Hv:
             self.wfn2backend(backend='torch',requires_grad=True)
         ex,plq = self.batch_pair_energies(batch_key,compute_Hv)
-        #print(f'{RANK},{self.config},{ex}')
-        #exit()
 
         Hvx = 0
         if compute_Hv:
@@ -1980,17 +1996,18 @@ class AmplitudeFactory:
         self.cx = dict()
         if self.from_plq and compute_v:
             self.vx = dict()
+        return config
     def parse_gradient(self):
         vx = self.dict2vec(self.vx) 
         return vx
     def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
-        self.set_config(config,compute_v)
+        config = self.set_config(config,compute_v)
         vx = None
         if not self.from_plq:
             if compute_v:
-                cx,vx = self.get_grad_deterministic(self.config,save=True)
+                cx,vx = self.get_grad_deterministic(config)
             else:
-                cx,vx = self.amplitude(self.config,save=True),None
+                cx,vx = self.amplitude(config),None
 
         ex,Hvx = 0.,0.
         for batch_key in self.model.batched_pairs:
