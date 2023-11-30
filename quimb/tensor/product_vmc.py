@@ -537,7 +537,7 @@ class ProductFNN(FNN):
         self.combine_exp = combine_exp
         if combine_exp:
             assert (not self.log)
-            assert len(nh)==len(naf)
+            assert len(nh)==len(afn)
     def forward(self,c):
         for i in range(len(self.nh)):
             c = self.jnp.matmul(c,self.params[i,'w'])    
