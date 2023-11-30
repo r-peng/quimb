@@ -8,16 +8,15 @@ import numpy as np
 
 from .product_vmc import (
     RBM,SumFNN,
+    CompoundAmplitudeFactory,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
 )
-class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
-##### wfn methods #####
+class CompoundAmplitudeFactory2D(CompoundAmplitudeFactory):
     def update_cache(self,config):
         for af,config_ in zip(self.af,config):
             if af.is_tn:
                 af.update_cache(config_)
-##### compress row methods  #####
     def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
         env_prev = [None] * self.naf 
         for ix,af in enumerate(self.af):
@@ -28,6 +27,8 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
             env_prev[ix] = af._get_all_benvs(config[ix],step,psi=psi_,cache=cache_,
                                start=start,stop=stop,append=append,direction=direction)
         return env_prev
+class ProductAmplitudeFactory2D(ProductAmplitudeFactory,
+                                CompoundAmplitudeFactory2D):
     def get_mid_env(self,config,append='',psi=None):
         envs = [None] * self.naf 
         for ix,af in enumerate(self.af):
@@ -75,7 +76,18 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory):
             tn[ix] = af.build_3row_tn(config[ix],i,x_bsz,psi=psi_,
                          cache_bot=cache_bot_,cache_top=cache_top_,direction=direction) 
         return tn
-#class SumAmplitudeFactory2D(SumAmplitudeFactory):
+class SumAmplitudeFactory2D(SumAmplitudeFactory,
+                            CompoundAmplitudeFactory2D):
+    def build_3row_tn(self,*args):
+        pass
+    def get_all_envs(self,*args,**kwargs):
+        return None,None 
+    def _get_plq_forward(self,*args):
+        pass 
+    def _get_plq_backward(self,*args):
+        pass 
+    def _contract_cols(self,*args):
+        pass
 
 from .tensor_2d_vmc import AmplitudeFactory2D 
 from .tensor_1d_vmc import AmplitudeFactory1D 
@@ -85,10 +97,10 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
 class SumFNN2D(SumFNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nh,**kwargs):
+    def __init__(self,Lx,Ly,nv,nh,afn,scale,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,nh,**kwargs)
+        super().__init__(nv,nh,afn,scale,**kwargs)
 #class SIGN2D(SIGN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,nl,**kwargs):
 #        self.Lx = Lx

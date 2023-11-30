@@ -80,7 +80,7 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
     def amplitude2scalar(self):
         for af in self.af:
             af.amplitude2scalar()
-class ProductAmplitudeFactory(CompoundAmplitudeFactory):
+class ProductAmplitudeFactory:
     def amplitude(self,config,sign=True,cache_bot=None,cache_top=None,to_numpy=True):
         if cache_bot is None:
             cache_bot = (None,) * self.naf
@@ -173,7 +173,7 @@ class ProductAmplitudeFactory(CompoundAmplitudeFactory):
         for af,config_ in zip(self.af,config):
             sign.append(af.config_sign(config_))
         return np.array(sign) 
-class SumAmplitudeFactory(CompoundAmplitudeFactory):
+class SumAmplitudeFactory:
     def check(self,configs,n=10):
         if RANK>0:
             return
@@ -216,7 +216,7 @@ class SumAmplitudeFactory(CompoundAmplitudeFactory):
         cx,vx = self.propagate(cx)
         self.wfn2backend()
         return cx,vx/cx 
-    def get_grad_from_plq(self,plq):
+    def get_grad_from_plq(self,*args):
         pass
     def parse_gradient(self):
         for ix,af in enumerate(self.af):
@@ -240,6 +240,11 @@ class SumAmplitudeFactory(CompoundAmplitudeFactory):
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cx,eij/cx
         return ex,None
+    def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
+        cx = self.amplitude(config_new)
+        return None,np.log(cx**2)
+    def replace_sites(self,*args):
+        pass
 import autoray as ar
 import torch
 import h5py
@@ -458,7 +463,7 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,nf=1,bias=False,change_basis=False,**kwargs):
+    def __init__(self,nv,nh,afn,scale,nf=1,bias=False,change_basis=False,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.change_basis = change_basis
 
@@ -477,10 +482,8 @@ class FNN(NN):
         self.param_keys.append(key)
         self.sh[key] = nh[-1],nf
 
-        # set before run
-        self.afn = ['tanh'] * len(nh) 
-        self.scale = [1] * len(nh) 
-
+        self.afn = afn 
+        self.scale = scale
         super().__init__(**kwargs)
     def input(self,config):
         if not self.change_basis: 
@@ -509,7 +512,10 @@ class FNN(NN):
                 return x/(1.+self.jnp.exp(-x))
         elif afn=='cos':
             def _afn(x):
-                return self.jnp.cos(self.coeff * x)
+                return self.scale[i] * self.jnp.cos(x)
+        elif afn=='sin':
+            def _afn(x):
+                return self.scale[i] * self.jnp.sin(x)
         else:
             raise NotImplementedError
         return _afn

@@ -791,26 +791,26 @@ class ExchangeSampler2D(ExchangeSampler):
             plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
             cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
             cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
-    def sweep_col_pbc(self,i,cols,x_bsz,y_bsz,step):
-        sweep = range(self.Ly-y_bsz+1) if step==1 else range(self.Ly-y_bsz,-1,-1)
-        for j in sweep:
-            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
-            for site1,site2 in pairs:
-                config_sites,config_new = self._new_pair(site1,site2)
-                if config_sites is None:
-                    continue
-                config_sites = self.af.parse_config(config_sites)
-                self.af.config_new = config_new
-                cols_new,py = af._new_log_prob_pbc(cols,(site1,site2),config_sites,i,x_bsz) 
-                if py is None:
-                    continue
-                acceptance = np.exp(py - self.px)
-                if acceptance < self.rng.uniform(): # reject
-                    continue
-                # accept, update px & config & env_m
-                self.px = py
-                self.config = config_new
-                cols = cols_new
+#    def sweep_col_pbc(self,i,cols,x_bsz,y_bsz,step):
+#        sweep = range(self.Ly-y_bsz+1) if step==1 else range(self.Ly-y_bsz,-1,-1)
+#        for j in sweep:
+#            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
+#            for site1,site2 in pairs:
+#                config_sites,config_new = self._new_pair(site1,site2)
+#                if config_sites is None:
+#                    continue
+#                config_sites = self.af.parse_config(config_sites)
+#                self.af.config_new = config_new
+#                cols_new,py = af._new_log_prob_pbc(cols,(site1,site2),config_sites,i,x_bsz) 
+#                if py is None:
+#                    continue
+#                acceptance = np.exp(py - self.px)
+#                if acceptance < self.rng.uniform(): # reject
+#                    continue
+#                # accept, update px & config & env_m
+#                self.px = py
+#                self.config = config_new
+#                cols = cols_new
     def sweep_row_forward(self,x_bsz,y_bsz):
         self.af.cache_bot = dict()
         self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=x_bsz-1)
