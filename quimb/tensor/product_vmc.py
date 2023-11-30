@@ -478,7 +478,7 @@ class FNN(NN):
                 key = i,'b'
                 self.param_keys.append(key)
                 self.sh[key] = nh[i],
-        key = len(nh),'w'
+        key = 'wf'
         self.param_keys.append(key)
         self.sh[key] = nh[-1],nf
 
@@ -530,4 +530,24 @@ class SumFNN(FNN):
                 c = c + self.params[i,'b']
             c = self._afn[i](c)
         c = self.jnp.sinh(c)
-        return self.jnp.matmul(c,self.params[len(self.nh),'w'])
+        return self.jnp.matmul(c,self.params['wf'])
+class ProductFNN(FNN):
+    def __init__(self,nv,nh,afn,scale,combine_exp=False,**kwargs):
+        super().__init__(nv,nh,afn,scale,**kwargs) 
+        self.combine_exp = combine_exp
+        if combine_exp:
+            assert (not self.log)
+            assert len(nh)==len(naf)
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            c = self._afn[i](c)
+        if self.combine_exp: 
+            c = self.jnp.exp(c)
+        c = self.jnp.matmul(c,self.params['wf'])
+        if len(self.afn)>len(self.nh):
+            c = self._afn[-1](c) 
+        return c
+
