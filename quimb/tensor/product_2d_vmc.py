@@ -7,7 +7,7 @@ import numpy as np
 #RANK = COMM.Get_rank()
 
 from .product_vmc import (
-    NN,RBM,FNN,SIGN,
+    RBM,SumFNN,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
 )
@@ -84,28 +84,28 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
-class FNN2D(FNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,**kwargs):
+class SumFNN2D(SumFNN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,**kwargs)
-class SIGN2D(SIGN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nl,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(nv,nl,**kwargs)
-class RBM1D(RBM,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,nh,**kwargs):
-        self.nsite = nsite 
         super().__init__(nv,nh,**kwargs)
-class FNN1D(FNN,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,**kwargs):
-        self.nsite = nsite 
-        super().__init__(nv,**kwargs)
-class SIGN1D(SIGN,AmplitudeFactory1D):
-    def __init__(self,nsite,nv,nl,**kwargs):
-        self.nsite = nsite 
-        super().__init__(nv,nl,**kwargs)
+#class SIGN2D(SIGN,AmplitudeFactory2D):
+#    def __init__(self,Lx,Ly,nv,nl,**kwargs):
+#        self.Lx = Lx
+#        self.Ly = Ly 
+#        super().__init__(nv,nl,**kwargs)
+#class RBM1D(RBM,AmplitudeFactory1D):
+#    def __init__(self,nsite,nv,nh,**kwargs):
+#        self.nsite = nsite 
+#        super().__init__(nv,nh,**kwargs)
+#class FNN1D(FNN,AmplitudeFactory1D):
+#    def __init__(self,nsite,nv,**kwargs):
+#        self.nsite = nsite 
+#        super().__init__(nv,**kwargs)
+#class SIGN1D(SIGN,AmplitudeFactory1D):
+#    def __init__(self,nsite,nv,nl,**kwargs):
+#        self.nsite = nsite 
+#        super().__init__(nv,nl,**kwargs)
 #class CNN2D(FNN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,kx=2,ky=2,**kwargs):
 #        super().__init__(nv,None,**kwargs)

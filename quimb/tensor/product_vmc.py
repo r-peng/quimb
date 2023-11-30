@@ -277,6 +277,74 @@ class NN(AmplitudeFactory):
             self.order = order
         else:
             self.to_spin = False
+        self.params = dict()
+    def init(self,key,eps,a=-1,b=1,c=0,iprint=0):
+        tsr = (np.random.rand(*self.sh[key])*(b-a)+a) * eps + c
+        COMM.Bcast(tsr,root=0)
+        self.params[key] = tsr
+        if RANK==0 and iprint>0:
+            print(key)
+            print(tsr)
+    def get_block_dict(self):
+        self.block_dict = []
+        start = 0
+        for key in self.param_keys:
+            stop = start + self.params[key].size
+            self.block_dict.append((start,stop))
+            start = stop
+        self.nparam = stop
+    def set_backend(self,backend):
+        if backend=='numpy':
+            tsr = np.zeros(1)
+            self.jnp = np 
+            self._input = self.input
+        else:
+            tsr = torch.zeros(1)
+            self.jnp = torch
+            def _input(config):
+                return tensor2backend(self.input(config),backend) 
+            self._input = _input
+        ar.set_backend(tsr)
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        self.set_backend(backend)
+        for key in self.param_keys:
+            self.params[key] = tensor2backend(self.params[key],backend,requires_grad=requires_grad)
+    def get_x(self,grad=False):
+        ls = []
+        for key in self.param_keys:
+            tsr = self.params[key]
+            if grad:
+                tsr = self.tensor_grad(tsr)
+            ls.append(tensor2backend(tsr,'numpy').flatten())
+        return np.concatenate(ls)
+    def extract_grad(self):
+        return self.get_x(grad=True) 
+    def load_from_disc(self,fname):
+        self.sh = dict()
+        f = h5py.File(fname,'r')
+        for key in self.param_keys:
+            tsr = f[str(key)][:]
+            self.params[key] = tsr 
+            self.sh[key] = tsr.shape
+        f.close()
+        return self.params
+    def save_to_disc(self,fname,root=0):
+        if RANK!=root:
+            return
+        f = h5py.File(fname+'.hdf5','w')
+        for key in self.param_keys:
+            f.create_dataset(str(key),data=self.params[key]) 
+        f.close()
+    def update(self,x,fname=None,root=0):
+        for i,key in enumerate(self.param_keys):
+            start,stop = self.block_dict[i]
+            size = stop - start
+            xi,x = x[:size],x[size:]
+            self.params[key] = xi.reshape(self.sh[key])
+        if fname is not None:
+            self.save_to_disc(fname,root=root) 
+        self.wfn2backend()
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
             return pair_terms(i1,i2,spin) 
@@ -292,18 +360,6 @@ class NN(AmplitudeFactory):
         else:
             config = np.array(config,dtype=float)
         return config * 2 - 1
-    def set_backend(self,backend):
-        if backend=='numpy':
-            tsr = np.zeros(1)
-            self.jnp = np 
-            self._input = self.input
-        else:
-            tsr = torch.zeros(1)
-            self.jnp = torch
-            def _input(config):
-                return tensor2backend(self.input(config),backend) 
-            self._input = _input
-        ar.set_backend(tsr)
     def log_prob(self,config):
         if self.phase:
             return 1
@@ -390,83 +446,41 @@ class NN(AmplitudeFactory):
 class RBM(NN):
     def __init__(self,nv,nh,**kwargs):
         self.nv,self.nh = nv,nh
-        self.nparam = nv + nh + nv * nh 
-        self.block_dict = [(0,nv),(nv,nv+nh),(nv+nh,self.nparam)]
+        self.param_keys = ['a','b','w']
+        self.sh = {'a':(self.nv,),
+                   'b':(self.nh,),
+                   'w':(self.nv,self.nh)}
         super().__init__(**kwargs)
-    def init(self,eps,a=-1,b=1,fname=None,shift=[0,0,0]):
-        # va(config) = config
-        # vb(config) = tanh(w*config+b)
-        # vw(config) = tanh(w*config+b) * config
-
-        # rule of thumb
-        # small numbers initialized in range (a,b)
-        c = b-a
-        self.a = (np.random.rand(self.nv) * c + a) * eps + shift[0] 
-        self.b = (np.random.rand(self.nh) * c + a) * eps + shift[1]
-        self.w = (np.random.rand(self.nv,self.nh) * c + a) * eps + shift[2]
-        COMM.Bcast(self.a,root=0)
-        COMM.Bcast(self.b,root=0)
-        COMM.Bcast(self.w,root=0)
-        if fname is not None: 
-            self.save_to_disc(self.a,self.b,self.w,fname) 
-        return self.a,self.b,self.w
-    def init_from(self,a,b,w,eps,fname=None):
-        self.init(eps)
-        self.a[:len(a)] = a
-        self.b[:len(b)] = b 
-        sh1,sh2 = w.shape
-        self.w[:sh1,:sh2] = w
-        if fname is not None: 
-            self.save_to_disc(self.a,self.b,self.w,fname) 
-        return self.a,self.b,self.w
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        self.set_backend(backend)
-        self.a,self.b,self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) \
-                                for tsr in [self.a,self.b,self.w]]
-    def get_x(self):
-        ls = [tensor2backend(tsr,'numpy') for tsr in [self.a,self.b,self.w]]
-        ls[-1] = ls[-1].flatten()
-        return np.concatenate(ls)
-    def load_from_disc(self,fname):
-        f = h5py.File(fname,'r')
-        self.a = f['a'][:]
-        self.b = f['b'][:]
-        self.w = f['w'][:]
-        f.close()
-        return self.a,self.b,self.w
-    def save_to_disc(self,a,b,w,fname,root=0):
-        if RANK!=root:
-            return
-        f = h5py.File(fname+'.hdf5','w')
-        f.create_dataset('a',data=a) 
-        f.create_dataset('b',data=b) 
-        f.create_dataset('w',data=w) 
-        f.close()
-    def update(self,x,fname=None,root=0):
-        x = np.split(x,[self.nv,self.nv+self.nh])
-        self.a = x[0]
-        self.b = x[1]
-        self.w = x[2].reshape(self.nv,self.nh)
-        if fname is not None:
-            self.save_to_disc(self.a,self.b,self.w,fname,root=root)
-        self.wfn2backend()
-    def extract_grad(self):
-        ls = [tensor2backend(self.tensor_grad(tsr),'numpy') for tsr in [self.a,self.b,self.w]] 
-        ls[-1] = ls[-1].flatten()
-        return np.concatenate(ls)
     def forward(self,c): # NN output
-        c = self.jnp.dot(self.a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,self.w) + self.b)))
+        a = self.params['a']
+        b = self.params['b']
+        w = self.params['w']
+        c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nf=1,afn='logcosh',scale=1,coeff=1,change_basis=False,**kwargs):
-        self.nv = nv
-        self.nf = nf
-        assert afn in ('logcosh','logistic','tanh','softplus','silu','cos')
-        self.afn = afn 
-        self.coeff = coeff
-        self.scale = scale
+    def __init__(self,nv,nh,nf=1,bias=False,change_basis=False,**kwargs):
+        self.nv,self.nh,self.nf = nv,nh,nf
         self.change_basis = change_basis
+
+        self.param_keys = []
+        self.sh = dict()
+        for i in range(len(nh)):
+            key = i,'w'
+            self.param_keys.append(key)
+            sh1 = self.nv if i==0 else nh[i-1]
+            self.sh[key] = sh1,nh[i]
+            if bias:
+                key = i,'b'
+                self.param_keys.append(key)
+                self.sh[key] = nh[i],
+        key = len(nh),'w'
+        self.param_keys.append(key)
+        self.sh[key] = nh[-1],nf
+
+        # set before run
+        self.afn = ['tanh'] * len(nh) 
+        self.scale = [1] * len(nh) 
+
         super().__init__(**kwargs)
     def input(self,config):
         if not self.change_basis: 
@@ -476,139 +490,38 @@ class FNN(NN):
         config = [tuple(np.where(np.array(c))[0]) for c in config_to_ab(config)]
         config = np.array([[self.flat2site(ix) for ix in c] for c in config],dtype=float)
         return config.flatten()
-    def init(self,nn,eps,a=-1,b=1,fname=None,iprint=0): # nn is number of nodes in each hidden layer
-        self.w = []
-        self.b = [] 
-        c = b-a
-        for i,ni in enumerate(nn):
-            sh1 = self.nv if i==0 else nn[i-1]
-            wi = (np.random.rand(sh1,nn[i]) * c + a) * eps 
-            COMM.Bcast(wi,root=0)
-            self.w.append(wi)
-
-            bi = (np.random.rand(nn[i]) * c + a) * eps 
-            COMM.Bcast(bi,root=0)
-            self.b.append(bi)
-            if iprint>0 and RANK==0:
-                print(i)
-                print(wi)
-                print(bi)
-        self.w.append(np.ones((nn[-1],self.nf)))
-        if fname is not None: 
-            self.save_to_disc(self.w,self.b,fname)
-        return self.w,self.b
-    def init_from(self,nn,w,b,eps,fname=None):
-        self.init(nn,eps)
-        for i,wi in enumerate(w):
-            sh1,sh2 = wi.shape  
-            self.w[i][:sh1,:sh2] = wi
-        for i,bi in enumerate(b):
-            self.b[i][:len(bi)] = bi
-        if fname is not None: 
-            self.save_to_disc(self.w,self.b,fname) 
-        return self.w,self.b
-    def get_block_dict(self,w,b):
-        self.w,self.b = w,b
-        self.block_dict = []
-        start = 0
-        for i,wi in enumerate(self.w):
-            tsrs = [wi] if i==len(self.b) else [wi,b[i]]
-            for tsr in tsrs:
-                stop = start + tsr.size
-                self.block_dict.append((start,stop))
-                start = stop
-        self.nparam = stop
-    def set_backend(self,backend):
-        super().set_backend(backend)
-        if self.afn=='logcosh':
+    def get_layer_afn(self,i):
+        afn = self.afn[i]
+        if afn=='logcosh':
             def _afn(x):
                 return self.jnp.log(self.jnp.cosh(x))
-        elif self.afn=='logistic':
+        elif afn=='logistic':
             def _afn(x):
                 return 1./(1.+self.jnp.exp(-x))    
-        elif self.afn=='tanh':
+        elif afn=='tanh':
             def _afn(x):
-                return self.scale * self.jnp.tanh(self.coeff * x)
-        elif self.afn=='softplus':
+                return self.scale[i] * self.jnp.tanh(x)
+        elif afn=='softplus':
             def _afn(x):
                 return self.jnp.log(1.+self.jnp.exp(x))
-        elif self.afn=='silu':
+        elif afn=='silu':
             def _afn(x):
                 return x/(1.+self.jnp.exp(-x))
-        elif self.afn=='cos':
+        elif afn=='cos':
             def _afn(x):
                 return self.jnp.cos(self.coeff * x)
         else:
             raise NotImplementedError
-        self._afn = _afn 
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        self.set_backend(backend)
-        self.w = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.w]
-        self.b = [tensor2backend(tsr,backend,requires_grad=requires_grad) for tsr in self.b]
-    def get_x(self):
-        ls = []
-        for i,wi in enumerate(self.w):
-            ls.append(tensor2backend(wi,'numpy').flatten())
-            if i<len(self.b): 
-                ls.append(tensor2backend(self.b[i],'numpy'))
-        return np.concatenate(ls)
-    def load_from_disc(self,fname,nl):
-        f = h5py.File(fname,'r')
-        self.w = []
-        self.b = []
-        for i in range(nl):
-            try:
-                self.w.append(f[f'w{i}'][:])
-            except:
-                pass
-            try:
-                self.b.append(f[f'b{i}'][:])
-            except:
-                pass
-        f.close()
-        return self.w,self.b
-    def save_to_disc(self,w,b,fname,root=0):
-        if RANK!=root:
-            return
-        f = h5py.File(fname+'.hdf5','w')
-        for i,wi in enumerate(w):
-            f.create_dataset(f'w{i}',data=wi) 
-            try:
-                f.create_dataset(f'b{i}',data=b[i]) 
-            except:
-                pass
-        f.close()
-    def update(self,x,fname=None,root=0):
-        for i in range(len(self.w)):
-            start,stop = self.block_dict[2*i]
-            size = stop-start
-            xi,x = x[:size],x[size:]
-            self.w[i] = xi.reshape(self.w[i].shape)
-
-            if i<len(self.b):
-                start,stop = self.block_dict[2*i+1]
-                size = stop-start
-                xi,x = x[:size],x[size:]
-                self.b[i] = xi
-        if fname is not None:
-            self.save_to_disc(self.w,self.b,fname,root=root) 
-        self.wfn2backend()
-    def extract_grad(self):
-        ls = []
-        for i,wi in enumerate(self.w):
-            ls.append(tensor2backend(self.tensor_grad(wi),'numpy').flatten())
-            if i<len(self.b): 
-                ls.append(tensor2backend(self.tensor_grad(self.b[i]),'numpy'))
-        return np.concatenate(ls)
+        return _afn
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
+class SumFNN(FNN):
     def forward(self,c):
-        for i in range(len(self.b)):
-            c = self.jnp.matmul(c,self.w[i]) + self.b[i]    
-            c = self._afn(c)
-        return self.jnp.matmul(c,self.w[-1])
-class SIGN(FNN):
-    def __init__(self,nv,nl,afn='tanh',**kwargs):
-        super().__init__(nv,nl,afn=afn,log_amp=False,**kwargs)
-    def forward(self,c):
-        c = super().forward(c) 
-        return self._afn(c)
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            c = self._afn[i](c)
+        c = self.jnp.sinh(c)
+        return self.jnp.matmul(c,self.params[len(self.nh),'w'])
