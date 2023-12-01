@@ -435,7 +435,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             plq = dict()
             for imin,imax,x_bsz,y_bsz in b.plq_types:
                 plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
-            return self.pair_energies_from_plq(self,plq,b.pairs),plq
+            return self.pair_energies_from_plq(plq,b.pairs),plq
 
         for where in b.pairs:
             i = min([i for i,_ in where])
