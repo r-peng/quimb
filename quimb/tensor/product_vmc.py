@@ -469,6 +469,7 @@ class FNN(NN):
 
         self.param_keys = []
         self.sh = dict()
+        self.nbasis = nbasis
         for i in range(len(nh)):
             key = i,'w'
             self.param_keys.append(key)
@@ -540,9 +541,9 @@ class FNN(NN):
         # linear combination
         elif afn=='pow':
             def _afn(x):
-                return sum([x**(p+1)*ai for p,ai in enumerate(self.params[i,'a'])])
+                return [x**p for p in range(1,self.nbasis[i]+1)]
         elif afn=='fsin':
-                return sum([self.jnp.sin(c*(p+1))*ai for p,ai in enumerate(self.params[i,'a'])])
+                return [self.jnp.sin(c*p) for p in range(1,self.nbasis[i]+1)]
         else:
             raise NotImplementedError
         return _afn
@@ -555,6 +556,8 @@ class FNN(NN):
             if (i,'b') in self.params:
                 c = c + self.params[i,'b']
             c = self._afn[i](c)
+            if (i,'a') in self.params:
+                c = sum([ci*ai for ci,ai in zip(c,self.params[i,'a'])]) 
         if len(self.afn)==len(self.nh):
             return self.jnp.sum(c)
         c = self._afn[-1](c)
