@@ -543,7 +543,8 @@ class FNN(NN):
             def _afn(x):
                 return [x**p for p in range(1,self.nbasis[i]+1)]
         elif afn=='fsin':
-                return [self.jnp.sin(c*p) for p in range(1,self.nbasis[i]+1)]
+            def _afn(x):
+                return [self.jnp.sin(x*p) for p in range(1,self.nbasis[i]+1)]
         else:
             raise NotImplementedError
         return _afn
