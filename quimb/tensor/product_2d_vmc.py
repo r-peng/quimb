@@ -7,7 +7,7 @@ import numpy as np
 #RANK = COMM.Get_rank()
 
 from .product_vmc import (
-    RBM,SumFNN,ProductFNN,PolyFNN,
+    RBM,FNN,
     CompoundAmplitudeFactory,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
@@ -96,21 +96,11 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
-class SumFNN2D(SumFNN,AmplitudeFactory2D):
+class FNN2D(FNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nh,afn,**kwargs)
-class ProductFNN2D(ProductFNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(nv,nh,afn,**kwargs)
-class PolyFNN2D(PolyFNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nh,deg,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(nv,nh,deg,**kwargs)
 #class SIGN2D(SIGN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,nl,**kwargs):
 #        self.Lx = Lx

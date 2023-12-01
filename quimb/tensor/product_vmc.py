@@ -463,7 +463,7 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,scale=None,nf=1,bias=False,change_basis=False,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,scale=None,change_basis=False,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.change_basis = change_basis
 
@@ -478,6 +478,19 @@ class FNN(NN):
                 key = i,'b'
                 self.param_keys.append(key)
                 self.sh[key] = nh[i],
+            if nbasis is not None:
+                key = i,'a'
+                self.param_keys.append(key)
+                self.sh[key] = nbasis[i],
+        if len(afn)==len(nh):
+            pass
+        elif len(afn)==len(nh)+1:
+            assert (not self.log)
+            key = 'wf'
+            self.param_keys.append(key)
+            self.sh[key] = nh[-1],nf
+        else:
+            raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
 
         self.afn = afn 
         self.scale = scale
@@ -492,21 +505,29 @@ class FNN(NN):
         return config.flatten()
     def get_layer_afn(self,i):
         afn = self.afn[i]
+        # unsaturating 
         if afn=='id':
             def _afn(x):
                 return x
         elif afn=='logcosh':
             def _afn(x):
                 return self.jnp.log(self.jnp.cosh(x))
-        elif afn=='logistic':
-            def _afn(x):
-                return 1./(1.+self.jnp.exp(-x))    
         elif afn=='softplus':
             def _afn(x):
                 return self.jnp.log(1.+self.jnp.exp(x))
         elif afn=='silu':
             def _afn(x):
                 return x/(1.+self.jnp.exp(-x))
+        if afn=='exp':
+            def _afn(x):
+                return self.jnp.exp(x)
+        if afn=='sinh':
+            def _afn(x):
+                return self.jnp.sinh(x)
+        # saturating
+        elif afn=='logistic':
+            def _afn(x):
+                return self.scale[i] / (1.+self.jnp.exp(-x))    
         elif afn=='tanh':
             def _afn(x):
                 return self.scale[i] * self.jnp.tanh(x)
@@ -516,53 +537,25 @@ class FNN(NN):
         elif afn=='sin':
             def _afn(x):
                 return self.scale[i] * self.jnp.sin(x)
+        # linear combination
+        elif afn=='pow':
+            def _afn(x):
+                return sum([x**(p+1)*ai for p,ai in enumerate(self.params[i,'a'])])
+        elif afn=='fsin':
+                return sum([self.jnp.sin(c*(p+1))*ai for p,ai in enumerate(self.params[i,'a'])])
         else:
             raise NotImplementedError
         return _afn
     def set_backend(self,backend):
         super().set_backend(backend)
         self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
-class SumFNN(FNN):
     def forward(self,c):
         for i in range(len(self.nh)):
             c = self.jnp.matmul(c,self.params[i,'w'])    
             if (i,'b') in self.params:
                 c = c + self.params[i,'b']
             c = self._afn[i](c)
-        c = self.jnp.sinh(c)
+        if len(self.afn)==len(self.nh):
+            return self.jnp.sum(c)
+        c = self._afn[-1](c)
         return self.jnp.matmul(c,self.params['wf'])
-class ProductFNN(FNN):
-    def __init__(self,nv,nh,afn,combine_exp=False,**kwargs):
-        super().__init__(nv,nh,afn,**kwargs) 
-        self.combine_exp = combine_exp
-        if combine_exp:
-            assert (not self.log)
-            assert len(nh)==len(afn)
-            key = 'wf'
-            self.param_keys.append(key)
-            self.sh[key] = nh[-1],nf
-    def forward(self,c):
-        for i in range(len(self.nh)):
-            c = self.jnp.matmul(c,self.params[i,'w'])    
-            if (i,'b') in self.params:
-                c = c + self.params[i,'b']
-            c = self._afn[i](c)
-        if self.combine_exp: 
-            c = self.jnp.matmul(self.jnp.exp(c),self.params['wf'])
-        else:
-            c = self.jnp.sum(c) 
-        return c
-class PolyFNN(FNN):
-    def __init__(self,nv,nh,deg,**kwargs):
-        super().__init__(nv,nh,('id',),bias=False,**kwargs) 
-        key = 'poly'
-        self.param_keys.append(key) 
-        self.sh[key] = len(nh),deg-1
-        self.deg = deg
-    def forward(self,c):
-        for i in range(len(self.nh)):
-            c = self.jnp.matmul(c,self.params[i,'w'])    
-            c = sum([c**p*self.params['poly'][i,p-2] for p in range(2,self.deg+1)])+c#+self.params[i,'b']
-        c = self.jnp.sum(c) 
-        return c
-     
