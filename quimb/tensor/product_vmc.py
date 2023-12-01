@@ -478,9 +478,6 @@ class FNN(NN):
                 key = i,'b'
                 self.param_keys.append(key)
                 self.sh[key] = nh[i],
-        key = 'wf'
-        self.param_keys.append(key)
-        self.sh[key] = nh[-1],nf
 
         self.afn = afn 
         self.scale = scale
@@ -495,7 +492,10 @@ class FNN(NN):
         return config.flatten()
     def get_layer_afn(self,i):
         afn = self.afn[i]
-        if afn=='logcosh':
+        if afn=='id':
+            def _afn(x):
+                return x
+        elif afn=='logcosh':
             def _afn(x):
                 return self.jnp.log(self.jnp.cosh(x))
         elif afn=='logistic':
@@ -538,6 +538,9 @@ class ProductFNN(FNN):
         if combine_exp:
             assert (not self.log)
             assert len(nh)==len(afn)
+            key = 'wf'
+            self.param_keys.append(key)
+            self.sh[key] = nh[-1],nf
     def forward(self,c):
         for i in range(len(self.nh)):
             c = self.jnp.matmul(c,self.params[i,'w'])    
@@ -545,9 +548,21 @@ class ProductFNN(FNN):
                 c = c + self.params[i,'b']
             c = self._afn[i](c)
         if self.combine_exp: 
-            c = self.jnp.exp(c)
-        c = self.jnp.matmul(c,self.params['wf'])
-        if len(self.afn)>len(self.nh):
-            c = self._afn[-1](c) 
+            c = self.jnp.matmul(self.jnp.exp(c),self.params['wf'])
+        else:
+            c = self.jnp.sum(c) 
         return c
-
+class PolyFNN(FNN):
+    def __init__(self,nv,nh,deg,**kwargs):
+        super().__init__(nv,nh,('id',),bias=False,**kwargs) 
+        key = 'poly'
+        self.param_keys.append(key) 
+        self.sh[key] = len(nh),deg-1
+        self.deg = deg
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            c = sum([c**p*self.params['poly'][i,p-2] for p in range(2,self.deg+1)])+c#+self.params[i,'b']
+        c = self.jnp.sum(c) 
+        return c
+     
