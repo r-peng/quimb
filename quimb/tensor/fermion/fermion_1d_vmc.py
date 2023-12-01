@@ -23,7 +23,7 @@ from .fermion_core import FermionTensor,FermionTensorNetwork,rand_uuid
 class FermionExchangeSampler1D(FermionExchangeSampler,ExchangeSampler1D):
     pass
 class FermionAmplitudeFactory1D(FermionAmplitudeFactory,AmplitudeFactory1D): 
-    def __init__(self,psi,blks=None,spinless=False,backend='numpy',pbc=False,symmetry='u1',flat=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,spinless=False,spin=None,backend='numpy',pbc=False,symmetry='u1',flat=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Ly
@@ -31,19 +31,22 @@ class FermionAmplitudeFactory1D(FermionAmplitudeFactory,AmplitudeFactory1D):
         psi.add_tag('KET')
         psi.reorder(direction='col',inplace=True)
         self.set_psi(psi) # current state stored in self.psi
-        self.backend = backend
 
         self.symmetry = symmetry 
         self.flat = flat
         self.spinless = spinless
+        self.spin = spin
         self.data_map = self.get_data_map()
+
+        self.model = model
+        self.from_plq = True
+        self.backend = backend
         self.wfn2backend()
 
         # init contraction
         self.compress_opts = compress_opts
         self.pbc = pbc
         self.deterministic = False 
-        self.from_plq = True
 
         if blks is None:
             blks = [self.sites]
