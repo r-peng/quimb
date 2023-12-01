@@ -97,15 +97,15 @@ class RBM2D(RBM,AmplitudeFactory2D):
         self.Ly = Ly 
         super().__init__(nv,nh,**kwargs)
 class SumFNN2D(SumFNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nh,afn,scale,**kwargs):
+    def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,nh,afn,scale,**kwargs)
+        super().__init__(nv,nh,afn,**kwargs)
 class ProductFNN2D(ProductFNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,nv,nh,afn,scale,**kwargs):
+    def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
-        super().__init__(nv,nh,afn,scale,**kwargs)
+        super().__init__(nv,nh,afn,**kwargs)
 #class SIGN2D(SIGN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,nl,**kwargs):
 #        self.Lx = Lx

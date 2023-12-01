@@ -463,7 +463,7 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,scale,nf=1,bias=False,change_basis=False,**kwargs):
+    def __init__(self,nv,nh,afn,scale=None,nf=1,bias=False,change_basis=False,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.change_basis = change_basis
 
@@ -501,15 +501,15 @@ class FNN(NN):
         elif afn=='logistic':
             def _afn(x):
                 return 1./(1.+self.jnp.exp(-x))    
-        elif afn=='tanh':
-            def _afn(x):
-                return self.scale[i] * self.jnp.tanh(x)
         elif afn=='softplus':
             def _afn(x):
                 return self.jnp.log(1.+self.jnp.exp(x))
         elif afn=='silu':
             def _afn(x):
                 return x/(1.+self.jnp.exp(-x))
+        elif afn=='tanh':
+            def _afn(x):
+                return self.scale[i] * self.jnp.tanh(x)
         elif afn=='cos':
             def _afn(x):
                 return self.scale[i] * self.jnp.cos(x)
@@ -532,8 +532,8 @@ class SumFNN(FNN):
         c = self.jnp.sinh(c)
         return self.jnp.matmul(c,self.params['wf'])
 class ProductFNN(FNN):
-    def __init__(self,nv,nh,afn,scale,combine_exp=False,**kwargs):
-        super().__init__(nv,nh,afn,scale,**kwargs) 
+    def __init__(self,nv,nh,afn,combine_exp=False,**kwargs):
+        super().__init__(nv,nh,afn,**kwargs) 
         self.combine_exp = combine_exp
         if combine_exp:
             assert (not self.log)
