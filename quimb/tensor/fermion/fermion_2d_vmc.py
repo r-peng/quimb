@@ -49,7 +49,6 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
         psi.reorder(direction='row',inplace=True)
         self.set_psi(psi) # current state stored in self.psi
 
-
         self.symmetry = symmetry 
         self.flat = flat
         self.spinless = spinless

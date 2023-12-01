@@ -430,23 +430,26 @@ class AmplitudeFactory2D(AmplitudeFactory):
             return ex,None
 
         cache_bot,cache_top = self.batch_benvs(batch_key,new_cache) 
-        if not self.from_plq:
-            for where in b.pairs:
-                i = min([i for i,_ in where])
-                if i not in self.cx:
-                    self.cx[i] = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,i=i,to_numpy=False)
-                cij = self.cx[i]
-                
-                ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
-                for tag,eij in ex_ij.items():
-                    ex[where,tag] = eij,cij,eij/cij 
-            return ex,None
+        if self.from_plq:
+            # form plqs
+            plq = dict()
+            for imin,imax,x_bsz,y_bsz in b.plq_types:
+                plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
+            return self.pair_energies_from_plq(self,plq,b.pairs),plq
 
-        # form plqs
-        plq = dict()
-        for imin,imax,x_bsz,y_bsz in b.plq_types:
-            plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
         for where in b.pairs:
+            i = min([i for i,_ in where])
+            if i not in self.cx:
+                self.cx[i] = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,i=i,to_numpy=False)
+            cij = self.cx[i]
+            
+            ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
+            for tag,eij in ex_ij.items():
+                ex[where,tag] = eij,cij,eij/cij 
+        return ex,None
+    def pair_energies_from_plq(self,plq,pairs):
+        ex = dict() 
+        for where in pairs:
             key = self.model.pair_key(*where)
 
             tn = plq.get(key,None) 
@@ -459,7 +462,8 @@ class AmplitudeFactory2D(AmplitudeFactory):
             ex_ij = self.update_pair_energy_from_plq(tn,where) 
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cij,eij/cij
-        return ex,plq
+        return ex
+
 ####################################################################
 # models
 ####################################################################

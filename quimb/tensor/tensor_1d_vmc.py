@@ -14,7 +14,10 @@ from .tensor_vmc import (
     get_gate2,
     _add_gate,
 )
-from .tensor_2d_vmc import AmplitudeFactory2D,ExchangeSampler2D 
+from .tensor_2d_vmc import (
+    AmplitudeFactory2D,
+    ExchangeSampler2D,
+)
 class AmplitudeFactory1D(AmplitudeFactory2D):
     def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,**compress_opts):
         self.Lx,self.Ly = 1,psi.L
@@ -90,23 +93,15 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         if to_numpy:
             cx = tensor2backend(cx,'numpy')
         return cx  
-    def amplitude(self,config):
-        raise NotImplementedError
-        unsigned_cx = self.unsigned_amplitude(config)
-        sign = self.compute_config_sign(config)
-        return unsigned_cx * sign 
-    def batch_pair_energies_from_plq(self,batch_key,new_cache=None):
-        pairs,plq_sz = self.model.batched_pairs[batch_key]
-        if isinstance(plq_sz,int):
-            plq_sz = [plq_sz]
+    def batch_pair_energies(self,batch_key,new_cache):
+        b = self.model.batched_pairs[batch_key]
         # form plqs
-        plq = dict()
-        for bsz in plq_sz:
-            plq.update(self.get_plq(self.config,bsz))
-
-        # compute energy numerator 
-        ex,cx = self.pair_energies_from_plq(plq,pairs)
-        return ex,cx,plq
+        plq = self.get_plq(self.config,b.plq_sz)
+        return self.pair_energies_from_plq(plq,b.pairs),plq
+class Batch:
+    def __init__(self):
+        self.pairs = []
+        self.plq_sz = 1
 class Model1D(Model):
     def __init__(self,L,pbc=False):
         self.nsite = L
@@ -116,17 +111,19 @@ class Model1D(Model):
     def flat2site(self,ix):
         return ix
     def pairs_nn(self,d=1):
-        ls,plq_size = self.batched_pairs.get('all',([],0)) 
+        key = 'all'
+        if key not in self.batched_pairs:
+            self.batched_pairs[key] = Batch()
+        b = self.batched_pairs[key]
         for j in range(self.nsite):
             if j+d<self.nsite:
                 where = j,j+d
-                ls.append(where)
+                b.pairs.append(where)
             else:
                 if self.pbc:
                     where = j,(j+d)%self.nsite
-                    ls.append(where)
-        self.batched_pairs['all'] = ls,max(d+1,plq_size)
-        return ls
+                    b.pairs.append(where)
+        b.plq_sz = max(d+1,b.plq_sz)
 class J1J2(Model1D): 
     def __init__(self,J1,J2,L,**kwargs):
         super().__init__(L,**kwargs)

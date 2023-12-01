@@ -486,7 +486,7 @@ class SGD: # stochastic sampling
         return self.normalize(x - rate * self.deltas)
     def transform_gradients(self):
         if RANK>0:
-            return np.zeros(self.nparam,dtype=self.dtype) 
+            return np.zeros(self.nparam,dtype=self.dtype_i) 
         if self.optimizer=='sgd':
             self.deltas = self.g
         elif self.optimizer=='sign':
