@@ -111,10 +111,10 @@ class ProductFNN2D(ProductFNN,AmplitudeFactory2D):
 #        self.Lx = Lx
 #        self.Ly = Ly 
 #        super().__init__(nv,nl,**kwargs)
-#class RBM1D(RBM,AmplitudeFactory1D):
-#    def __init__(self,nsite,nv,nh,**kwargs):
-#        self.nsite = nsite 
-#        super().__init__(nv,nh,**kwargs)
+class RBM1D(RBM,AmplitudeFactory1D):
+    def __init__(self,nsite,nv,nh,**kwargs):
+        self.nsite = nsite 
+        super().__init__(nv,nh,**kwargs)
 #class FNN1D(FNN,AmplitudeFactory1D):
 #    def __init__(self,nsite,nv,**kwargs):
 #        self.nsite = nsite 
