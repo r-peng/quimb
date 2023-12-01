@@ -43,6 +43,7 @@ class FermionAmplitudeFactory1D(FermionAmplitudeFactory,AmplitudeFactory1D):
         self.compress_opts = compress_opts
         self.pbc = pbc
         self.deterministic = False 
+        self.from_plq = True
 
         if blks is None:
             blks = [self.sites]
