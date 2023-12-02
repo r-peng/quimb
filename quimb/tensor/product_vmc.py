@@ -263,7 +263,7 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class NN(AmplitudeFactory):
-    def __init__(self,backend='numpy',log=True,phase=False,fermion=False,to_spin=True,order='F'):
+    def __init__(self,backend='numpy',log=True,phase=False,cinput=False,fermion=False,to_spin=True,order='F'):
         self.backend = backend
         self.set_backend(backend)
         self.log = log # if output is amplitude or log amplitude 
@@ -277,12 +277,21 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        if fermion:
-            self.to_spin = to_spin
-            self.order = order
-        else:
-            self.to_spin = False
+        self.cinput = cinput
         self.params = dict()
+        self.param_keys = []
+        self.sh = dict()
+        if cinput:
+            key = 'in'
+            self.param_keys.append(key)
+            sh = 4 if fermion else 2
+            self.sh[key] = self.nv,sh 
+        else:
+            if fermion:
+                self.to_spin = to_spin
+                self.order = order
+            #else:
+            #    self.to_spin = False
     def init(self,key,eps,a=-1,b=1,c=0,iprint=0):
         tsr = (np.random.rand(*self.sh[key])*(b-a)+a) * eps + c
         COMM.Bcast(tsr,root=0)
@@ -306,9 +315,12 @@ class NN(AmplitudeFactory):
         else:
             tsr = torch.zeros(1)
             self.jnp = torch
-            def _input(config):
-                return tensor2backend(self.input(config),backend) 
-            self._input = _input
+            if self.cinput:
+                self._input = self.input
+            else:
+                def _input(config):
+                    return tensor2backend(self.input(config),backend) 
+                self._input = _input
         ar.set_backend(tsr)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
@@ -355,7 +367,15 @@ class NN(AmplitudeFactory):
             return pair_terms(i1,i2,spin) 
         else:
             return i2,i1
+    def input_continous(self,config):
+        x = self.params['in']
+        c = self.jnp.zeros_like(x)
+        for i,ci in enumerate(config):
+            c[i,ci] = 1
+        return self.jnp.sum(x*c,axis=1)
     def input(self,config):
+        if self.cinput:
+            return self.input_continous(config)
         if self.fermion:
             if self.to_spin:
                 ca,cb = config_to_ab(config) 
@@ -451,11 +471,11 @@ class NN(AmplitudeFactory):
 class RBM(NN):
     def __init__(self,nv,nh,**kwargs):
         self.nv,self.nh = nv,nh
-        self.param_keys = ['a','b','w']
-        self.sh = {'a':(self.nv,),
-                   'b':(self.nh,),
-                   'w':(self.nv,self.nh)}
         super().__init__(**kwargs)
+        self.param_keys += ['a','b','w']
+        self.sh.update({'a':(self.nv,),
+                        'b':(self.nh,),
+                        'w':(self.nv,self.nh)})
     def forward(self,c): # NN output
         a = self.params['a']
         b = self.params['b']
@@ -463,12 +483,12 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,scale=None,change_basis=False,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,scale=None,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
-        self.change_basis = change_basis
+        self.afn = afn 
+        self.scale = scale
+        super().__init__(**kwargs)
 
-        self.param_keys = []
-        self.sh = dict()
         self.nbasis = nbasis
         for i in range(len(nh)):
             key = i,'w'
@@ -492,18 +512,6 @@ class FNN(NN):
             self.sh[key] = nh[-1],nf
         else:
             raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
-
-        self.afn = afn 
-        self.scale = scale
-        super().__init__(**kwargs)
-    def input(self,config):
-        if not self.change_basis: 
-            return super().input(config)
-        if not self.fermion:
-            return np.array(config,dtype=float)
-        config = [tuple(np.where(np.array(c))[0]) for c in config_to_ab(config)]
-        config = np.array([[self.flat2site(ix) for ix in c] for c in config],dtype=float)
-        return config.flatten()
     def get_layer_afn(self,i):
         afn = self.afn[i]
         # unsaturating 
