@@ -247,6 +247,7 @@ class SumAmplitudeFactory:
         pass
 import autoray as ar
 import torch
+ar.register_function('torch','relu',torch.nn.functional.relu)
 import h5py
 def pair_terms(i1,i2,spin):
     if spin=='a':
@@ -527,10 +528,16 @@ class FNN(NN):
         elif afn=='silu':
             def _afn(x):
                 return x/(1.+self.jnp.exp(-x))
-        if afn=='exp':
+        elif afn=='relu':
+            def _afn(x):
+                try:
+                    return self.jnp.relu(x)
+                except AttributeError:
+                    return x*(x>0)
+        elif afn=='exp':
             def _afn(x):
                 return self.jnp.exp(x)
-        if afn=='sinh':
+        elif afn=='sinh':
             def _afn(x):
                 return self.jnp.sinh(x)
         # saturating
@@ -571,3 +578,4 @@ class FNN(NN):
             return self.jnp.sum(c)
         c = self._afn[-1](c)
         return self.jnp.matmul(c,self.params['wf'])
+    
