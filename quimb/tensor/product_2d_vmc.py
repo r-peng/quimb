@@ -110,10 +110,10 @@ class RBM1D(RBM,AmplitudeFactory1D):
     def __init__(self,nsite,nv,nh,**kwargs):
         self.nsite = nsite 
         super().__init__(nv,nh,**kwargs)
-#class FNN1D(FNN,AmplitudeFactory1D):
-#    def __init__(self,nsite,nv,**kwargs):
-#        self.nsite = nsite 
-#        super().__init__(nv,**kwargs)
+class FNN1D(FNN,AmplitudeFactory1D):
+    def __init__(self,nsite,nv,nh,afn,**kwargs):
+        self.nsite = nsite 
+        super().__init__(nv,nh,afn,**kwargs)
 #class SIGN1D(SIGN,AmplitudeFactory1D):
 #    def __init__(self,nsite,nv,nl,**kwargs):
 #        self.nsite = nsite 
