@@ -484,7 +484,7 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,scale=None,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,wf=True,scale=None,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.afn = afn 
         self.scale = scale
@@ -504,13 +504,14 @@ class FNN(NN):
                 key = i,'a'
                 self.param_keys.append(key)
                 self.sh[key] = nbasis[i],
+        if wf:
+            key = 'wf'
+            self.param_keys.append(key)
+            self.sh[key] = nh[-1],nf
         if len(afn)==len(nh):
             pass
         elif len(afn)==len(nh)+1:
             assert (not self.log)
-            key = 'wf'
-            self.param_keys.append(key)
-            self.sh[key] = nh[-1],nf
         else:
             raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
     def get_layer_afn(self,i):
@@ -574,8 +575,9 @@ class FNN(NN):
             c = self._afn[i](c)
             if (i,'a') in self.params:
                 c = sum([ci*ai for ci,ai in zip(c,self.params[i,'a'])]) 
-        if len(self.afn)==len(self.nh):
-            return self.jnp.sum(c)
-        c = self._afn[-1](c)
-        return self.jnp.matmul(c,self.params['wf'])
+        if len(self.afn)==len(self.nh)+1:
+            c = self._afn[-1](c)
+        if 'wf' in self.params:
+            return self.jnp.matmul(c,self.params['wf'])
+        return self.jnp.sum(c)
     
