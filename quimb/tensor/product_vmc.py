@@ -385,6 +385,9 @@ class NN(AmplitudeFactory):
                 return np.array(config,dtype=float)
         else:
             config = np.array(config,dtype=float)
+        #return -(config * 2 - 1)
+        #print(config * 2 - 1)
+        #exit()
         return config * 2 - 1
     def log_prob(self,config):
         if self.phase:

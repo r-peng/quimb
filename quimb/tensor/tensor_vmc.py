@@ -300,10 +300,11 @@ class SGD: # stochastic sampling
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
         save_local = self.save_local if save_local is None else save_local 
 
-        self.buf = np.zeros(4,dtype=self.dtype_o)
+        self.buf = np.zeros(5,dtype=self.dtype_o)
         self.terminate = np.array([0])
 
         self.buf[0] = RANK + .1
+        self.buf[4] = self.step + .1
         if compute_v:
             self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
@@ -331,6 +332,12 @@ class SGD: # stochastic sampling
         t0 = time.time()
         while self.terminate[0]==0:
             COMM.Recv(self.buf,tag=0)
+            step = int(self.buf[4].real+.1)
+            if step>self.step:
+                raise ValueError
+            elif step<self.step:
+                continue
+
             rank = int(self.buf[0].real+.1)
             self.f.append(self.buf[1]) 
             self.e.append(self.buf[2])
@@ -339,7 +346,6 @@ class SGD: # stochastic sampling
             ncurr += 1
             if self.progbar:
                 pg.update()
-            #print(ncurr)
             if ncurr >= samplesize: # send termination message to all workers
                 self.terminate[0] = 1
                 for worker in range(1,SIZE):
@@ -438,6 +444,7 @@ class SGD: # stochastic sampling
                 self.Hvsum += Hvx * p[ix]
                 self.Hv.append(Hvx)
             COMM.Send(self.buf,dest=0,tag=0) 
+            print(RANK,self.step,self.buf)
             COMM.Recv(self.terminate,source=0,tag=1)
         self.f = np.array(self.f)
         if compute_v:
