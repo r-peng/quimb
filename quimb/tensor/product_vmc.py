@@ -248,6 +248,7 @@ class SumAmplitudeFactory:
 import autoray as ar
 import torch
 ar.register_function('torch','relu',torch.nn.functional.relu)
+#ar.register_function('torch','lrelu',torch.nn.functional.leaky_relu)
 import h5py
 def pair_terms(i1,i2,spin):
     if spin=='a':
@@ -487,26 +488,15 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,nf=1,nbasis=None,bias=False,wf=True,scale=None,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.afn = afn 
         self.scale = scale
+        self.bias = bias
         super().__init__(**kwargs)
 
-        self.nbasis = nbasis
         for i in range(len(nh)):
-            key = i,'w'
-            self.param_keys.append(key)
-            sh1 = self.nv if i==0 else nh[i-1]
-            self.sh[key] = sh1,nh[i]
-            if bias:
-                key = i,'b'
-                self.param_keys.append(key)
-                self.sh[key] = nh[i],
-            if nbasis is not None:
-                key = i,'a'
-                self.param_keys.append(key)
-                self.sh[key] = nbasis[i],
+            self.set_layer(i)
         if wf:
             key = 'wf'
             self.param_keys.append(key)
@@ -517,6 +507,16 @@ class FNN(NN):
             assert (not self.log)
         else:
             raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
+    def set_layer(self,i):
+        key = i,'w'
+        self.param_keys.append(key)
+        sh1 = self.nv if i==0 else self.nh[i-1]
+        self.sh[key] = sh1,self.nh[i]
+        if not self.bias:
+            return
+        key = i,'b'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[i],
     def get_layer_afn(self,i):
         afn = self.afn[i]
         # unsaturating 
@@ -557,15 +557,6 @@ class FNN(NN):
         elif afn=='sin':
             def _afn(x):
                 return self.scale[i] * self.jnp.sin(x)
-        # linear combination
-        elif afn=='pow':
-            def _afn(x):
-                return [x**p for p in range(1,self.nbasis[i]+1)]
-        elif afn=='fsin':
-            def _afn(x):
-                return [self.jnp.sin(x*p) for p in range(1,self.nbasis[i]+1)]
-        else:
-            raise NotImplementedError
         return _afn
     def set_backend(self,backend):
         super().set_backend(backend)
@@ -576,11 +567,85 @@ class FNN(NN):
             if (i,'b') in self.params:
                 c = c + self.params[i,'b']
             c = self._afn[i](c)
-            if (i,'a') in self.params:
-                c = sum([ci*ai for ci,ai in zip(c,self.params[i,'a'])]) 
         if len(self.afn)==len(self.nh)+1:
             c = self._afn[-1](c)
         if 'wf' in self.params:
             return self.jnp.matmul(c,self.params['wf'])
         return self.jnp.sum(c)
-    
+class LCFNN(FNN):
+    def __init__(self,nv,nh,afn,nbasis,**kwargs):
+        self.nbasis = nbasis
+        super().__init__(nv,nh,afn,**kwargs)
+    def set_layer(self,i):
+        super().set_layer(i)
+        key = i,'a'
+        self.param_keys.append(key)
+        self.sh[key] = self.nbasis[i],
+    def get_layer_afn(self,i):
+        afn = self.afn[i]
+        if afn=='pow':
+            def _afn(x):
+                return [x**p for p in range(1,self.nbasis[i]+1)]
+        elif afn=='fsin':
+            def _afn(x):
+                return [self.jnp.sin(x*p) for p in range(1,self.nbasis[i]+1)]
+        else:
+            raise NotImplementedError
+        return _afn
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            c = self._afn[i](c)
+            c = sum([ci*ai for ci,ai in zip(c,self.params[i,'a'])]) 
+        if len(self.afn)==len(self.nh)+1:
+            c = self._afn[-1](c)
+        if 'wf' in self.params:
+            return self.jnp.matmul(c,self.params['wf'])
+        return self.jnp.sum(c)
+class LRelu(FNN):
+    def __init__(self,nv,nh,afn=None,**kwargs):
+        _afn = ('id',)*len(nh)
+        if afn is not None:
+            _afn = _afn + (afn,) 
+        super().__init__(nv,nh,_afn,**kwargs)
+    def set_layer(self,i):
+        super().set_layer(i)
+        key = i,'a'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[i],
+    def load_from_relu(self,fname,eps=1e-2,a=0,b=1):
+        self.sh = dict()
+        f = h5py.File(fname,'r')
+        for key in self.param_keys:
+            try:
+                tsr = f[str(key)][:]
+                self.params[key] = tsr 
+                self.sh[key] = tsr.shape
+            except:
+                continue
+        f.close()
+        for i in range(len(self.nh)):
+            key = (i,'a')
+            self.sh[key] = self.nh[i],
+            self.init(key,eps,a=0,a=a,b=b)
+        return self.params
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            try:
+                cp = self.jnp.relu(c)
+                cm = self.jnp.relu(-c)
+                c = cp - self.params[i,'a'] * cm
+            except AttributeError:
+                cp = c*(c>0)
+                cm = c*(c<0)
+                c = cp + self.params[i,'a'] * cm
+        if len(self.afn)==len(self.nh)+1:
+            c = self._afn[-1](c)
+        if 'wf' in self.params:
+            return self.jnp.matmul(c,self.params['wf'])
+        return self.jnp.sum(c)

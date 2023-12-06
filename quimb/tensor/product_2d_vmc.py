@@ -7,7 +7,7 @@ import numpy as np
 #RANK = COMM.Get_rank()
 
 from .product_vmc import (
-    RBM,FNN,
+    RBM,FNN,LRelu,
     CompoundAmplitudeFactory,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
@@ -101,6 +101,11 @@ class FNN2D(FNN,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nv,nh,afn,**kwargs)
+class LRelu2D(LRelu,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(nv,nh,**kwargs)
 #class SIGN2D(SIGN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,nl,**kwargs):
 #        self.Lx = Lx
