@@ -444,7 +444,6 @@ class SGD: # stochastic sampling
                 self.Hvsum += Hvx * p[ix]
                 self.Hv.append(Hvx)
             COMM.Send(self.buf,dest=0,tag=0) 
-            print(RANK,self.step,self.buf)
             COMM.Recv(self.terminate,source=0,tag=1)
         self.f = np.array(self.f)
         if compute_v:

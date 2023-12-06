@@ -294,11 +294,14 @@ class NN(AmplitudeFactory):
                 self.order = order
             #else:
             #    self.to_spin = False
-    def init(self,key,eps,a=-1,b=1,c=0,iprint=0):
-        tsr = (np.random.rand(*self.sh[key])*(b-a)+a) * eps + c
+    def init(self,key,eps,loc=0,iprint=False,normal=True):
+        if normal:
+            tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
+        else:
+            tsr = (np.random.rand(*self.sh[key])*2-1) * eps + loc 
         COMM.Bcast(tsr,root=0)
         self.params[key] = tsr
-        if RANK==0 and iprint>0:
+        if RANK==0 and iprint:
             print(key)
             print(tsr)
     def get_block_dict(self):
