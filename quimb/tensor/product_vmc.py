@@ -629,7 +629,7 @@ class LRelu(FNN):
         for i in range(len(self.nh)):
             key = (i,'a')
             self.sh[key] = self.nh[i],
-            self.init(key,eps,a=0,a=a,b=b)
+            self.init(key,eps,a=a,b=b)
         return self.params
     def forward(self,c):
         for i in range(len(self.nh)):
