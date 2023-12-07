@@ -580,7 +580,7 @@ class FNN(NN):
         return self._afn[i](c)
     def forward(self,c):
         for i in range(len(self.nh)):
-            c = self.layer_forward(c)
+            c = self.layer_forward(c,i)
         if len(self.afn)==len(self.nh)+1:
             c = self._afn[-1](c)
         if 'wf' in self.params:
@@ -703,8 +703,7 @@ def relu_init_sobol(nx,ny,xmax,eps):
     x += np.random.normal(loc=0,scale=eps,size=(ny,nx))  
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_grid(nx,ny,xmax,eps):
-    ndiv = ny // nx + 1
+def relu_init_grid(nx,ndiv,xmax,eps):
     w = []
     b = []
     for i in range(nx):
