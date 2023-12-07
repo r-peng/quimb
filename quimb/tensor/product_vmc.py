@@ -265,7 +265,7 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class NN(AmplitudeFactory):
-    def __init__(self,backend='numpy',log=True,phase=False,cinput=False,fermion=False,to_spin=True,order='F'):
+    def __init__(self,backend='numpy',log=True,phase=False,cinput=False,det=False,fermion=False,to_spin=True,order='F'):
         self.backend = backend
         self.set_backend(backend)
         self.log = log # if output is amplitude or log amplitude 
@@ -280,6 +280,7 @@ class NN(AmplitudeFactory):
 
         self.fermion = fermion
         self.cinput = cinput
+        self.det = det
         self.params = dict()
         self.param_keys = []
         self.sh = dict()
@@ -378,15 +379,23 @@ class NN(AmplitudeFactory):
         for i,ci in enumerate(config):
             c[i,ci] = 1
         return self.jnp.sum(x*c,axis=1)
+    def input_determinant(self,config):
+        ls = [None] * 2
+        for ix,c in enumerate(config_to_ab(config)):
+            ls[ix] = np.where(c)[0]
+        c = np.concatenate(ls) 
+        return c/len(config)
     def input(self,config):
         if self.cinput:
             return self.input_continous(config)
         if self.fermion:
+            if self.det:
+                return self.input_determinant(config)
             if self.to_spin:
                 ca,cb = config_to_ab(config) 
                 config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
             else:
-                return np.array(config,dtype=float)
+                return np.array(config,dtype=float) 
         else:
             config = np.array(config,dtype=float)
         #return -(config * 2 - 1)
@@ -564,12 +573,14 @@ class FNN(NN):
     def set_backend(self,backend):
         super().set_backend(backend)
         self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
+    def layer_forward(self,c,i):
+        c = self.jnp.matmul(c,self.params[i,'w'])    
+        if (i,'b') in self.params:
+            c = c + self.params[i,'b']
+        return self._afn[i](c)
     def forward(self,c):
         for i in range(len(self.nh)):
-            c = self.jnp.matmul(c,self.params[i,'w'])    
-            if (i,'b') in self.params:
-                c = c + self.params[i,'b']
-            c = self._afn[i](c)
+            c = self.layer_forward(c)
         if len(self.afn)==len(self.nh)+1:
             c = self._afn[-1](c)
         if 'wf' in self.params:
@@ -652,3 +663,58 @@ class LRelu(FNN):
         if 'wf' in self.params:
             return self.jnp.matmul(c,self.params['wf'])
         return self.jnp.sum(c)
+def rotate(x,eps):
+    nx = len(x)
+    K = np.random.normal(loc=0,scale=eps,size=(nx,nx))
+    U = scipy.linalg.expm(K-K.T)
+    return np.dot(U,x) 
+def compute_colinear(w,ny=None,eps=0,cos_max=.9,thresh=1e-6):
+    ny = w.shape[0] if ny is None else ny
+    nx = w.shape[1]
+    nc = 0
+    ls = []
+    for i in range(w.shape[0]):
+        if len(ls)==ny:
+            break
+        norm = np.linalg.norm(w[i,:]) 
+        if norm < thresh:
+            continue
+        wi = rotate(w[i,:] / norm,eps)
+        for wj in ls:
+            if np.fabs(np.dot(wi,wj)) > cos_max:
+                nc += 1
+        ls.append(wi)
+    print('collinear ratio=',nc/(ny*(ny-1)/2))
+    return np.array(ls) 
+def relu_init_rand(nx,ny,xmax):
+    w = np.random.rand(ny,nx) * 2 - 1
+    w = compute_colinear(w)
+    x = np.random.rand(ny,nx) * xmax 
+    b = np.sum(w*x,axis=1) 
+    return w,b
+def relu_init_sobol(nx,ny,xmax,eps):
+    import qmcpy
+    sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
+    m = int(np.log2(ny*2)) + 1
+    p = sampler.gen_samples(2**m) 
+    w = p * 2 - 1
+    w = compute_colinear(w[ny:,],ny=ny,eps=eps)
+    x = p[:ny] * xmax
+    x += np.random.normal(loc=0,scale=eps,size=(ny,nx))  
+    b = np.sum(w*x,axis=1) 
+    return w,b
+def relu_init_grid(nx,ny,xmax,eps):
+    ndiv = ny // nx + 1
+    w = []
+    b = []
+    for i in range(nx):
+        wi = np.zeros(nx)
+        wi[i] = 1
+        for n in range(ndiv):
+            w.append(rotate(wi,eps))
+
+            x = np.random.normal(loc=0,scale=eps,size=nx)
+            x[i] += n * xmax / ndiv
+ 
+            b.append(np.dot(w[-1],x))
+    return np.array(w),np.array(b)
