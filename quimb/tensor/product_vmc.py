@@ -719,10 +719,25 @@ def relu_init_grid(nx,ndiv,xmin,xmax,eps):
  
             b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
-#def relu_init_quad(nx,ndiv,xmax,eps):
-#    # generate ndiv * nx * (nx-1) / 2 plaines
-#    w = []
-#    b = [] 
-#    for i in range(nx):
-#        for j in range(i):
-#
+def relu_init_quad(nx,ndiv,xmax,eps):
+    # generate ndiv * nx * (nx-1) / 2 plaines
+    w = []
+    b = [] 
+    dtheta = np.pi / ndiv
+    for i in range(nx):
+        for j in range(i):
+            theta0 = np.random.normal(loc=0,scale=np.pi)
+            for n in range(ndiv):
+                theta = theta0 + dtheta * n 
+                wi = np.zeros(nx) 
+                wi[i] = np.cos(theta)
+                wi[j] = np.sin(theta)
+                w.append(rotate(wi,eps))
+           
+                x = np.random.normal(loc=0,scale=eps*xmax,size=nx)
+                x[i] += xmax / 2
+                x[j] += xmax / 2
+
+                b.append(np.dot(w[-1],x))
+    return np.array(w),np.array(b)
+
