@@ -398,9 +398,6 @@ class NN(AmplitudeFactory):
                 return np.array(config,dtype=float) 
         else:
             config = np.array(config,dtype=float)
-        #return -(config * 2 - 1)
-        #print(config * 2 - 1)
-        #exit()
         return config * 2 - 1
     def log_prob(self,config):
         if self.phase:
@@ -686,20 +683,23 @@ def compute_colinear(w,ny=None,eps=0,cos_max=.9,thresh=1e-6):
         ls.append(wi)
     print('collinear ratio=',nc/(ny*(ny-1)/2))
     return np.array(ls) 
-def relu_init_rand(nx,ny,xmax):
+def relu_init_rand(nx,ny,xmin,xmax,eps=None):
     w = np.random.rand(ny,nx) * 2 - 1
     w = compute_colinear(w)
-    x = np.random.rand(ny,nx) * xmax 
+    if eps is None:
+        x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
+    else:
+        x = np.random.normal(loc=(xmin+xmax)/2,scale=eps,size=(ny,nx)) 
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_sobol(nx,ny,xmax,eps):
+def relu_init_sobol(nx,ny,xmin,xmax,eps):
     import qmcpy
     sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
     m = int(np.log2(ny*2)) + 1
     p = sampler.gen_samples(2**m) 
     w = p * 2 - 1
     w = compute_colinear(w[ny:,],ny=ny,eps=eps)
-    x = p[:ny] * xmax
+    x = p[:ny] * (xmax - xmin) + xmin
     x += np.random.normal(loc=0,scale=eps,size=(ny,nx))  
     b = np.sum(w*x,axis=1) 
     return w,b
@@ -719,11 +719,12 @@ def relu_init_grid(nx,ndiv,xmin,xmax,eps):
  
             b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
-def relu_init_quad(nx,ndiv,xmax,eps):
+def relu_init_quad(nx,ndiv,xmin,xmax,eps):
     # generate ndiv * nx * (nx-1) / 2 plaines
     w = []
     b = [] 
     dtheta = np.pi / ndiv
+    center = (xmin + xmax) / 2 
     for i in range(nx):
         for j in range(i):
             theta0 = np.random.normal(loc=0,scale=np.pi)
@@ -735,8 +736,8 @@ def relu_init_quad(nx,ndiv,xmax,eps):
                 w.append(rotate(wi,eps))
            
                 x = np.random.normal(loc=0,scale=eps*xmax,size=nx)
-                x[i] += xmax / 2
-                x[j] += xmax / 2
+                x[i] += center 
+                x[j] += center 
 
                 b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
