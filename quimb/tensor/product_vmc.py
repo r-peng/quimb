@@ -681,7 +681,8 @@ def compute_colinear(w,ny=None,eps=0,cos_max=.9,thresh=1e-6):
             if np.fabs(np.dot(wi,wj)) > cos_max:
                 nc += 1
         ls.append(wi)
-    print('collinear ratio=',nc/(ny*(ny-1)/2))
+    if RANK==0:
+        print('collinear ratio=',nc/(ny*(ny-1)/2))
     return np.array(ls) 
 def relu_init_rand(nx,ny,xmin,xmax,eps=None):
     w = np.random.rand(ny,nx) * 2 - 1
