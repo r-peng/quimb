@@ -703,9 +703,11 @@ def relu_init_sobol(nx,ny,xmax,eps):
     x += np.random.normal(loc=0,scale=eps,size=(ny,nx))  
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_grid(nx,ndiv,xmax,eps):
+def relu_init_grid(nx,ndiv,xmin,xmax,eps):
+    # generate ndiv * nx plaines
     w = []
     b = []
+    dx = (xmax - xmin) / ndiv
     for i in range(nx):
         wi = np.zeros(nx)
         wi[i] = 1
@@ -713,7 +715,14 @@ def relu_init_grid(nx,ndiv,xmax,eps):
             w.append(rotate(wi,eps))
 
             x = np.random.normal(loc=0,scale=eps,size=nx)
-            x[i] += n * xmax / ndiv
+            x[i] += n * dx + xmin
  
             b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
+#def relu_init_quad(nx,ndiv,xmax,eps):
+#    # generate ndiv * nx * (nx-1) / 2 plaines
+#    w = []
+#    b = [] 
+#    for i in range(nx):
+#        for j in range(i):
+#
