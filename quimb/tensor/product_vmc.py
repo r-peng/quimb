@@ -756,6 +756,5 @@ def relu_init_spin(nx,eps,eps_init=None):
     for i in range(nx):
         w.append(rotate(U[i,:],eps))
         x = np.random.normal(loc=0,scale=eps,size=nx)
-        print(x)
         b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
