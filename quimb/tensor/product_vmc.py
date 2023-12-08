@@ -715,7 +715,7 @@ def relu_init_grid(nx,ndiv,xmin,xmax,eps):
             w.append(rotate(wi,eps))
 
             x = np.random.normal(loc=0,scale=eps,size=nx)
-            x[i] += n * dx + xmin
+            x[i] += n * dx + xmin + dx / 2
  
             b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
