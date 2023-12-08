@@ -293,8 +293,8 @@ class NN(AmplitudeFactory):
             if fermion:
                 self.to_spin = to_spin
                 self.order = order
-            #else:
-            #    self.to_spin = False
+            else:
+                self.to_spin = False
     def init(self,key,eps,loc=0,iprint=False,normal=True):
         if normal:
             tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
@@ -347,9 +347,12 @@ class NN(AmplitudeFactory):
         self.sh = dict()
         f = h5py.File(fname,'r')
         for key in self.param_keys:
-            tsr = f[str(key)][:]
-            self.params[key] = tsr 
-            self.sh[key] = tsr.shape
+            try:
+                tsr = f[str(key)][:]
+                self.params[key] = tsr 
+                self.sh[key] = tsr.shape
+            except:
+                continue
         f.close()
         return self.params
     def save_to_disc(self,fname,root=0):
