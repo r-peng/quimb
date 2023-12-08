@@ -745,4 +745,17 @@ def relu_init_quad(nx,ndiv,xmin,xmax,eps):
 
                 b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
-
+def relu_init_spin(nx,eps,eps_init=None):
+    if eps_init is None:
+        K = np.random.rand(nx,nx)
+    else:
+        K = np.random.normal(loc=0,scale=eps_init,size=(nx,nx))
+    U = scipy.linalg.expm(K-K.T)
+    w = []
+    b = []
+    for i in range(nx):
+        w.append(rotate(U[i,:],eps))
+        x = np.random.normal(loc=0,scale=eps,size=nx)
+        print(x)
+        b.append(np.dot(w[-1],x))
+    return np.array(w),np.array(b)
