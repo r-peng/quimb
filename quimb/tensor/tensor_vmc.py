@@ -255,12 +255,14 @@ class SGD: # stochastic sampling
         self.progbar = False
         self.save_local = False
         self.save_grad_hess = False
+        self.free_g = True
     def free_quantities(self):
         if RANK==0: 
             self.Eold = self.E
         self.f = None
         self.e = None
-        self.g = None
+        if self.free_g:
+            self.g = None
         self.v = None
         self.vmean = None
         self.Hv = None
@@ -479,14 +481,12 @@ class SGD: # stochastic sampling
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
         evmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
-        self.g = None
-        self.vsum = None
-        self.evsum = None
-        if RANK==0:
-            vmean /= self.n
-            evmean /= self.n
-            self.g = (evmean - self.E.conj() * vmean).real
-            self.vmean = vmean
+        if RANK>0:
+            return
+        vmean /= self.n
+        evmean /= self.n
+        self.g = (evmean - self.E.conj() * vmean).real
+        self.vmean = vmean
     def update(self,rate):
         x = self.sampler.af.get_x()
         return self.normalize(x - rate * self.deltas)
@@ -769,7 +769,10 @@ class SR(SGD):
                 return 0 
         return matvec
     def transform_gradients(self):
-        return self._transform_gradients_sr(self.solve_full,self.solve_dense)
+        deltas = self._transform_gradients_sr(self.solve_full,self.solve_dense)
+        if RANK>0:
+            return deltas
+        return self.update(self.rate1)
     def _transform_gradients_sr(self,solve_full,solve_dense):
         self.extract_S(solve_full,solve_dense)
         if solve_dense:
@@ -808,7 +811,7 @@ class SR(SGD):
             f.create_dataset('g',data=self.g) 
             f.create_dataset('deltas',data=self.deltas) 
             f.close()
-        return self.update(self.rate1)
+        return self.deltas
     def _transform_gradients_sr_iterative(self,solve_full):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full: 
@@ -816,15 +819,14 @@ class SR(SGD):
                 return self.S(x) + self.cond1 * x
             self.deltas = self.solve_iterative(R,g,True,x0=g)
         else:
-            self.deltas = np.empty(self.nparam,dtype=self.dtype)
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
             for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
                 def R(x):
                     return self.S[ix](x) + self.cond1 * x
                 self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
-        if RANK==0:
-            return self.update(self.rate1)
-        else:
-            return np.zeros(self.nparam,dtype=self.dtype_i)
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)  
+        return self.deltas
     def solve_iterative(self,A,b,symm,x0=None):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)
@@ -1079,6 +1081,94 @@ class RGN(SR):
             return - np.dot(self.g,self.deltas) + .5 * dE
         else:
             return 0. 
+class lBFGS(SR):
+    def __init__(self,sampler,npairs=(5,50),gamma_method=1,**kwargs):
+        super().__init__(sampler,**kwargs) 
+        if RANK>0:
+            return
+        self.npairs = npairs
+        self.gamma_method = gamma_method
+        self.xdiff = []
+        self.gdiff = []
+        self.g = None
+        self.free_g = False 
+    def extract_gradient(self):
+        vmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
+        evmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        vmean /= self.n
+        evmean /= self.n
+        g = (evmean - self.E.conj() * vmean).real
+        self.vmean = vmean
+        if self.g is not None:
+            self.gdiff.append(g - self.g)
+            if len(self.gdiff)>self.npairs[1]:
+                self.gdiff.pop(0) 
+        self.g = g 
+    def transform_gradients(self):
+        method = np.array([0])
+        if RANK==0:
+            assert len(self.xdiff)==len(self.gdiff)
+            if len(self.xdiff)>=self.npairs[0]:
+                method[0] = 1
+        COMM.Bcast(method,root=0)
+
+        if method[0] == 0:
+            self._transform_gradients_sr(self.solve_full,self.solve_dense)
+        else:
+            self._transform_gradients_lbfgs(self.solve_full,self.solve_dense)
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)
+        self.xdiff.append(-self.deltas)
+        if len(self.xdiff)>self.npairs[1]:
+            self.xdiff.pop(0)
+        x = self.sampler.af.get_x()
+        return x - self.deltas 
+    def _transform_gradients_lbfgs(self,solve_full,solve_dense):
+        self.extract_S(solve_full,solve_dense)
+        if solve_dense:
+            raise NotImplementedError
+            return self._transform_gradients_sr_dense(solve_full)
+        else:
+            return self._transform_gradients_lbfgs_iterative(solve_full)
+    def _transform_gradients_lbfgs_iterative(self,solve_full):
+        g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
+        if RANK==0:
+            gamma = self.compute_gamma() 
+            print('gamma=',gamma)
+            S = np.array(self.xdiff).T
+            Y = np.array(self.gdiff).T
+            SY = np.dot(S.T,Y) 
+            L = np.tril(SY,k=-1)
+            D = np.diag(np.diag(SY))
+            M = np.linalg.inv(np.block([[-np.dot(S.T,S)*gamma,-L],[-L.T,D]]))
+            Phi = np.concatenate([gamma * S,Y],axis=1)
+        if solve_full: 
+            def R(x):
+                Rx = self.S(x) + self.cond1 * x
+                if RANK>0:
+                    return Rx
+                Bs = gamma * x + np.dot(Phi,np.dot(M,np.dot(Phi.T,x)))
+                return Bs + Rx / self.rate1 
+            self.deltas = self.solve_iterative(R,g,True,x0=g)
+        else:
+            raise NotImplementedError
+            self.deltas = np.empty(self.nparam,dtype=self.dtype_i)
+            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
+                def R(x):
+                    return self.S[ix](x) + self.cond1 * x
+                self.deltas[strt:stop] = self.solve_iterative(R,g[start:stop],True,x0=g[start:stop])
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i)  
+        return self.update(self.rate1)
+    def compute_gamma(self):
+        if self.gamma_method==1:
+            sk = self.xdiff[-1]
+            yk = self.gdiff[-1]
+        return max(np.dot(yk,yk)/np.dot(sk,yk),1)
 class TrustRegion:
     def minimize_iterative(self,update,_apply,x0):
         self.terminate = np.array([0])
