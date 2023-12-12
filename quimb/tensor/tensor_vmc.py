@@ -1118,6 +1118,7 @@ class lBFGS(SR):
 
         if method[0] == 0:
             self._transform_gradients_sr(self.solve_full,self.solve_dense)
+            self.deltas *= self.rate1
         else:
             self._transform_gradients_lbfgs(self.solve_full,self.solve_dense)
         if RANK>0:
