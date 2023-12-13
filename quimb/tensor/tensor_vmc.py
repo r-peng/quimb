@@ -232,7 +232,6 @@ class SGD: # stochastic sampling
         # parse wfn 
         self.nsite = self.sampler.af.nsite
         x = self.sampler.af.get_x()
-        self.nparam = len(x) 
         self.dtype_i = x.dtype
         self.dtype_o = dtype_o
         self.init_norm = None
@@ -265,8 +264,11 @@ class SGD: # stochastic sampling
             self.g = None
         self.v = None
         self.vmean = None
+        self.vsum = None
+        self.evsum = None
         self.Hv = None
         self.Hvmean = None
+        self.Hvsum = None
         self.S = None
         self.H = None
         self.Sx1 = None
@@ -282,6 +284,9 @@ class SGD: # stochastic sampling
         self.Eold = None 
         for step in range(start,stop):
             self.step = step
+            self.nparam = self.sampler.af.nparam
+            if RANK==0:
+                print('nparam=',self.nparam)
             self.sample()
             self.extract_energy_gradient()
             x = self.transform_gradients()

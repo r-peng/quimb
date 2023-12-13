@@ -65,11 +65,13 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         self.block_dict = self.af[0].block_dict.copy()
         for af,shift in zip(self.af[1:],self.sections):
             self.block_dict += [(start+shift,stop+shift) for start,stop in af.block_dict]
+        self.nparam = sum(self.nparam)
     def update(self,x,fname=None,root=0):
         x = np.split(x,self.sections)
         for ix,af in enumerate(self.af):
             fname_ = None if fname is None else fname+f'_{ix}' 
             af.update(x[ix],fname=fname_,root=root)
+        self.get_sections()
     def set_config(self,config,compute_v):
         self.config = config 
         self.cx = dict()
@@ -308,7 +310,8 @@ class NN(AmplitudeFactory):
     def get_block_dict(self):
         self.block_dict = []
         start = 0
-        for key in self.param_keys:
+        keys = self.param_keys if self.change_layer_every is None else self.layer_keys[self.lcurr]
+        for key in keys:
             stop = start + self.params[key].size
             self.block_dict.append((start,stop))
             start = stop
@@ -332,10 +335,15 @@ class NN(AmplitudeFactory):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
         for key in self.param_keys:
-            self.params[key] = tensor2backend(self.params[key],backend,requires_grad=requires_grad)
+            if self.change_layer_every is None:
+                grad = requires_grad
+            else:
+                grad = requires_grad if key in self.layer_keys[self.lcurr] else False
+            self.params[key] = tensor2backend(self.params[key],backend,requires_grad=grad)
     def get_x(self,grad=False):
         ls = []
-        for key in self.param_keys:
+        keys = self.param_keys if self.change_layer_every is None else self.layer_keys[self.lcurr]
+        for key in keys:
             tsr = self.params[key]
             if grad:
                 tsr = self.tensor_grad(tsr)
@@ -351,6 +359,8 @@ class NN(AmplitudeFactory):
                 tsr = f[str(key)][:]
                 self.params[key] = tsr 
                 self.sh[key] = tsr.shape
+                if self.change_layer_every is not None:
+                    self.layer_keys[i].append(key)
             except:
                 continue
         f.close()
@@ -363,13 +373,24 @@ class NN(AmplitudeFactory):
             f.create_dataset(str(key),data=self.params[key]) 
         f.close()
     def update(self,x,fname=None,root=0):
-        for i,key in enumerate(self.param_keys):
+        if self.change_layer_every is None: 
+            keys = self.param_keys 
+        else:
+            keys = self.layer_keys[self.lcurr]
+            if RANK==0:
+                print('update layer=',self.lcurr) 
+        for i,key in enumerate(keys):
             start,stop = self.block_dict[i]
             size = stop - start
             xi,x = x[:size],x[size:]
             self.params[key] = xi.reshape(self.sh[key])
         if fname is not None:
             self.save_to_disc(fname,root=root) 
+        if self.change_layer_every is not None:
+            self.nstep = (self.nstep + 1) % self.change_layer_every
+            if self.nstep==0:
+                self.lcurr = (self.lcurr + 1) % len(self.nh)
+            self.get_block_dict()
         self.wfn2backend()
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
@@ -493,6 +514,7 @@ class RBM(NN):
         self.sh.update({'a':(self.nv,),
                         'b':(self.nh,),
                         'w':(self.nv,self.nh)})
+        self.change_layer_every = None 
     def forward(self,c): # NN output
         a = self.params['a']
         b = self.params['b']
@@ -500,19 +522,26 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.afn = afn 
         self.scale = scale
         self.bias = bias
         super().__init__(**kwargs)
 
+        self.change_layer_every = change_layer_every
+        if change_layer_every is not None:
+            self.lcurr = 0
+            self.nstep = 0
+            self.layer_keys = [[] for i in range(len(nh))]
         for i in range(len(nh)):
             self.set_layer(i)
         if wf:
             key = 'wf'
             self.param_keys.append(key)
             self.sh[key] = nh[-1],nf
+            if self.change_layer_every is not None: # group with final layer
+                self.layer_keys[len(nh)-1].append(key)
         if len(afn)==len(nh):
             pass
         elif len(afn)==len(nh)+1:
@@ -524,11 +553,15 @@ class FNN(NN):
         self.param_keys.append(key)
         sh1 = self.nv if i==0 else self.nh[i-1]
         self.sh[key] = sh1,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
         if not self.bias:
             return
         key = i,'b'
         self.param_keys.append(key)
         self.sh[key] = self.nh[i],
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
     def get_layer_afn(self,i):
         afn = self.afn[i]
         # unsaturating 
