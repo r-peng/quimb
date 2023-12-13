@@ -267,7 +267,7 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class NN(AmplitudeFactory):
-    def __init__(self,backend='numpy',log=True,phase=False,cinput=False,det=False,fermion=False,to_spin=True,order='F'):
+    def __init__(self,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
         self.backend = backend
         self.set_backend(backend)
         self.log = log # if output is amplitude or log amplitude 
@@ -281,22 +281,17 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        self.cinput = cinput
-        self.det = det
+        assert input_format in ('continuous','det','fermion',(0,1),(-1,1))
+        self.input_format = input_format
+        self.order = order
         self.params = dict()
         self.param_keys = []
         self.sh = dict()
-        if cinput:
+        if input_format=='continous':
             key = 'in'
             self.param_keys.append(key)
             sh = 4 if fermion else 2
             self.sh[key] = self.nv,sh 
-        else:
-            if fermion:
-                self.to_spin = to_spin
-                self.order = order
-            else:
-                self.to_spin = False
     def init(self,key,eps,loc=0,iprint=False,normal=True):
         if normal:
             tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
@@ -324,7 +319,7 @@ class NN(AmplitudeFactory):
         else:
             tsr = torch.zeros(1)
             self.jnp = torch
-            if self.cinput:
+            if self.input_format=='continous':
                 self._input = self.input
             else:
                 def _input(config):
@@ -410,19 +405,17 @@ class NN(AmplitudeFactory):
         c = np.concatenate(ls) 
         return c/len(config)
     def input(self,config):
-        if self.cinput:
+        if self.input_format=='continous':
             return self.input_continous(config)
+        if self.input_format=='det':
+            return self.input_determinant(config)
+        if self.input_format=='fermion':
+            return np.array(config,dtype=float) 
         if self.fermion:
-            if self.det:
-                return self.input_determinant(config)
-            if self.to_spin:
-                ca,cb = config_to_ab(config) 
-                config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
-            else:
-                return np.array(config,dtype=float) 
-        else:
-            config = np.array(config,dtype=float)
-        return config * 2 - 1
+            ca,cb = config_to_ab(config) 
+            config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+        xmin,xmax = self.input_format
+        return config * (xmax-xmin) + xmin 
     def log_prob(self,config):
         if self.phase:
             return 1
@@ -720,13 +713,17 @@ def compute_colinear(w,ny=None,eps=0,cos_max=.9,thresh=1e-6):
     if RANK==0:
         print('collinear ratio=',nc/(ny*(ny-1)/2))
     return np.array(ls) 
-def relu_init_rand(nx,ny,xmin,xmax,eps=None):
+def relu_init_rand(nx,ny,xmin,xmax):
     w = np.random.rand(ny,nx) * 2 - 1
     w = compute_colinear(w)
-    if eps is None:
-        x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
-    else:
-        x = np.random.normal(loc=(xmin+xmax)/2,scale=eps,size=(ny,nx)) 
+    x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
+    b = np.sum(w*x,axis=1) 
+    return w,b
+def relu_init_normal(nx,ny,xmin,xmax,eps):
+    w = np.array([np.random.normal(loc=0,scale=eps,size=nx) for _ in range(ny)])
+    w = compute_colinear(w)
+    loc = (xmin+xmax) / 2 
+    x = np.array([np.random.normal(loc=loc,scale=eps,size=nx) for _ in range(ny)])
     b = np.sum(w*x,axis=1) 
     return w,b
 def relu_init_sobol(nx,ny,xmin,xmax,eps):
