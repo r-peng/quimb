@@ -1,6 +1,5 @@
 import numpy as np
-import itertools
-import scipy
+import itertools,pickle,scipy
 #####################################################
 # for separate ansatz
 #####################################################
@@ -387,6 +386,12 @@ class NN(AmplitudeFactory):
                 self.lcurr = (self.lcurr + 1) % len(self.nh)
             self.get_block_dict()
         self.wfn2backend()
+        if self.act_pattern is None:
+            return 
+        for i,amap in enumerate(self.act_pattern):
+            with open(fname+f'l{i}RANK{RANK}.pkl','wb') as f:
+                pickle.dump(amap,f) 
+        self.act_pattern = [dict() for _ in self.afn] 
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
             return pair_terms(i1,i2,spin) 
@@ -419,29 +424,26 @@ class NN(AmplitudeFactory):
     def log_prob(self,config):
         if self.phase:
             return 1
-        c = self._input(config)
-        c = self.forward(c)
-        c = tensor2backend(c,'numpy') 
+        cx = self.forward(config)
+        cx = tensor2backend(cx,'numpy') 
         if self.log:
-            return 2 * c 
+            return 2 * cx 
         else:
-            return np.log(c**2) 
+            return np.log(cx**2) 
     def amplitude(self,config,to_numpy=True):
-        c = self._input(config)
-        c = self.forward(c)
+        cx = self.forward(config)
         if self.log:
-            logc = c
+            logcx = cx
             if self.phase:
-                loc = 1j*logc
-            c = self.jnp.exp(logc)
+                logcx = 1j*logcx
+            cx = self.jnp.exp(logcx)
         if to_numpy:
-            c = tensor2backend(c,'numpy')
-        return c 
+            cx = tensor2backend(cx,'numpy')
+        return cx
     def batch_pair_energies(self,batch_key,new_cache):
         spins = ('a','b') if self.fermion else (None,)
 
-        config = self._input(self.config)
-        cx = self.forward(config)
+        cx = self.forward(self.config)
         if self.log:
             logcx = cx 
             if self.phase: 
@@ -465,7 +467,6 @@ class NN(AmplitudeFactory):
                 config_new = list(self.config)
                 config_new[ix1] = i1_new
                 config_new[ix2] = i2_new 
-                config_new = self._input(config_new)
                 cx_new = self.forward(config_new) 
                 if self.log:
                     logcx_new = cx_new
@@ -483,7 +484,6 @@ class NN(AmplitudeFactory):
             cx = self.cx.get('deterministic',None)
             return cx,self.vx
         self.wfn2backend(backend='torch',requires_grad=True)
-        config = self._input(config)
         cx = self.forward(config) 
         cx,self.vx = self.propagate(cx) 
         if self.log:
@@ -515,9 +515,10 @@ class RBM(NN):
         c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
         return c
 class FNN(NN):
-    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,**kwargs):
+    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,act_pattern=False,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
         self.afn = afn 
+        self.act_pattern = [dict() for _ in afn] if act_pattern else None 
         self.scale = scale
         self.bias = bias
         super().__init__(**kwargs)
@@ -604,14 +605,25 @@ class FNN(NN):
         if (i,'b') in self.params:
             c = c + self.params[i,'b']
         return self._afn[i](c)
-    def forward(self,c):
+    def add_act_pattern(self,y,i,config):
+        if self.act_pattern is None:
+            return   
+        y = tensor2backend(y,'numpy')
+        key = tuple(np.nonzero(y > 1e-10)[0])
+        if key not in self.act_pattern[i]:
+            self.act_pattern[i][key] = set() 
+        self.act_pattern[i][key].add(tuple(config))
+        return y
+    def forward(self,config):
+        y = self._input(config)
         for i in range(len(self.nh)):
-            c = self.layer_forward(c,i)
+            y = self.layer_forward(y,i)
+            self.add_act_pattern(y,i,config)
         if len(self.afn)==len(self.nh)+1:
-            c = self._afn[-1](c)
+            y = self._afn[-1](y)
         if 'wf' in self.params:
-            return self.jnp.matmul(c,self.params['wf'])
-        return self.jnp.sum(c)
+            return self.jnp.matmul(y,self.params['wf'])
+        return self.jnp.sum(y)
 class LCFNN(FNN):
     def __init__(self,nv,nh,afn,nbasis,**kwargs):
         self.nbasis = nbasis
