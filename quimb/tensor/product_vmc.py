@@ -318,7 +318,7 @@ class NN(AmplitudeFactory):
             self.jnp = torch
             def _input(config):
                 return tensor2backend(self.input(config),backend) 
-                self._input = _input
+            self._input = _input
         ar.set_backend(tsr)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
