@@ -128,6 +128,7 @@ class Sampler:
         n = 0
         e = []
         w = []
+        t0 = time.time()
         while True:
             if n>= self.ntot:
                 break
@@ -137,6 +138,7 @@ class Sampler:
             n += 1
             if self.progbar:
                 pg.update()
+        print('sample time=',time.time()-t0)
 
         # compute energy
         self.step += 1
