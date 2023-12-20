@@ -40,7 +40,7 @@ def get_parity_cum(fpeps):
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
 class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D): 
-    def __init__(self,psi,model,blks=None,spinless=False,spin=None,backend='numpy',pbc=False,from_plq=True,deterministic=False,symmetry='u1',flat=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,spinless=False,spin=None,backend='numpy',pbc=False,from_plq=True,dmc=False,deterministic=False,symmetry='u1',flat=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
@@ -56,7 +56,8 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
         self.data_map = self.get_data_map()
 
         self.model = model
-        self.from_plq = from_plq
+        self.dmc = dmc
+        self.from_plq = False if dmc else from_plq
         self.backend = backend
         self.wfn2backend()
 

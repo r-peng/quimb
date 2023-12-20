@@ -2,10 +2,6 @@ import time,scipy,functools,h5py,gc
 import numpy as np
 import scipy.sparse.linalg as spla
 import scipy.optimize as opt
-#from scipy.optimize.optimize import (
-#    _line_search_wolfe12,
-#    _LineSearchError,
-#)
 from .tfqmr import tfqmr
 
 from quimb.utils import progbar as Progbar
@@ -175,7 +171,8 @@ def _select_eigenvector(w,v):
     v = v[1:,idx]/v[0,idx]
     #v = v[1:,idx]/np.sign(v[0,idx])
     return w[idx],v,idx
-def blocking_analysis(weights, energies, neql, printQ=False):
+def blocking_analysis(energies, weights=None, neql=0, printQ=True):
+    weights = np.ones_like(energies) if weights is None else weights
     nSamples = weights.shape[0] - neql
     weights = weights[neql:]
     energies = energies[neql:]
@@ -286,7 +283,7 @@ class SGD: # stochastic sampling
             self.step = step
             self.nparam = self.sampler.af.nparam
             if RANK==0:
-                print('nparam=',self.nparam)
+                print('\nnparam=',self.nparam)
             self.sample()
             self.extract_energy_gradient()
             x = self.transform_gradients()
@@ -480,7 +477,7 @@ class SGD: # stochastic sampling
             self.Eerr = 0.
         else:
             self.n = len(self.e)
-            self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
+            self.E,self.Eerr = blocking_analysis(self.e,weights=self.f)
     def extract_gradient(self):
         vmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
@@ -588,7 +585,7 @@ class SGD: # stochastic sampling
 
             self.e = np.concatenate(self.e)
             self.f = np.ones_like(self.e)
-            self.E,self.Eerr = blocking_analysis(self.f,self.e,0,True)
+            self.E,self.Eerr = blocking_analysis(self.e,weights=self.f)
             self.n = len(self.e)
 
             vmean /= self.n
@@ -1681,7 +1678,7 @@ class DenseSampler:
 class ExchangeSampler:
     def preprocess(self):
         self._burn_in()
-    def _burn_in(self,config=None,burn_in=None):
+    def _burn_in(self,config=None,burn_in=None,progbar=False):
         if config is not None:
             self.config = config 
         self.px = self.af.log_prob(self.af.parse_config(self.config))
@@ -1691,8 +1688,13 @@ class ExchangeSampler:
             return 
         t0 = time.time()
         burn_in = self.burn_in if burn_in is None else burn_in
+        pg = None
+        if progbar and RANK==SIZE-1:
+            pg = Progbar(total=burn_in)
         for n in range(burn_in):
             self.config,self.omega = self.sample()
+            if pg is not None:
+                pg.update()
         if RANK==SIZE-1:
             print('\tburn in time=',time.time()-t0)
     def propose_new_pair(self,i1,i2):
@@ -2056,18 +2058,23 @@ class AmplitudeFactory:
         assert ix1<ix2
         i1,i2 = self.config[ix1],self.config[ix2]
         if not self.model.pair_valid(i1,i2): # term vanishes 
-            return {tag:0 for tag in self.model.gate}
+            if self.dmc:
+                return dict()
+            else:
+                return {tag:0 for tag in self.model.gate}
         coeff_comm = self.intermediate_sign(self.config,ix1,ix2) * self.model.pair_coeff(*where)
         ex = dict()
         for i1_new,i2_new,coeff,tag in self.model.pair_terms(i1,i2):
             config_new = list(self.config)
             config_new[ix1] = i1_new
             config_new[ix2] = i2_new 
-            config_new = self.parse_config(tuple(config_new)) 
-            ex[tag] = self.amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False,**kwargs) 
-            if ex[tag] is None:
-                ex[tag] = 0
-            ex[tag] *= coeff_comm * coeff 
+            config_new = tuple(config_new)
+            key = config_new if self.dmc else tag
+            config_new = self.parse_config(config_new) 
+            ex[key] = self.amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False,**kwargs) 
+            if ex[key] is None:
+                ex[key] = 0
+            ex[key] *= coeff_comm * coeff 
         return ex 
     def amplitude2scalar(self):
         self.cx = {key:tensor2backend(cij,'numpy') for key,cij in self.cx.items()}

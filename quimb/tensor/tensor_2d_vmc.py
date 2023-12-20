@@ -430,7 +430,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             return ex,None
 
         cache_bot,cache_top = self.batch_benvs(batch_key,new_cache) 
-        if self.from_plq:
+        if self.from_plq and (not self.dmc):
             # form plqs
             plq = dict()
             for imin,imax,x_bsz,y_bsz in b.plq_types:
@@ -444,8 +444,12 @@ class AmplitudeFactory2D(AmplitudeFactory):
             cij = self.cx[i]
             
             ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
-            for tag,eij in ex_ij.items():
-                ex[where,tag] = eij,cij,eij/cij 
+            if self.dmc:
+                for tag,eij in ex_ij.items():
+                    ex[tag] = eij/cij 
+            else:
+                for tag,eij in ex_ij.items():
+                    ex[where,tag] = eij,cij,eij/cij 
         return ex,None
     def pair_energies_from_plq(self,plq,pairs):
         ex = dict() 
