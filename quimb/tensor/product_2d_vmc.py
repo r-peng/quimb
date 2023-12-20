@@ -18,7 +18,7 @@ class CompoundAmplitudeFactory2D(CompoundAmplitudeFactory):
             if af.is_tn:
                 af.update_cache(config_)
     def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
-        env_prev = [None] * self.naf 
+        env_prev = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
@@ -30,7 +30,7 @@ class CompoundAmplitudeFactory2D(CompoundAmplitudeFactory):
 class ProductAmplitudeFactory2D(ProductAmplitudeFactory,
                                 CompoundAmplitudeFactory2D):
     def get_mid_env(self,config,append='',psi=None):
-        envs = [None] * self.naf 
+        envs = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
@@ -44,29 +44,29 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory,
             cols[ix] = af._contract_cols(cols[ix],js,direction=direction)
         return cols 
     def get_all_envs(self,cols,step,stop=None,inplace=False,direction='col'):
-        cols_new = [None] * self.naf 
-        envs = [None] * self.naf 
+        cols_new = [None] * len(self.af )
+        envs = [None] * len(self.af)
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
             cols_new[ix],envs[ix] = af.get_all_envs(cols[ix],step,stop=stop,inplace=inplace)
         return cols_new,envs
     def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
-        plq = [None] * self.naf 
+        plq = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
             plq[ix] = af._get_plq_forward(j,y_bsz,cols[ix],renvs[ix],direction=direction)
         return plq
     def _get_plq_backward(self,j,y_bsz,cols,lenvs,direction='col'):
-        plq = [None] * self.naf 
+        plq = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
             plq[ix] = af._get_plq_backward(j,y_bsz,cols[ix],lenvs[ix],direction=direction)
         return plq 
     def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None,direction='row'):
-        tn = [None] * self.naf 
+        tn = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue

@@ -20,8 +20,9 @@ def config_to_ab(config):
 def config_from_ab(config_a,config_b):
     return tuple(np.array(config_a) + np.array(config_b) * 2)
 class CompoundAmplitudeFactory(AmplitudeFactory):
-    def __init__(self,af,fermion=False):
+    def __init__(self,af,fermion=False,update=None):
         self.af = af 
+        self._update = tuple(range(len(af))) if update is None else update
         self.Lx,self.Ly = af[0].Lx,af[0].Ly
         self.get_sections()
 
@@ -42,34 +43,34 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         self.flat2site = af[0].flat2site
         self.intermediate_sign = af[0].intermediate_sign
     def extract_grad(self):
-        Hvx = [af.extract_grad() for af in self.af] 
-        return np.concatenate(Hvx) 
+        vx = [self.af[ix].extract_grad() for ix in self._update] 
+        return np.concatenate(vx) 
     def parse_config(self,config):
         if self.fermion:
             ca,cb = config_to_ab(config)
             return [{'a':ca,'b':cb,None:config}[af.spin] for af in self.af]
         else:
-            return [config] * self.naf
+            return [config] * len(self.af)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
-        for af in self.af:
-            af.wfn2backend(backend=backend,requires_grad=requires_grad)
+        for ix in self._update:
+            self.af[ix].wfn2backend(backend=backend,requires_grad=requires_grad)
     def get_x(self):
-        return np.concatenate([af.get_x() for af in self.af])
+        return np.concatenate([self.af[ix].get_x() for ix in self._update])
     def get_sections(self):
-        self.naf = len(self.af)
-        self.nparam = np.array([af.nparam for af in self.af])
+        self.nparam = np.array([self.af[ix].nparam for ix in self._update])
         self.sections = np.cumsum(self.nparam)[:-1]
 
-        self.block_dict = self.af[0].block_dict.copy()
-        for af,shift in zip(self.af[1:],self.sections):
-            self.block_dict += [(start+shift,stop+shift) for start,stop in af.block_dict]
+        self.block_dict = []
+        for i,ix in enumerate(self._update):
+            shift = 0 if i==0 else self.sections[i-1]
+            self.block_dict += [(start+shift,stop+shift) for start,stop in self.af[ix].block_dict]
         self.nparam = sum(self.nparam)
     def update(self,x,fname=None,root=0):
         x = np.split(x,self.sections)
-        for ix,af in enumerate(self.af):
+        for i,ix in enumerate(self._update):
             fname_ = None if fname is None else fname+f'_{ix}' 
-            af.update(x[ix],fname=fname_,root=root)
+            self.af[ix].update(x[i],fname=fname_,root=root)
         self.get_sections()
     def set_config(self,config,compute_v):
         self.config = config 
@@ -84,9 +85,9 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
 class ProductAmplitudeFactory:
     def amplitude(self,config,sign=True,cache_bot=None,cache_top=None,to_numpy=True):
         if cache_bot is None:
-            cache_bot = (None,) * self.naf
+            cache_bot = (None,) * len(self.af)
         if cache_top is None:
-            cache_top = (None,) * self.naf
+            cache_top = (None,) * len(self.af)
         cx = 1 
         for ix,af in enumerate(self.af):
             if af.is_tn:
@@ -98,18 +99,20 @@ class ProductAmplitudeFactory:
             cx = cx * cx_ix
         return cx 
     def get_grad_deterministic(self,config):
-        cx = [None] * self.naf
-        vx = [None] * self.naf 
+        cx = [None] * len(self.af)
+        vx = [None] * len(self._update)
+        for i,ix in enumerate(self._update):
+            cx[ix],vx[i] = af.get_grad_deterministic(config[ix])
         for ix,af in enumerate(self.af):
-            cx[ix],vx[ix] = af.get_grad_deterministic(config[ix])
+            if cx[ix] is not None:
+                continue
+            cx[ix] = af.amplitude(config[ix])
         return np.prod(np.array(cx)),np.concatenate(vx)
     def parse_gradient(self):
-        vx = [None] * self.naf
-        for ix,af in enumerate(self.af):
-            if af.is_tn:
-                vx[ix] = af.dict2vec(af.vx)
-            else:
-                vx[ix] = af.vx
+        vx = [None] * len(self._update) 
+        for i,ix in enumerate(self._update):
+            af = self.af[ix]
+            vx[i] = af.dict2vec(af.vx) if af.is_tn else af.vx
             af.vx = None
             af.cx = None
         return np.concatenate(vx)
@@ -131,8 +134,8 @@ class ProductAmplitudeFactory:
             e = tensor2backend(e,'numpy')
         return e
     def batch_pair_energies(self,batch_key,compute_Hv):
-        ex = [None] * self.naf
-        plq = [None] * self.naf
+        ex = [None] * len(self.af)
+        plq = [None] * len(self.af)
         for ix,af in enumerate(self.af):
             ex[ix],plq[ix] = af.batch_pair_energies(batch_key,compute_Hv)
         return ex,plq
@@ -140,13 +143,13 @@ class ProductAmplitudeFactory:
         for ix,af in enumerate(self.af):
             af.get_grad_from_plq(plq[ix])
     def contraction_error(self):
-        cx,err = np.zeros(self.naf),np.zeros(self.naf)
+        cx,err = np.zeros(len(self.af)),np.zeros(len(self.af))
         for ix,af in enumerate(self.af): 
             cx[ix],err[ix] = contraction_error(af.cx)
         return np.prod(cx),np.amax(err)
     def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
-        py = [None] * self.naf 
-        plq_new = [None] * self.naf
+        py = [None] * len(self.af) 
+        plq_new = [None] * len(self.af)
         for ix,af in enumerate(self.af):
             if af.is_tn:
                 plq_new[ix],py[ix] = af._new_log_prob_from_plq(plq[ix],sites,config_sites[ix],None)
@@ -156,7 +159,7 @@ class ProductAmplitudeFactory:
                 return plq_new,None 
         return plq_new,sum(py)
     def log_prob(self,config):
-        p = [None] * self.naf 
+        p = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             p[ix] = af.log_prob(config[ix])
             if p[ix] is None:
@@ -188,11 +191,11 @@ class SumAmplitudeFactory:
             print(config_i,cx)
     def amplitude(self,config,_sum=True,cache_bot=None,cache_top=None,to_numpy=True,**kwargs):
         if cache_bot is None:
-            cache_bot = (None,) * self.naf
+            cache_bot = (None,) * len(self.af)
         if cache_top is None:
-            cache_top = (None,) * self.naf
+            cache_top = (None,) * len(self.af)
 
-        cx = [0] * self.naf 
+        cx = [0] * len(self.af) 
         for ix,af in enumerate(self.af):
             if af.is_tn:
                 cx[ix] = af.amplitude(config[ix],cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy,**kwargs)
@@ -207,8 +210,8 @@ class SumAmplitudeFactory:
         return self.amplitude(config,**kwargs)
     def get_grad_deterministic(self,config):
         self.wfn2backend(backend='torch',requires_grad=True)
-        cache_bot = [None] * self.naf 
-        cache_top = [None] * self.naf 
+        cache_bot = [None] * len(self.af) 
+        cache_top = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if af.is_tn:
                 cache_bot[ix] = dict() 
@@ -224,8 +227,8 @@ class SumAmplitudeFactory:
             af.cx = None
             af.vx = None
     def batch_pair_energies(self,batch_key,compute_Hv):
-        cache_bot = [None] * self.naf
-        cache_top = [None] * self.naf
+        cache_bot = [None] * len(self.af)
+        cache_top = [None] * len(self.af)
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
@@ -280,17 +283,12 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        assert input_format in ('continuous','det','fermion',(0,1),(-1,1))
+        assert input_format in ('det','fermion',(0,1),(-1,1))
         self.input_format = input_format
         self.order = order
         self.params = dict()
         self.param_keys = []
         self.sh = dict()
-        if input_format=='continous':
-            key = 'in'
-            self.param_keys.append(key)
-            sh = 4 if fermion else 2
-            self.sh[key] = self.nv,sh 
     def init(self,key,eps,loc=0,iprint=False,normal=True):
         if normal:
             tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
@@ -318,11 +316,8 @@ class NN(AmplitudeFactory):
         else:
             tsr = torch.zeros(1)
             self.jnp = torch
-            if self.input_format=='continous':
-                self._input = self.input
-            else:
-                def _input(config):
-                    return tensor2backend(self.input(config),backend) 
+            def _input(config):
+                return tensor2backend(self.input(config),backend) 
                 self._input = _input
         ar.set_backend(tsr)
     def wfn2backend(self,backend=None,requires_grad=False):
@@ -397,12 +392,6 @@ class NN(AmplitudeFactory):
             return pair_terms(i1,i2,spin) 
         else:
             return i2,i1
-    def input_continous(self,config):
-        x = self.params['in']
-        c = self.jnp.zeros_like(x)
-        for i,ci in enumerate(config):
-            c[i,ci] = 1
-        return self.jnp.sum(x*c,axis=1)
     def input_determinant(self,config):
         ls = [None] * 2
         for ix,c in enumerate(config_to_ab(config)):
@@ -410,8 +399,6 @@ class NN(AmplitudeFactory):
         c = np.concatenate(ls) 
         return c/len(config)
     def input(self,config):
-        if self.input_format=='continous':
-            return self.input_continous(config)
         if self.input_format=='det':
             return self.input_determinant(config)
         if self.input_format=='fermion':
@@ -508,12 +495,13 @@ class RBM(NN):
                         'b':(self.nh,),
                         'w':(self.nv,self.nh)})
         self.change_layer_every = None 
-    def forward(self,c): # NN output
+    def forward(self,config): # NN output
+        y = self._input(config)
         a = self.params['a']
         b = self.params['b']
         w = self.params['w']
-        c = self.jnp.dot(a,c) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(c,w) + b)))
-        return c
+        y = self.jnp.dot(a,y) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(y,w) + b)))
+        return y
 class FNN(NN):
     def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,act_pattern=False,**kwargs):
         self.nv,self.nh,self.nf = nv,nh,nf
@@ -800,3 +788,15 @@ def relu_init_spin(nx,eps,eps_init=None):
         x = np.random.normal(loc=0,scale=eps,size=nx)
         b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
+class DeepRNN(NN):
+    def __init__(self,nsite,D,**kwargs):
+        super().__init__(**kargs)
+        for i in range(nsite):
+                 
+            for j in range(i+1):
+                key = 'v',i,j 
+                self.param_keys.append(key)
+                self.sh[key] = self.pdim,D
+    def forward(self,config): 
+        y = self._input(config)
+
