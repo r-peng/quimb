@@ -135,7 +135,8 @@ class Sampler:
             e.append(self.buf[0]) 
             w.append(self.buf[1]) 
             n += 1
-            pg.update()
+            if self.progbar:
+                pg.update()
 
         # compute energy
         self.step += 1
