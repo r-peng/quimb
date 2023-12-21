@@ -823,3 +823,35 @@ class RNN(NN):
                 v = self.jnp.einsum('i,j,ijk->k',v,ls[j],self.params[f'T{i}'][j-1,ci,...]) 
             ls[i] = v
         return sum(v)
+class CNN(NN):
+    def __init__(self,nsite,D,nf=1,**kwargs):
+        super().__init__(**kwargs)
+
+        self.pdim = 4 if self.fermion else 2
+        key = 'in'
+        self.param_keys.append(key)
+        self.sh[key] = nsite,self.pdim,self.pdim 
+
+        if isinstance(D,int):
+            D = (D,)
+        self.D = (self.pdim,) + tuple(D) 
+        Dix = 0
+        i = 0
+        self.init_dim()
+        while True:
+            if self._break():
+                self.sh[key] = self.sh[key][:-1] + (nf,)
+                break 
+            i,Dix,key = self.set_layer(i,Dix,D)
+    def forward(self,config):
+        v = {self.flat2site(i):self.params['in'][i,ci,:] for i,ci in enumerate(config)}
+        self.init_dim()
+        l = 0
+        while True:
+            if self._break():
+                break 
+            l,v = self.layer_forward(l,v)
+        if isinstance(v,dict):
+            v = list(v.values())
+        return v[0]
+            
