@@ -289,6 +289,8 @@ class NN(AmplitudeFactory):
         self.params = dict()
         self.param_keys = []
         self.sh = dict()
+        self.change_layer_every = None 
+        self.act_pattern = None
     def init(self,key,eps,loc=0,iprint=False,normal=True):
         if normal:
             tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
@@ -488,8 +490,8 @@ class NN(AmplitudeFactory):
         return self.get_grad_deterministic(self.config,save=True)[1]
 class RBM(NN):
     def __init__(self,nv,nh,**kwargs):
-        self.nv,self.nh = nv,nh
         super().__init__(**kwargs)
+        self.nv,self.nh = nv,nh
         self.param_keys += ['a','b','w']
         self.sh.update({'a':(self.nv,),
                         'b':(self.nh,),
@@ -504,12 +506,12 @@ class RBM(NN):
         return y
 class FNN(NN):
     def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,act_pattern=False,**kwargs):
+        super().__init__(**kwargs)
         self.nv,self.nh,self.nf = nv,nh,nf
         self.afn = afn 
         self.act_pattern = [dict() for _ in afn] if act_pattern else None 
         self.scale = scale
         self.bias = bias
-        super().__init__(**kwargs)
 
         self.change_layer_every = change_layer_every
         if change_layer_every is not None:
@@ -788,15 +790,36 @@ def relu_init_spin(nx,eps,eps_init=None):
         x = np.random.normal(loc=0,scale=eps,size=nx)
         b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
-class DeepRNN(NN):
-    def __init__(self,nsite,D,**kwargs):
-        super().__init__(**kargs)
-        for i in range(nsite):
-                 
-            for j in range(i+1):
-                key = 'v',i,j 
-                self.param_keys.append(key)
-                self.sh[key] = self.pdim,D
+class RNN(NN):
+    def __init__(self,nsite,D,nf=1,**kwargs):
+        super().__init__(**kwargs)
+        self.nsite = nsite
+        self.D = D
+        self.nf = nf
+        self.pdim = 4 if self.fermion else 2
+        for i in range(1,nsite):
+            key = f'v{i}'
+            self.param_keys.append(key)
+            self.sh[key] = self.pdim,self.pdim,D
+            if i==1:
+                continue
+            key = f'T{i}' 
+            self.param_keys.append(key)
+            self.sh[key] = i-1,self.pdim,D,D,D
+    #def input(self,config):
+    #    array = np.zeros((self.nsite,self.pdim)) 
+    #    for i,ci in enumerate(config):
+    #        array[i,ci] = 1
+    #    return array
     def forward(self,config): 
-        y = self._input(config)
-
+        #y = self._input(config)
+        ls = [None] * len(config)
+        n = 0
+        for i,ci in enumerate(config):
+            if i==0:
+                continue
+            v = self.params[f'v{i}'][config[0],ci,:]
+            for j in range(1,i):
+                v = self.jnp.einsum('i,j,ijk->k',v,ls[j],self.params[f'T{i}'][j-1,ci,...]) 
+            ls[i] = v
+        return sum(v)
