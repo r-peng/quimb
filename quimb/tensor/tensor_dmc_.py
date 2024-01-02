@@ -11,48 +11,93 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 DISCARD = 1e3
 class Walker:
-    def __init__(self,config,weight,tau,gamma,seed=None):
+    def __init__(self,config,weight,tau,shift,scheme,seed=None):
         self.config = config
-        self.weight = weight
-        self.tl = tau
-        self.gamma
+        self.tau = tau
+        self.shift = shift 
 
         self.rng = np.random.default_rng(seed=seed)
-        self.terminate = False
+        self.seed = seed
+        self.weight = weight
+
+        self.scheme = scheme 
     def sample(self,af):
         af.config = self.config 
         af.cx = dict()
+        if self.scheme==1:
+            return self.sample1(af)  
+        elif self.scheme==2:
+            return self.sample2(af)
+        elif self.scheme==3:
+            return self.sample3(af)
+        else:
+            raise NotImplementedError
+    def sample1(self,af):
+        # no fix-node, use abs for p
+        e = {self.config:af.model.compute_local_energy_eigen(self.config)}
+        for batch_key in af.model.batched_pairs:
+           e.update(af.batch_pair_energies(batch_key,False)[0])
 
-        # (a)
-        h = dict()
+        gf = {key:-self.tau * val for key,val in e.items()}
+        gf[self.config] += 1 + self.tau * self.shift
+
+        keys = list(gf.keys())
+        prob = np.array(list(gf.values()))
+        norm = sum(p) 
+        prob = np.fabs(prob)
+        prob /= norm
+        self.config = tuple(self.rng.choice(keys,p=prob))
+
+        w = self.weight
+        e = sum(e.values())
+        self.weight *= np.sign(gf[self.config]) * norm
+        return e,w
+    def sample2(self,af):
+        # An & Leeuwen, Phys.Rev.B,44(1991) 
+        # energy still computed with H itself
+        e = dict()
         u = af.model.compute_local_energy_eigen(self.config)
         for batch_key in af.model.batched_pairs:
-           h.update(af.batch_pair_energies(batch_key,False)[0])
-        e = sum(h.values()) + u
-        vsf = sum([val for val in h.values() if val > 0])
-        ueff = u + (1+self.gamma) * vsf
+           e.update(af.batch_pair_energies(batch_key,False)[0])
 
-        xi = self.rng.random()
-        pid = e - ueff
-        td = min(self.tl,np.log(xi)/pid)
+        # Heff
+        gf = {key:-self.tau * val for key,val in e.items() if val < 0}
+        gf[self.config] = 1 - self.tau * (u - self.shift)
 
-        # (b)
-        self.tl -= td
-        self.weight[0] *= np.exp((-e+(1+self.gamma)*vsf)*td)
-        self.weight[1] *= np.exp(-e*td)
+        keys = list(gf.keys())
+        prob = np.array(list(gf.values()))
+        norm = sum(prob) 
+        prob /= norm
+        self.config = tuple(self.rng.choice(keys,p=prob))
 
-        if self.tl <= 0:
-            self.terminate = True
-            return e 
-        keys = list(h.keys())
-        prob =  - np.array(list(h.values()))
-        prob = np.where(prob>0,prob,-self.gamma*prob)
-        sign = np.where(prob>0,1,-1./self.gamma)
-        prob /= sum(prob) 
-        idx = self.rng.choice(len(prob),p=prob)
-        self.weight[0] *= sign[idx] 
-        self.config = keys[idx]
-        return e 
+        w = self.weight
+        e = sum(e.values()) + u
+        self.weight *= norm
+        return e,w
+    def sample3(self,af):
+        # Haaf & Bemmel & Leeuwen & Saarloos, Phys.Rev.B,51(1995) 
+        e = dict()
+        u = af.model.compute_local_energy_eigen(self.config)
+        for batch_key in af.model.batched_pairs:
+           e.update(af.batch_pair_energies(batch_key,False)[0])
+
+        # Heff
+        ep = sum([val for val in e.values() if val > 0])
+        gf = {key:-self.tau * val for key,val in e.items() if val < 0}
+        gf[self.config] = 1 - self.tau * (u + ep - self.shift)
+        if gf[self.config] < 0:
+            raise ValueError(f'diagonal term = {gf[self.config]}')
+
+        keys = list(gf.keys())
+        prob = np.array(list(gf.values()))
+        norm = sum(prob) 
+        prob /= norm
+        self.config = tuple(self.rng.choice(keys,p=prob))
+
+        w = self.weight
+        e = sum(e.values()) + u
+        self.weight *= norm
+        return e,w
 class Sampler:
     def __init__(self,af,configs,weights,seed=None):
         self.af = af
@@ -68,7 +113,7 @@ class Sampler:
         self.print_energy_every = 1
         self.step = 0  
         self.E = None 
-        self.buf = np.zeros(3)
+        self.buf = np.zeros(2)
     def sample(self,fname=None):
         self.redistribute()
         if RANK==0:
@@ -77,29 +122,19 @@ class Sampler:
             self._sample()
             if fname is not None:
                 self.save(fname)
-    def SR(self,v,weight,weight_eff):
-        sum_weight = weight.sum()
-        sum_weight_eff = weight_eff.sum()
-        S = (v * v * weight_eff).sum() / sum_weight_eff
-        b = np.dot(weight,v) / sum_weight
-        alpha = b/S
-        p = weight_eff * (1 + alpha*v)
-        return np.fabs(p)
     def _ctr(self):
         if self.progbar:
             pg = Progbar(total=self.ntot)
         n = 0
-        energy = []
-        weight = []
-        weight_eff = []
+        e = []
+        w = []
         t0 = time.time()
         while True:
             if n>= self.ntot:
                 break
             COMM.Recv(self.buf,tag=2)
-            energy.append(self.buf[0]) 
-            weight.append(self.buf[1]) 
-            weight_eff.append(self.buf[2]) 
+            e.append(self.buf[0]) 
+            w.append(self.buf[1]) 
             n += 1
             if self.progbar:
                 pg.update()
@@ -109,36 +144,23 @@ class Sampler:
         self.step += 1
         if self.step%self.print_energy_every!=0:
             return
-        energy = np.array(energy)
-        weight = np.array(weight)
-        weight_eff = np.array(weight_eff)
-
-        num,num_err = blocking_analysis(energy,weights=weight) 
-        denom,denom_err = blocking_analysis(weight) 
+        e = np.array(e)
+        w = np.array(w)
+        num,num_err = blocking_analysis(e,weights=w) 
+        denom,denom_err = blocking_analysis(w) 
         E = num / denom 
         dE = 0 if self.E is None else E - self.E 
-        self.E = E 
-
-        # SR
-        num,num_err = blocking_analysis(energy,weights=weight_eff) 
-        denom,denom_err = blocking_analysis(weight_eff) 
-        Eeff = num / denom 
-        v = energy - Eeff
-        p = self.SR(v,weight,weight_eff)
-        
-
         print(f'step={self.step},E={E/self.nsite},dE={dE/self.nsite},num_err={num_err/self.nsite},denom_err={denom_err/self.nsite}')
+        self.E = E 
+        rms = np.sqrt(np.dot(w,w)/len(w))
         print(f'rms(w)={rms},min={min(w)},max={max(w)}')
     def _sample(self):
         for i in range(self.configs.shape[0]):
-            wk = Walker(tuple(self.configs[i,:]),self.weights[i,:],self.tau,self.gamma)
-            while True:
-                if wk.terminate:
-                    break
-                e = wk.sample(af)
+            wk = Walker(tuple(self.configs[i,:]),self.weights[i],self.tau,self.shift,self.scheme)
+            for _ in range(self.accum):
+                e,w = wk.sample(self.af)
             self.buf[0] = e
-            self.buf[1] = wk.weight[0]
-            self.buf[2] = wk.weight[1]
+            self.buf[1] = w
             COMM.Send(self.buf,dest=0,tag=2)
             self.configs[i,:] = np.array(wk.config)
             self.weights[i] = wk.weight

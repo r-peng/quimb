@@ -827,9 +827,9 @@ class CNN(NN):
     def __init__(self,nsite,D,nf=1,**kwargs):
         super().__init__(**kwargs)
         pdim = 4 if self.fermion else 2 
-        key = 'in'
-        self.param_keys.append(key)
-        self.sh[key] = nsite,pdim,pdim
+        #key = 'in'
+        #self.param_keys.append(key)
+        #self.sh[key] = nsite,pdim,pdim
 
         self.nf = nf
         if isinstance(D,int):
@@ -844,8 +844,10 @@ class CNN(NN):
                 break 
     def forward(self,config):
         self.init_dim()
-        v = {self.flat2site(i):self.params['in'][i,ci,:] for i,ci in enumerate(config)}
-        l = 0 
+        #v = {self.flat2site(i):self.params['in'][i,ci,:] for i,ci in enumerate(config)}
+        #l = 0 
+        v = self.input_layer(config)
+        l = 1
         while True:
             l,v,_break = self.layer_forward(l,v)
             if _break:

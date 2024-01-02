@@ -159,6 +159,41 @@ class CNN2D1(CNN2D):
                     self.sh[key] = self.sh[key][:-1] + (self.nf,)  
 
         return l+1,Dix+1,_break
+    def input_layer(self,config):
+        l = 0
+        vnew = dict()
+        if self.lx == 1:
+            i = 0
+            T = self.params[l,'h']
+            for j in range(self.ly-1):
+                vnew[i,j] = T[i,j,config[j],config[j+1],:]
+            self.ly -= 1
+            return vnew
+        if self.ly == 1:
+            j = 0
+            T = self.params[l,'v']
+            for i in range(self.lx-1):
+                vnew[i,j] = T[i,j,config[i],config[i+1],:]
+            self.lx -= 1
+            return vnew
+
+        b = dict()
+        Th = self.params[l,'h']
+        Tv = self.params[l,'v']
+        for i,j in itertools.product(range(self.lx),range(self.ly)):
+            ix1 = config[self.flatten((i,j))]
+            if j+1<self.ly:
+                ix2 = config[self.flatten((i,j+1))]
+                b[(i,j),(i,j+1)] = Th[i,j,ix1,ix2,:]
+            if i+1<self.lx:
+                ix2 = config[self.flatten((i+1,j))]
+                b[(i,j),(i+1,j)] = Tv[i,j,ix1,ix2,:]
+
+        for i,j in itertools.product(range(self.lx-1),range(self.ly-1)):
+            vnew[i,j] = b[(i,j),(i,j+1)]*b[(i+1,j),(i+1,j+1)] + b[(i,j),(i+1,j)]*b[(i,j+1),(i+1,j+1)]
+        self.lx -= 1
+        self.ly -= 1
+        return vnew 
     def layer_forward(self,l,v):
         vnew = dict()
         if self.lx == 1:
@@ -222,6 +257,36 @@ class CNN2D2(CNN2D,AmplitudeFactory2D):
             _break = True
             self.sh[key] = self.sh[key][:-1] + (self.nf,)  
         return l+1,Dix+1,_break
+    def input_layer(self,config):
+        l = 0
+        vnew = dict()
+        T1 = self.params[l,1]
+        if self.lx == 1:
+            i = 0
+            for j in range(self.ly-1):
+                vnew[i,j] = T1[i,j,config[j],config[j+1],:]
+            self.ly -= 1
+            return vnew
+        if self.ly == 1:
+            j = 0
+            for i in range(self.lx-1):
+                vnew[i,j] = T1[i,j,config[i],config[i+1],:]
+            self.lx -= 1
+            return vnew
+        T2 = self.params[l,2]
+        T3 = self.params[l,3]
+        for i,j in itertools.product(range(self.lx-1),range(self.ly-1)):
+            ix1 = config[self.flatten((i,j))]
+            ix2 = config[self.flatten((i,j+1))]
+            ix3 = config[self.flatten((i+1,j+1))]
+            ix4 = config[self.flatten((i+1,j))]
+
+            vij = T1[i,j,ix1,ix2,:]
+            vij = self.jnp.matmul(vij,T2[i,j,ix3,...]) 
+            vnew[i,j] = self.jnp.matmul(vij,T3[i,j,ix4,...])
+        self.lx -= 1
+        self.ly -= 1
+        return vnew 
     def layer_forward(self,l,v):
         vnew = dict()
         T1 = self.params[l,1]
