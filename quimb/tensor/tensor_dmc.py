@@ -19,15 +19,14 @@ class Walker:
         self.rng = np.random.default_rng(seed=seed)
     def propagate(self,config,sign):
         self.config = config
-        self.weight = np.array([sign,1]) 
+        self.weight = np.array([sign,1.]) 
         self.tl = self.tau
         self.terminate = False
         self.nhop = 0
         while True:
             if self.terminate:
                 break
-            e = self.sample()
-        return e
+            self.sample()
     def sample(self):
         self.af.config = self.config 
         self.af.cx = dict()
@@ -35,11 +34,11 @@ class Walker:
         # (a)
         self.h = dict()
         self.u = self.af.model.compute_local_energy_eigen(self.config)
-        for batch_key in af.model.batched_pairs:
+        for batch_key in self.af.model.batched_pairs:
            self.h.update(self.af.batch_pair_energies(batch_key,False)[0])
-        self.e = sum(h.values()) + self.u
         self.vsf = sum([val for val in self.h.values() if val > 0])
         self.ueff = self.u + (1+self.gamma) * self.vsf
+        self.e = sum(self.h.values()) + self.u
         
         if self.lamb is None:
             self.propagate1()
@@ -49,12 +48,11 @@ class Walker:
         logxi = np.log(self.rng.random())
         pid = self.e - self.ueff
         td = min(self.tl,logxi/pid)
-        if RANK==1:
-            print('td=',logxi/pid,pid)
 
         # (b)
         self.tl -= td
-        self.weight[0] *= np.exp((-self.e+(1+self.gamma)*self.vsf)*td)
+        #self.weight[0] *= np.exp(-(self.e-(1+self.gamma)*self.vsf)*td)
+        self.weight[0] *= np.exp(-self.e*td)
         self.weight[1] *= np.exp(-self.e*td)
 
         if self.tl <= 0:
@@ -82,10 +80,15 @@ class Walker:
         s = np.where(p>0,1,fac)
 
         keys.append(self.config)
-        p = np.concatenate([p,np.array([self.lamb - self.ueff])]) 
-        s = np.concatenate([s,np.array([(self.lamb-self.u)/p[-1]])]) 
+        pd = self.lamb - self.ueff
+        if pd<0:
+            raise ValueError(f'u={self.u},vsf={self.vsf},ueff={self.ueff},{self.h}')
+        p = np.concatenate([p,np.array([pd])]) 
+        s = np.concatenate([s,np.array([(self.lamb-self.u)/pd])]) 
+        p /= self.lamb
         
         b = p.sum()
+        assert np.fabs(self.lamb - self.e - self.lamb * b)<1e-6
         self.weight *= b
 
         p /= b 
@@ -158,7 +161,8 @@ class Sampler:
         self.terminate[-1] = 1
         for worker in range(1,SIZE): 
             COMM.Send(self.terminate,dest=worker,tag=1)
-        print('sample time=',time.time()-t0)
+        print('\tsample time=',time.time()-t0)
+        print('\thop max,mean=',max(nhop),nhop.sum()/self.M)
 
         # update quantities
         self.ws.append(np.sum(self.w,axis=1)) 
@@ -166,8 +170,6 @@ class Sampler:
         # compute energy
         self.E = self.compute_expectation(self.we) 
         print(f'step={self.step},e={self.E[0]/self.nsite},e_eff={self.E[1]/self.nsite}')
-        # 
-        print('hop max,mean=',max(nhop),nhop.sum()/self.M)
     def _sample(self):
         while True:
             COMM.Recv(self.terminate,source=0,tag=1)
@@ -201,7 +203,7 @@ class Sampler:
             return
         ws = self.ws[-1]
         ws_ = np.fabs(self.w[0]).sum()
-        print('ave sign=',ws[0],ws_,ws[0]/ws_)
+        print('\tave sign=',ws[0],ws_,ws[0]/ws_)
 
         ops = [self.e]
         ops_eff = [self.E[1]]
@@ -211,13 +213,16 @@ class Sampler:
         S = np.einsum('kj,lj,j->kl',v,v,self.w[1]) / ws[1]
         b = np.dot(v,self.w[0]) / ws[0]
         alpha = np.linalg.solve(S,b)
-        print('alpha',alpha)
+        print('\talpha',alpha)
+        print('\tw=',ws[0]/self.M,ws[1]/self.M)
+        #print(self.w[0])
+        #print(self.w[1])
         p = self.w[1] * (1 + np.dot(alpha,v))
         psum = p.sum()
 
         prob = np.fabs(p)
         prob_sum = prob.sum()
-        print('beta=',psum,prob_sum,psum/prob_sum)
+        print('\tbeta=',psum,prob_sum,psum/prob_sum)
         prob /= prob_sum 
         idx = self.rng.choice(self.M,size=self.M,p=prob) 
         self.config[:,:-1] = self.config[idx,:-1]
@@ -243,8 +248,8 @@ class Sampler:
             return
         if config is not None:
             self.config = config
-            M = config.shape[0]
-            self.config = np.concatenate([config,np.ones((M,1))],axis=1) 
+            self.M = config.shape[0]
+            self.config = np.concatenate([config,np.ones((self.M,1))],axis=1) 
         if fname is not None:
             f = h5py.File(fname,'r')
             self.config = f['config_new'][:] 
@@ -254,4 +259,5 @@ class Sampler:
             f.close()
             self.M = self.config.shape[0] # num walkers
         self.config = np.array(self.config+.1,dtype=int)
+        print(f'number of walkers=',self.M)
         
