@@ -307,8 +307,8 @@ class SGD: # stochastic sampling
         self.buf = np.zeros(5,dtype=self.dtype_o)
         self.terminate = np.array([0])
 
-        self.buf[0] = RANK 
-        self.buf[4] = self.step 
+        self.buf[0] = RANK + .1
+        self.buf[4] = self.step + .1
         if compute_v:
             self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
@@ -334,9 +334,7 @@ class SGD: # stochastic sampling
         err_max = 0.
         ncurr = 0
         t0 = time.time()
-        for worker in range(1,SIZE): 
-            COMM.Send(self.terminate,dest=worker,tag=1)
-        while True:
+        while self.terminate[0]==0:
             COMM.Recv(self.buf,tag=0)
             step = int(self.buf[4].real+.1)
             if step>self.step:
@@ -350,16 +348,14 @@ class SGD: # stochastic sampling
             err_mean += self.buf[3]
             err_max = max(err_max,self.buf[3])
             ncurr += 1
-            if ncurr >= samplesize: 
-                break
             if self.progbar:
                 pg.update()
-            COMM.Send(self.terminate,dest=rank,tag=1)
-        # send termination message to all workers
-        self.terminate[0] = 1
-        for worker in range(1,SIZE): 
-            COMM.Send(self.terminate,dest=worker,tag=1)
-
+            if ncurr >= samplesize: # send termination message to all workers
+                self.terminate[0] = 1
+                for worker in range(1,SIZE):
+                    COMM.Send(self.terminate,dest=worker,tag=1)
+            else:
+                COMM.Send(self.terminate,dest=rank,tag=1)
         if save_config:
             ls = []
             for worker in range(1,SIZE):
@@ -376,10 +372,7 @@ class SGD: # stochastic sampling
         c = []
         e = []
         configs = []
-        while True:
-            COMM.Recv(self.terminate,source=0,tag=1)
-            if self.terminate[0]==1:
-                break
+        while self.terminate[0]==0:
             config,omega = self.sampler.sample()
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
@@ -394,7 +387,6 @@ class SGD: # stochastic sampling
                     Hvx = np.zeros(self.nparam,dtype=self.dtype_o)
             self.buf[2] = ex
             self.buf[3] = err
-            COMM.Send(self.buf,dest=0,tag=0) 
             if compute_v:
                 self.vsum += vx
                 self.evsum += vx * ex.conj()
@@ -407,6 +399,8 @@ class SGD: # stochastic sampling
                 e.append(ex)
                 configs.append(list(config))
 
+            COMM.Send(self.buf,dest=0,tag=0) 
+            COMM.Recv(self.terminate,source=0,tag=1)
         #self.sampler.config = self.config
         if compute_v:
             self.v = np.array(self.v)
