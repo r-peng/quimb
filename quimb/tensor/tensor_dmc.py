@@ -11,41 +11,39 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 DISCARD = 1e3
 class Walker:
-    def __init__(self,af,tau,lamb=None,gamma=0.,shift=0,seed=None):
+    def __init__(self,af,tau,kp,gamma=0.,shift=0,method=1,seed=None):
         self.af = af
         self.tau = tau
-        self.lamb = lamb 
+        self.kp = kp
         self.gamma = gamma
         self.shift = shift
         self.rng = np.random.default_rng(seed=seed)
     def propagate(self,config,w,weff):
         self.config = config
         self.weight = np.array([w,weff]) 
-        self.tl = self.tau
-        self.terminate = False
         self.nhop = 0
+        self.remain = self.tau * self.kp if self.method==1 else self.kp
         while True:
-            if self.terminate:
-                break
             self.sample()
+            if self.remain <= 0:
+                break
     def sample(self):
         self.af.config = self.config 
         self.af.cx = dict()
 
         self.h = dict()
-        self.u = self.af.model.compute_local_energy_eigen(self.config)
-        self.u -= self.shift
+        self.u = self.af.model.compute_local_energy_eigen(self.config) - self.shift
         for batch_key in self.af.model.batched_pairs:
            self.h.update(self.af.batch_pair_energies(batch_key,False)[0])
         self.vsf = sum([val for val in self.h.values() if val > 0])
         self.ueff = self.u + (1+self.gamma) * self.vsf
-        self.e = sum(self.h.values()) + self.u
+        self.e = sum(self.h.values())
         
         self.logxi = np.log(self.rng.random())
-        if self.lamb is None:
-            self.propagate1()
+        if self.method == 1:
+            return self.propagate1()
         else:
-            self.propagate2()
+            return self.propagate2()
     def sample_offdiag(self):
         keys = list(self.h.keys())
         p =  - np.array(list(self.h.values()))
@@ -60,30 +58,25 @@ class Walker:
         self.nhop += 1
     def propagate1(self):
         pid = self.e - self.ueff
-        td = min(self.tl,self.logxi/pid)
+        td = min(self.remain,self.logxi/pid)
 
         self.weight[0] *= np.exp(-(self.e-(1+self.gamma)*self.vsf)*td)
         self.weight[1] *= np.exp(-self.e*td)
-
-        self.tl -= td
-        if self.tl <= 0:
-            self.terminate = True
-            return
-        self.sample_offdiag() 
+        self.remain -= td
+        if self.remain > 0:
+            self.sample_offdiag() 
     def propagate2(self):
-        pd = self.lamb - self.ueff
+        pd = 1 - self.ueff * self.tau
         if pd<0:
             raise ValueError(f'u={self.u},vsf={self.vsf},ueff={self.ueff},{self.h}')
-        pd /= self.lamb - self.e
-        k = min(self.tl,int(self.logxi/np.log(pd)))
+        b = 1 - self.e * self.tau
+        k = min(self.remain,int(self.logxi/np.log(pd/b)))
 
-        self.weight *= (1-self.e/self.lamb)**k 
-        self.weight[0] *= ((self.lamb-self.u)/(self.lamb-self.ueff))**k
-        self.tl -= k+1
-        if self.tl <= 0:
-            self.terminate = True
-            return
-        self.sample_offdiag() 
+        self.weight *= b**k 
+        self.weight[0] *= ((1-self.u * self.tau)/pd)**k
+        self.remain -= k+1
+        if self.remain > 0:
+            self.sample_offdiag() 
 class SamplerSR:
     def __init__(self,wk,L,N,seed=None):
         self.wk = wk
@@ -168,8 +161,10 @@ class SamplerSR:
         self.ws.append(np.sum(self.config[:,-2:],axis=0)) 
         self.we.append(np.dot(self.e,self.config[:,-2:]))
         # compute energy
-        self.E = self.compute_expectation(self.we) + self.wk.shift 
-        print(f'step={self.step},e={self.E[0]/self.nsite},e_eff={self.E[1]/self.nsite}')
+        self.E = self.compute_expectation(self.we) 
+        e = self.E + self.wk.shift 
+        e /= self.nsite
+        print(f'step={self.step},e={e[0]},e_eff={e[1]}')
     def compute_expectation(self,we):
         if len(self.f)<=self.L:
             return we[-1]/self.ws[-1]
@@ -258,7 +253,9 @@ class SamplerBranch(SamplerSR):
         self.rng = np.random.default_rng(seed=seed)
         self.progbar = False 
     def compute_energy(self):
-        e = (self.compute_expectation(self.e) + self.wk.shift) / self.nsite 
+        e = self.compute_expectation(self.e)
+        e[:,0] += self.wk.shift
+        e /= self.nsite
         print(f'step={self.step},e={e[0,0]},err={e[0,1]},e_eff={e[1,0]},err_eff={e[1,1]}')
     def compute_expectation(self,e):
         E = np.zeros((2,2))
@@ -270,8 +267,7 @@ class SamplerBranch(SamplerSR):
             return
         wmean = self.config[:,-1].sum()/self.M
         print('\tave weff=',wmean)
-        wmean = 1.
-        self.config[:,-2:] /= wmean
+        #self.config[:,-2:] /= wmean
         config_new = []
         for ix in range(self.M):
             config = self.config[ix] 
@@ -289,7 +285,7 @@ class SamplerBranch(SamplerSR):
                 #    config[-2:] /= m
                 #    config_new += [config] * m
                 config[-2:] /= m
-                config_new += [config] * m
+                config_new += [config.copy() for _ in range(m)]
         self.config = np.array(config_new)
         self.M = self.config.shape[0]
     def save(self,tmpdir):
