@@ -11,11 +11,12 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 DISCARD = 1e3
 class Walker:
-    def __init__(self,af,tau,lamb=None,gamma=0.,seed=None):
+    def __init__(self,af,tau,lamb=None,gamma=0.,shift=0,seed=None):
         self.af = af
         self.tau = tau
         self.lamb = lamb 
         self.gamma = gamma
+        self.shift = shift
         self.rng = np.random.default_rng(seed=seed)
     def propagate(self,config,w,weff):
         self.config = config
@@ -33,6 +34,7 @@ class Walker:
 
         self.h = dict()
         self.u = self.af.model.compute_local_energy_eigen(self.config)
+        self.u -= self.shift
         for batch_key in self.af.model.batched_pairs:
            self.h.update(self.af.batch_pair_energies(batch_key,False)[0])
         self.vsf = sum([val for val in self.h.values() if val > 0])
@@ -145,7 +147,7 @@ class SamplerSR:
             COMM.Send(self.terminate,dest=worker,tag=1)
         print('\tsample time=',time.time()-t0)
         print('\thop max,mean=',max(nhop),nhop.sum()/self.M)
-        self.compute_energy(self)
+        self.compute_energy()
     def _sample(self):
         while True:
             COMM.Recv(self.terminate,source=0,tag=1)
@@ -166,7 +168,7 @@ class SamplerSR:
         self.ws.append(np.sum(self.config[:,-2:],axis=0)) 
         self.we.append(np.dot(self.e,self.config[:,-2:]))
         # compute energy
-        self.E = self.compute_expectation(self.we) 
+        self.E = self.compute_expectation(self.we) + self.wk.shift 
         print(f'step={self.step},e={self.E[0]/self.nsite},e_eff={self.E[1]/self.nsite}')
     def compute_expectation(self,we):
         if len(self.f)<=self.L:
@@ -246,7 +248,7 @@ class SamplerSR:
         f.close()
         self.M = self.config.shape[0] # num walkers
         print(f'number of walkers=',self.M)
-class SampleBranch(SampleSR):
+class SamplerBranch(SamplerSR):
     def __init__(self,wk,nmin,nmax,thresh=1e-6,seed=None):
         self.wk = wk
         self.nsite = wk.af.nsite 
@@ -256,10 +258,10 @@ class SampleBranch(SampleSR):
         self.rng = np.random.default_rng(seed=seed)
         self.progbar = False 
     def compute_energy(self):
-        self.E = self.compute_expectation(self.e) 
-        print(f'step={self.step},e={self.E[0]/self.nsite},e_eff={self.E[1]/self.nsite}')
+        e = (self.compute_expectation(self.e) + self.wk.shift) / self.nsite 
+        print(f'step={self.step},e={e[0,0]},err={e[0,1]},e_eff={e[1,0]},err_eff={e[1,1]}')
     def compute_expectation(self,e):
-        E = np.zeros(2)
+        E = np.zeros((2,2))
         E[0] = blocking_analysis(e,weights=self.config[:,-2])
         E[1] = blocking_analysis(e,weights=self.config[:,-1])
         return E
@@ -268,23 +270,29 @@ class SampleBranch(SampleSR):
             return
         wmean = self.config[:,-1].sum()/self.M
         print('\tave weff=',wmean)
+        wmean = 1.
         self.config[:,-2:] /= wmean
         config_new = []
         for ix in range(self.M):
             config = self.config[ix] 
-            m = int(config[-1]+self.rng.rand())
+            m = int(config[-1]+self.rng.random())
             if m==1:
                 config_new.append(config)
             elif m==0:
-                if self.M < self.nmin:
-                    config_new.append(config)
+                #if self.M < self.nmin:
+                #    config_new.append(config)
+                continue
             else:
-                if self.M > self.nmax:
-                    config_new.append(config)
-                else:
-                    config[-2:] /= m
-                    config_new += [config] * m
+                #if self.M > self.nmax:
+                #    config_new.append(config)
+                #else:
+                #    config[-2:] /= m
+                #    config_new += [config] * m
+                config[-2:] /= m
+                config_new += [config] * m
         self.config = np.array(config_new)
         self.M = self.config.shape[0]
     def save(self,tmpdir):
+        if RANK!=0:
+            return
         np.save(tmpdir+f'step{self.step}.npy',self.config)
