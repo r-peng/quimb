@@ -201,7 +201,7 @@ def blocking_analysis(energies, weights=None, neql=0, printQ=True):
             plateauError = max(error, prevError)
         prevError = error
 
-    print(RANK,plateauError,error)
+    #print(RANK,plateauError,error)
     if plateauError is None:
         plateauError = error
     else:

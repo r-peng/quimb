@@ -11,12 +11,14 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 DISCARD = 1e3
 class Walker:
-    def __init__(self,af,tau,kp,gamma=0.,shift=0,method=1,seed=None):
+    def __init__(self,af,tau,kp,seed=None):
         self.af = af
         self.tau = tau
         self.kp = kp
-        self.gamma = gamma
-        self.shift = shift
+        self.gamma = 0
+        self.shift = 0 
+        self.method = None 
+        self.thresh = 1e-6
         self.rng = np.random.default_rng(seed=seed)
     def propagate(self,config,w,weff):
         self.config = config
@@ -37,7 +39,7 @@ class Walker:
            self.h.update(self.af.batch_pair_energies(batch_key,False)[0])
         self.vsf = sum([val for val in self.h.values() if val > 0])
         self.ueff = self.u + (1+self.gamma) * self.vsf
-        self.e = sum(self.h.values())
+        self.e = sum(self.h.values()) + self.u
         
         self.logxi = np.log(self.rng.random())
         if self.method == 1:
@@ -48,11 +50,10 @@ class Walker:
         keys = list(self.h.keys())
         p =  - np.array(list(self.h.values()))
         p = np.where(p>0,p,-self.gamma*p)
-        fac = 1 if self.gamma < 1e-6 else -1./self.gamma
+        fac = 1 if self.gamma < self.thresh else -1./self.gamma
         s = np.where(p>0,1,fac)
 
-        p /= p.sum() 
-        idx = self.rng.choice(len(p),p=p)
+        idx = self.rng.choice(len(p),p=p/p.sum())
         self.weight[0] *= s[idx] 
         self.config = keys[idx]
         self.nhop += 1
@@ -68,7 +69,8 @@ class Walker:
     def propagate2(self):
         pd = 1 - self.ueff * self.tau
         if pd<0:
-            raise ValueError(f'u={self.u},vsf={self.vsf},ueff={self.ueff},{self.h}')
+            print(f'u={self.u},vsf={self.vsf},ueff={self.ueff}')
+            exit()
         b = 1 - self.e * self.tau
         k = min(self.remain,int(self.logxi/np.log(pd/b)))
 
@@ -139,7 +141,7 @@ class SamplerSR:
         for worker in range(1,SIZE): 
             COMM.Send(self.terminate,dest=worker,tag=1)
         print('\tsample time=',time.time()-t0)
-        print('\thop max,mean=',max(nhop),nhop.sum()/self.M)
+        print('\thop max,min,mean=',max(nhop),min(nhop),nhop.sum()/self.M)
         self.compute_energy()
     def _sample(self):
         while True:
@@ -244,13 +246,14 @@ class SamplerSR:
         self.M = self.config.shape[0] # num walkers
         print(f'number of walkers=',self.M)
 class SamplerBranch(SamplerSR):
-    def __init__(self,wk,nmin,nmax,thresh=1e-6,seed=None):
+    def __init__(self,wk,nmin,nmax,seed=None):
         self.wk = wk
         self.nsite = wk.af.nsite 
         self.nmin = nmin
         self.nmax = nmax
     
         self.rng = np.random.default_rng(seed=seed)
+        self.thresh = 1e-10
         self.progbar = False 
     def compute_energy(self):
         e = self.compute_expectation(self.e)
@@ -265,29 +268,43 @@ class SamplerBranch(SamplerSR):
     def SR(self):
         if RANK!=0:
             return
-        wmean = self.config[:,-1].sum()/self.M
-        print('\tave weff=',wmean)
-        #self.config[:,-2:] /= wmean
-        config_new = []
-        for ix in range(self.M):
-            config = self.config[ix] 
-            m = int(config[-1]+self.rng.random())
-            if m==1:
-                config_new.append(config)
-            elif m==0:
-                #if self.M < self.nmin:
-                #    config_new.append(config)
-                continue
-            else:
-                #if self.M > self.nmax:
-                #    config_new.append(config)
-                #else:
-                #    config[-2:] /= m
-                #    config_new += [config] * m
-                config[-2:] /= m
-                config_new += [config.copy() for _ in range(m)]
-        self.config = np.array(config_new)
+        w = self.config[:,-1]
+        wmax = max(w)
+        wmean = w.sum()/self.M
+        print('\tweff max,min,ave=',wmax,min(w),wmean)
+
+        idx = np.nonzero(w > wmax * self.thresh)[0]
+        self.config = self.config[idx] 
+        self.config[:,-2:] /= wmax 
+        self.M = len(idx)
+        if self.M >= self.nmin:
+            return
+
+        w = self.config[:,-1]
+        idx = np.argsort(w)
+        self.config = self.config[idx]
+        N = self.nmax - self.M 
+        self.config[-N:,-2:] /= 2
+        self.config = np.concatenate([self.config,self.config[-N:]],axis=0)
+
+        #for ix in range(self.M):
+        #    config = self.config[ix] 
+        #    m = int(config[-1]+self.rng.random())
+        #    if m==0:
+        #        if self.M < self.nmin:
+        #            config_new.append(config)
+        #        continue
+        #    if m==1:
+        #        config_new.append(config)
+        #        continue
+        #    if self.M > self.nmax:
+        #        config_new.append(config)
+        #        continue
+        #    config[-2:] /= m
+        #    config_new += [config.copy() for _ in range(m)]
+        #self.config = np.array(config_new)
         self.M = self.config.shape[0]
+        print(f'\tnumber of walkers=',self.M)
     def save(self,tmpdir):
         if RANK!=0:
             return
