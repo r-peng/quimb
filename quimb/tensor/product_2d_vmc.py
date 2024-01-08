@@ -91,20 +91,37 @@ class SumAmplitudeFactory2D(SumAmplitudeFactory,
 
 from .tensor_2d_vmc import AmplitudeFactory2D 
 from .tensor_1d_vmc import AmplitudeFactory1D 
+def get_bond_map_2d(self):
+    bmap = dict()
+    ix = 0
+    for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+        ix1 = self.flatten((i,j))
+        if j<self.Ly-1:
+            ix2 = self.flatten((i,j+1)) 
+            bmap[ix1,ix2] = ix
+            ix += 1
+        if i<self.Lx-1:
+            ix2 = self.flatten((i+1,j)) 
+            bmap[ix1,ix2] = ix
+            ix += 1
+    return bmap
 class RBM2D(RBM,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nh,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
         super().__init__(nv,nh,**kwargs)
 class FNN2D(FNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
         super().__init__(nv,nh,afn,**kwargs)
 class LRelu2D(LRelu,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nv,nh,**kwargs):
         self.Lx = Lx
         self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
         super().__init__(nv,nh,**kwargs)
 class RNN2D(RNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,D,**kwargs):

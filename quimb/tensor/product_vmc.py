@@ -283,7 +283,7 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        assert input_format in ('det','fermion',(0,1),(-1,1))
+        assert input_format in ('det','bond','fermion',(0,1),(-1,1))
         self.input_format = input_format
         self.order = order
         self.params = dict()
@@ -400,11 +400,26 @@ class NN(AmplitudeFactory):
             ls[ix] = np.where(c)[0]
         c = np.concatenate(ls) 
         return c/len(config)
+    def input_bond(self,config):
+        ls = []
+        nb = len(self.bmap)
+        for conf in config_to_ab(config):
+            v = np.zeros(nb) 
+            for (ix1,ix2),ix in self.bmap.items():
+                c1,c2 = conf[ix1],conf[ix2]
+                if c1+c2==1:
+                    v[ix] = 1
+            ls.append(v)
+        conf = np.array(config)
+        ls.append(np.array([len(conf[conf==3])]))
+        return np.concatenate(ls)
     def input(self,config):
         if self.input_format=='det':
             return self.input_determinant(config)
         if self.input_format=='fermion':
             return np.array(config,dtype=float) 
+        if self.input_format=='bond':
+            return self.input_bond(config)
         if self.fermion:
             ca,cb = config_to_ab(config) 
             config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
