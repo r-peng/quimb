@@ -283,7 +283,7 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        assert input_format in ('det','bond','fermion',(0,1),(-1,1))
+        assert input_format in ('det','bond','pnsz','fermion',(0,1),(-1,1))
         self.input_format = input_format
         self.order = order
         self.params = dict()
@@ -413,6 +413,14 @@ class NN(AmplitudeFactory):
         conf = np.array(config)
         ls.append(np.array([len(conf[conf==3])]))
         return np.concatenate(ls)
+    def input_pnsz(self,config):
+        v = np.zeros((len(config),2))
+        pn_map = [0,1,1,2]
+        sz_map = [0,1,-1,0]
+        for i,ci in enumerate(config)):
+            v[i,0] = pn_map[ci]
+            v[i,1] = sz_map[ci]
+        return v
     def input(self,config):
         if self.input_format=='det':
             return self.input_determinant(config)
@@ -420,6 +428,8 @@ class NN(AmplitudeFactory):
             return np.array(config,dtype=float) 
         if self.input_format=='bond':
             return self.input_bond(config)
+        if self.input_format=='pnsz':
+            return self.input_pnsz(config)
         if self.fermion:
             ca,cb = config_to_ab(config) 
             config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
@@ -524,6 +534,7 @@ class FNN(NN):
         self.afn = afn 
         super().__init__(**kwargs)
         self.nv,self.nh,self.nf = nv,nh,nf
+        self.nl = len(nh)
         self.act_pattern = [dict() for _ in afn] if act_pattern else None 
         self.scale = scale
         self.bias = bias
@@ -533,17 +544,13 @@ class FNN(NN):
             self.lcurr = 0
             self.nstep = 0
             self.layer_keys = [[] for i in range(len(nh))]
-        for i in range(len(nh)):
+        for i in range(self.nl):
             self.set_layer(i)
         if wf:
-            key = 'wf'
-            self.param_keys.append(key)
-            self.sh[key] = nh[-1],nf
-            if self.change_layer_every is not None: # group with final layer
-                self.layer_keys[len(nh)-1].append(key)
-        if len(afn)==len(nh):
+            self.set_wf()
+        if len(afn)==self.nl:
             pass
-        elif len(afn)==len(nh)+1:
+        elif len(afn)==self.nl+1:
             assert (not self.log)
         else:
             raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
@@ -561,6 +568,12 @@ class FNN(NN):
         self.sh[key] = self.nh[i],
         if self.change_layer_every is not None:
             self.layer_keys[i].append(key)
+    def set_wf(self):
+        key = 'wf'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[-1],self.nf
+        if self.change_layer_every is not None: # group with final layer
+            self.layer_keys[self.nl-1].append(key)
     def get_layer_afn(self,i):
         afn = self.afn[i]
         # unsaturating 
@@ -605,11 +618,17 @@ class FNN(NN):
     def set_backend(self,backend):
         super().set_backend(backend)
         self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
-    def layer_forward(self,c,i):
-        c = self.jnp.matmul(c,self.params[i,'w'])    
+    def apply_w(self,y,i):
+        return self.jnp.matmul(y,self.params[i,'w'])    
+    def apply_wf(self,y):
+        if 'wf' in self.params:
+            return self.jnp.matmul(y,self.params['wf'])
+        return self.jnp.sum(y)
+    def layer_forward(self,y,i):
+        y = self.apply_w(y,i)
         if (i,'b') in self.params:
-            c = c + self.params[i,'b']
-        return self._afn[i](c)
+            y = y + self.params[i,'b']
+        return self._afn[i](y)
     def add_act_pattern(self,y,i,config):
         if self.act_pattern is None:
             return   
@@ -626,9 +645,32 @@ class FNN(NN):
             self.add_act_pattern(y,i,config)
         if len(self.afn)==len(self.nh)+1:
             y = self._afn[-1](y)
-        if 'wf' in self.params:
-            return self.jnp.matmul(y,self.params['wf'])
-        return self.jnp.sum(y)
+        return self.apply_wf(y)
+class CNN(FNN):
+    def __init__(self,nv,nh,afn,**kwargs):
+        super().__init__(None,nh,afn,**kwargs)
+    def set_layer(self,i):
+        lx,ly = max(self.Lx-i-1,1),max(self.Ly-i-1,1)
+        key = i,'w'
+        self.param_keys.append(key)
+        sh1 = self.nv if i==0 else self.nh[i-1]
+        self.sh[key] = lx,ly,4*sh1,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+        if not self.bias:
+            return
+        key = i,'b'
+        self.param_keys.append(key)
+        self.sh[key] = lx,ly,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+   def set_wf(self):
+        lx,ly = max(self.Lx-self.nl,1),max(self.Ly-self.nl,1)
+        key = 'wf'
+        self.param_keys.append(key)
+        self.sh[key] = lx,ly,self.nh[-1],self.nf
+        if self.change_layer_every is not None: # group with final layer
+            self.layer_keys[self.nl-1].append(key)
 class LCFNN(FNN):
     def __init__(self,nv,nh,afn,nbasis,**kwargs):
         self.nbasis = nbasis
@@ -805,7 +847,7 @@ def relu_init_spin(nx,eps,eps_init=None):
         x = np.random.normal(loc=0,scale=eps,size=nx)
         b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
-class RNN(NN):
+class _RNN(NN):
     def __init__(self,nsite,D,nf=1,**kwargs):
         super().__init__(**kwargs)
         self.nsite = nsite
@@ -838,7 +880,7 @@ class RNN(NN):
                 v = self.jnp.einsum('i,j,ijk->k',v,ls[j],self.params[f'T{i}'][j-1,ci,...]) 
             ls[i] = v
         return sum(v)
-class CNN(NN):
+class _CNN(NN):
     def __init__(self,nsite,D,nf=1,**kwargs):
         super().__init__(**kwargs)
         pdim = 4 if self.fermion else 2 

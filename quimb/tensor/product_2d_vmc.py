@@ -149,6 +149,49 @@ class CNN2D(CNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,D,nf=1,**kwargs):
         self.Lx,self.Ly = Lx,Ly
         super().__init__(Lx*Ly,D,**kwargs)
+    def apply_w(self,y,i):
+        if i==0:
+            self._apply_w0(y)
+    def _apply_w0(self,y):
+        ynew = dict()
+        l = 0
+        lx = max(1,self.Lx-l-1)
+        ly = max(1,self.Ly-l-1)
+        W = self.params[l,'w']
+        for i,j in itertools.product(lx,ly):
+            yij = [(i,j)]
+            if j<ly-1: 
+                yij.append((i,j+1))
+            if i<lx-1:
+                yij.append((i+1,j))
+            if i<lx-1 and j<ly-1:
+                yij.append((i+1,j+1))
+            yij = [y[self.flatten(site)] for site in yij]
+            yij = self.jnp.concatenate(yij)
+            ynew[i,j] = self.jnp.matmul(yij,W[i,j]) 
+        return ynew
+    def _apply_w(self,y,l):
+        ynew = dict()
+        lx = max(1,self.Lx-l-1)
+        ly = max(1,self.Ly-l-1)
+        W = self.params[l,'w']
+        for i,j in itertools.product(lx,ly):
+            yij = [(i,j)]
+            if j<ly-1: 
+                yij.append((i,j+1))
+            if i<lx-1:
+                yij.append((i+1,j))
+            if i<lx-1 and j<ly-1:
+                yij.append((i+1,j+1))
+            yij = [y[site] for site in yij]
+            yij = self.jnp.concatenate(yij)
+            ynew[i,j] = self.jnp.matmul(yij,W[i,j]) 
+        return ynew
+##########################################################
+class _CNN2D(CNN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,D,nf=1,**kwargs):
+        self.Lx,self.Ly = Lx,Ly
+        super().__init__(Lx*Ly,D,**kwargs)
     def init_dim(self):
         self.lx,self.ly = self.Lx,self.Ly
 class CNN2D1(CNN2D):
