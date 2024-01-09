@@ -521,9 +521,9 @@ class RBM(NN):
         return y
 class FNN(NN):
     def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,act_pattern=False,**kwargs):
+        self.afn = afn 
         super().__init__(**kwargs)
         self.nv,self.nh,self.nf = nv,nh,nf
-        self.afn = afn 
         self.act_pattern = [dict() for _ in afn] if act_pattern else None 
         self.scale = scale
         self.bias = bias
