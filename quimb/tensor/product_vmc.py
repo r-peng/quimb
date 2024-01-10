@@ -252,7 +252,6 @@ class SumAmplitudeFactory:
 import autoray as ar
 import torch
 ar.register_function('torch','relu',torch.nn.functional.relu)
-#ar.register_function('torch','lrelu',torch.nn.functional.leaky_relu)
 import h5py
 def pair_terms(i1,i2,spin):
     if spin=='a':
@@ -356,7 +355,7 @@ class Dense(Layer):
                 except AttributeError:
                     return x*(x>0)
         self._afn = _afn
-class NN(AmplitudeFactory):
+class NN:
     def __init__(self,lr,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
         self.lr = lr
         self.backend = backend
