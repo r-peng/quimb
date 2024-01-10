@@ -267,9 +267,8 @@ def pair_terms(i1,i2,spin):
     else:
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
-class Layer:
-    def __init__(backend='numpy'):
-        self.backend = backend
+class Layer(AmplitudeFactory):
+    def __init__(self):
         self.grad = True
     def get_block_dict(self):
         self.block_dict = []
@@ -280,16 +279,8 @@ class Layer:
             start = stop
         self.nparam = stop
     def set_backend(self,backend):
-        if backend=='numpy':
-            tsr = np.zeros(1)
-            self.jnp = np 
-        else:
-            tsr = torch.zeros(1)
-            self.jnp = torch
-        ar.set_backend(tsr)
+        self.jnp = backend
     def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        self.set_backend(backend)
         grad = requires_grad if self.grad else False
         self.params = [tensor2backend(p,backend,requires_grad=grad) for p in self.params]
     def get_x(self,grad=False):
@@ -318,6 +309,7 @@ class RBM(Layer):
     def __init__(self,nv,nh,**kwargs):
         super().__init__(**kwargs)
         self.sh = (nv,),(nh,),(nv,nh)
+        self.params[None] * 3
     def forward(self,x):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
@@ -325,10 +317,13 @@ class Dense(Layer):
     def __init__(self,nx,ny,afn,bias=True,scale=1,pre_act=False,post_act=True,**kwargs):
         super().__init__(**kwargs)
         self.nx,self.ny = nx,ny
+        self.afn = afn
         self.sh = (nx,ny),(ny,)
+        self.params = [None] * 2
         self.bias = bias
         if not bias:
             self.sh.pop()
+            self.params.pop()
         self.scale = scale
         self.pre_act = pre_act 
         self.post_act = post_act
@@ -392,10 +387,17 @@ class NN:
     def set_backend(self,backend):
         if backend=='numpy':
             self._input = self.input
+            tsr = np.zeros(1)
+            self.jnp = np 
         else:
+            tsr = torch.zeros(1)
+            self.jnp = torch
             def _input(config):
                 return tensor2backend(self.input(config),backend) 
             self._input = _input
+        ar.set_backend(tsr)
+        for lr in self.lr:
+            lr.set_backend(self.jnp)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
@@ -423,7 +425,7 @@ class NN:
         f = h5py.File(fname+'.hdf5','w')
         for i,lr in enumerate(self.lr):
             for j,tsr in enumerate(lr.params):
-                f.create_dataset(f'l{i}p{j}',data=tensor2backend(tsr,'numpy')
+                f.create_dataset(f'l{i}p{j}',data=tensor2backend(tsr,'numpy'))
         f.close()
     def update(self,x,fname=None,root=0):
         i = 0
@@ -445,8 +447,6 @@ class NN:
                 lr.grad = True if ix==self.lcurr else False
             self.get_block_dict()
         self.wfn2backend()
-        if self.act_pattern is None:
-            return 
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
             return pair_terms(i1,i2,spin) 

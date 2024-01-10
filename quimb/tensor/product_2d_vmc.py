@@ -100,11 +100,11 @@ class CNN2D(Dense):
     def __init__(self,lx,ly,nx,ny,afn,**kwargs):
         super().__init__(nx,ny,afn,**kwargs)
         self.lx,self.ly = lx,ly
-        lx,ly = max(1,self.lx-l-1),max(1,self.ly-l-1)
+        lx,ly = max(1,self.lx-1),max(1,self.ly-1)
         self.sh = (lx,ly,4*nx,ny),(lx*ly,ny)
     def apply_w(self,y):
-        y = y.reshape(self.lx,self.ly,dim2) 
-        lx,ly = max(1,self.lx-l-1),max(1,self.ly-l-1)
+        y = y.reshape(self.lx,self.ly,y.shape[-1]) 
+        lx,ly = max(1,self.lx-1),max(1,self.ly-1)
         W = self.params[0]
         ynew = []
         for i,j in itertools.product(range(lx),range(ly)):

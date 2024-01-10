@@ -87,13 +87,16 @@ def load(fname):
     we = f['we'][:]
     f.close()
     return config,wf,ws,we
-def compute_expectation(we,ws,f,L,eq=0):
+def compute_expectation(we,ws,f,L,eq=0,method=1):
     we = we[eq:]
     ws = ws[eq:]
     f = f[eq:]
     N = len(f)-L-1
     G = np.array([f[i:i+L].prod() for i in range(N)])
-    return np.dot(G,we[L+1:])/np.dot(G,ws[L+1:])
+    if method==1:
+        return np.dot(G,we[L+1:])/np.dot(G,ws[L+1:])
+    elif method==2:
+        return np.array([blocking_analysis(we[L+1:,i]/ws[L+1:,i],weights=G,printQ=False) for i in (0,1)])
 class SamplerSR:
     def __init__(self,wk,seed=None):
         self.wk = wk
@@ -206,10 +209,10 @@ class SamplerSR:
         print('\tave sign=',ws[0],ws_,ws[0]/ws_)
 
         v = self.e - self.E[1] 
-        var  = np.dot(self.e**2,w[:,1])-self.E[1]**2
+        var  = np.dot(self.e**2,w[:,1])/ws[1]-self.E[1]**2
         alpha = (self.E[0]-self.E[1])/var
         print('\terr_eff=',np.sqrt(var/self.M))
-        print('\talpha',alpha)
+        print('\talpha=',alpha)
         print('\tw=',ws[0]/self.M,ws[1]/self.M)
         p = w[:,1] * (1 + alpha*v)
         psum = p.sum()
@@ -246,7 +249,10 @@ class SamplerSR:
     def load(self,fname):
         if RANK!=0:
             return
-        self.config = load(fname)[0] 
+        self.config,self.f,self.ws,self.we = load(fname) 
+        self.f = list(self.f)
+        self.ws = list(self.ws)
+        self.we = list(self.we)
         self.M = self.config.shape[0] # num walkers
         print(f'number of walkers=',self.M)
 class SamplerBranch(SamplerSR):
