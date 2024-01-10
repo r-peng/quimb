@@ -351,8 +351,10 @@ class Dense(Layer):
                     return x*(x>0)
         self._afn = _afn
 class NN:
-    def __init__(self,lr,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
+    def __init__(self,lr,sum_all=False,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
         self.lr = lr
+        self.nl = len(lr)
+        self.sum_all = sum_all
         self.backend = backend
         self.set_backend(backend)
         self.log = log # if output is amplitude or log amplitude 
@@ -500,12 +502,12 @@ class NN:
         return config * (xmax-xmin) + xmin 
     def forward(self,config):
         y = self._input(config)
-        for lr in self.lr:
+        _sum = 0
+        for l,lr in enumerate(self.lr):
             y = lr.forward(y)
-        try:
-            return y.sum() 
-        except:
-            return y
+            if l==self.nl-1 or self.sum_all:
+                _sum = _sum + y.sum() 
+        return _sum 
     def log_prob(self,config):
         if self.phase:
             return 1
