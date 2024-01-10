@@ -411,11 +411,20 @@ class NN:
     def extract_grad(self):
         return self.get_x(grad=True) 
     def load_from_disc(self,fname):
+        f = h5py.File(fname+'.hdf5','r')
+        for i,lr in enumerate(self.lr):
+            for j in len(lr.sh):
+                lr.params.append(f[f'l{i}p{j}'][:])
+        f.close() 
         [lr.load_from_disc(fname) for lr in self.lr]
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
             return
-        [lr.save_to_disc(fname) for lr in self.lr]
+        f = h5py.File(fname+'.hdf5','w')
+        for i,lr in enumerate(self.lr):
+            for j,tsr in enumerate(lr.params):
+                f.create_dataset(f'l{i}p{j}',data=tensor2backend(tsr,'numpy')
+        f.close()
     def update(self,x,fname=None,root=0):
         i = 0
         for lr in self.lr:
