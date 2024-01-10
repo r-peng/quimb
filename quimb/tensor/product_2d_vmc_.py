@@ -7,7 +7,7 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
 from .product_vmc import (
-    RBM,Dense,NN,
+    RBM,FNN,LRelu,CNN,#RNN,
     CompoundAmplitudeFactory,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
@@ -91,75 +91,76 @@ class SumAmplitudeFactory2D(SumAmplitudeFactory,
 
 from .tensor_2d_vmc import AmplitudeFactory2D 
 from .tensor_1d_vmc import AmplitudeFactory1D 
-#def get_bond_map_2d(self):
-#    bmap = dict()
-#    ix = 0
-#    for i,j in itertools.product(range(self.Lx),range(self.Ly)):
-#        ix1 = self.flatten((i,j))
-#        if j<self.Ly-1:
-#            ix2 = self.flatten((i,j+1)) 
-#            bmap[ix1,ix2] = ix
-#            ix += 1
-#        if i<self.Lx-1:
-#            ix2 = self.flatten((i+1,j)) 
-#            bmap[ix1,ix2] = ix
-#            ix += 1
-#    return bmap
-#class RBM2D(RBM,AmplitudeFactory2D):
-#    def __init__(self,Lx,Ly,nv,nh,**kwargs):
-#        self.Lx = Lx
-#        self.Ly = Ly 
-#        self.bmap = get_bond_map_2d(self)
-#        super().__init__(nv,nh,**kwargs)
-#class FNN2D(FNN,AmplitudeFactory2D):
-#    def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
-#        self.Lx = Lx
-#        self.Ly = Ly 
-#        self.bmap = get_bond_map_2d(self)
-#        super().__init__(nv,nh,afn,**kwargs)
-#class LRelu2D(LRelu,AmplitudeFactory2D):
-#    def __init__(self,Lx,Ly,nv,nh,**kwargs):
-#        self.Lx = Lx
-#        self.Ly = Ly 
-#        self.bmap = get_bond_map_2d(self)
-#        super().__init__(nv,nh,**kwargs)
+def get_bond_map_2d(self):
+    bmap = dict()
+    ix = 0
+    for i,j in itertools.product(range(self.Lx),range(self.Ly)):
+        ix1 = self.flatten((i,j))
+        if j<self.Ly-1:
+            ix2 = self.flatten((i,j+1)) 
+            bmap[ix1,ix2] = ix
+            ix += 1
+        if i<self.Lx-1:
+            ix2 = self.flatten((i+1,j)) 
+            bmap[ix1,ix2] = ix
+            ix += 1
+    return bmap
+class RBM2D(RBM,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
+        super().__init__(nv,nh,**kwargs)
+class FNN2D(FNN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,afn,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
+        super().__init__(nv,nh,afn,**kwargs)
+class LRelu2D(LRelu,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        self.bmap = get_bond_map_2d(self)
+        super().__init__(nv,nh,**kwargs)
 #class RNN2D(RNN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,D,**kwargs):
 #        self.Lx = Lx
 #        self.Ly = Ly 
 #        super().__init__(Lx*Ly,D,input_format=(-1,1),**kwargs)
-class NN2D(NN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,lr,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(lr,**kwargs)
-#class RBM1D(RBM,AmplitudeFactory1D):
-#    def __init__(self,nsite,nv,nh,**kwargs):
+#class SIGN2D(SIGN,AmplitudeFactory2D):
+#    def __init__(self,Lx,Ly,nv,nl,**kwargs):
+#        self.Lx = Lx
+#        self.Ly = Ly 
+#        super().__init__(nv,nl,**kwargs)
+class RBM1D(RBM,AmplitudeFactory1D):
+    def __init__(self,nsite,nv,nh,**kwargs):
+        self.nsite = nsite 
+        super().__init__(nv,nh,**kwargs)
+class FNN1D(FNN,AmplitudeFactory1D):
+    def __init__(self,nsite,nv,nh,afn,**kwargs):
+        self.nsite = nsite 
+        super().__init__(nv,nh,afn,**kwargs)
+#class SIGN1D(SIGN,AmplitudeFactory1D):
+#    def __init__(self,nsite,nv,nl,**kwargs):
 #        self.nsite = nsite 
-#        super().__init__(nv,nh,**kwargs)
-#class FNN1D(FNN,AmplitudeFactory1D):
-#    def __init__(self,nsite,nv,nh,afn,**kwargs):
-#        self.nsite = nsite 
-#        super().__init__(nv,nh,afn,**kwargs)
-class CNN2D(Dense):
-    def __init__(self,lx,ly,nx,ny,afn,**kwargs):
-        super().__init__(nx,ny,afn,**kwargs)
-        self.lx,self.ly = lx,ly
-        lx,ly = max(1,self.lx-l-1),max(1,self.ly-l-1)
-        self.sh = (lx,ly,4*nx,ny),(lx*ly,ny)
-    def apply_w(self,y):
-        y = y.reshape(self.lx,self.ly,dim2) 
-        lx,ly = max(1,self.lx-l-1),max(1,self.ly-l-1)
-        W = self.params[0]
+#        super().__init__(nv,nl,**kwargs)
+class CNN2D(CNN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nv,nh,afn,nf=1,**kwargs):
+        self.Lx,self.Ly = Lx,Ly
+        super().__init__(nv,nh,afn,**kwargs)
+    def apply_w(self,y,l):
+        lx = max(1,self.Lx-l)
+        ly = max(1,self.Ly-l)
+        dim1,dim2 = y.shape
+        assert lx * ly == dim1
+        y = y.reshape(lx,ly,dim2) 
+        lx = max(1,self.Lx-l-1)
+        ly = max(1,self.Ly-l-1)
+        W = self.params[l,'w']
         ynew = []
         for i,j in itertools.product(range(lx),range(ly)):
-            yij = [(i,j)]
-            if self.ly>1:
-                yij.append((i,j+1))
-            if self.lx>1:
-                yij.append((i+1,j))
-            if self.lx>1 and self.ly>1:
-                yij.append((i+1,j+1))
+            yij = (i,j),(i,j+1),(i+1,j),(i+1,j+1)
             yij = [y[i_,j_] for i_,j_ in yij]
             try:
                 yij = self.jnp.concatenate(yij)

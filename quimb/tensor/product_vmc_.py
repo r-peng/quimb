@@ -268,97 +268,8 @@ def pair_terms(i1,i2,spin):
     else:
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
-class Layer:
-    def __init__(backend='numpy'):
-        self.backend = backend
-        self.grad = True
-    def get_block_dict(self):
-        self.block_dict = []
-        start = 0
-        for p in self.params:
-            stop = start + p.size
-            self.block_dict.append((start,stop))
-            start = stop
-        self.nparam = stop
-    def set_backend(self,backend):
-        if backend=='numpy':
-            tsr = np.zeros(1)
-            self.jnp = np 
-        else:
-            tsr = torch.zeros(1)
-            self.jnp = torch
-        ar.set_backend(tsr)
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        self.set_backend(backend)
-        grad = requires_grad if self.grad else False
-        self.params = [tensor2backend(p,backend,requires_grad=grad) for p in self.params]
-    def get_x(self,grad=False):
-        ls = []
-        for p in self.params:
-            tsr = self.tensor_grad(p) if grad else p
-            ls.append(tensor2backend(tsr,'numpy').flatten())
-        return np.concatenate(ls)
-    def update(self,x,fname=None,root=0):
-        for i,sh in enumerate(self.sh):
-            start,stop = self.block_dict[i]
-            size = stop - start
-            xi,x = x[:size],x[size:]
-            self.params[i] = xi.reshape(sh) 
-    def init(self,key,eps,loc=0,iprint=False,normal=True):
-        if normal:
-            tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
-        else:
-            tsr = (np.random.rand(*self.sh[key])*2-1) * eps + loc 
-        COMM.Bcast(tsr,root=0)
-        self.params[key] = tsr
-        if RANK==0 and iprint:
-            print(key)
-            print(tsr)
-class RBM(Layer):
-    def __init__(self,nv,nh,**kwargs):
-        super().__init__(**kwargs)
-        self.sh = (nv,),(nh,),(nv,nh)
-    def forward(self,x):
-        a,b,w = self.params
-        return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
-class Dense(Layer):
-    def __init__(self,nx,ny,afn,bias=True,scale=1,pre_act=False,post_act=True,**kwargs):
-        super().__init__(**kwargs)
-        self.nx,self.ny = nx,ny
-        self.sh = (nx,ny),(ny,)
-        self.bias = bias
-        if not bias:
-            self.sh.pop()
-        self.scale = scale
-        self.pre_act = pre_act 
-        self.post_act = post_act
-    def apply_w(self,x):
-        return self.jnp.matmul(x,self.params[0])    
-    def forward(self,x):
-        if self.pre_act:
-            x = self._afn(x) 
-        y = self.apply_w(x)
-        if self.bias:
-            y = y + self.params[1]
-        if self.post_act:
-            y = self._afn(y)
-        return y
-    def set_backend(self,backend):
-        super().set_backend(backend)
-        if self.afn=='tanh':
-            def _afn(x):
-                return self.scale * self.jnp.tanh(x)
-        if self.afn=='relu':
-            def _afn(x):
-                try:
-                    return self.jnp.relu(x)
-                except AttributeError:
-                    return x*(x>0)
-        self._afn = _afn
 class NN(AmplitudeFactory):
-    def __init__(self,lr,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
-        self.lr = lr
+    def __init__(self,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
         self.backend = backend
         self.set_backend(backend)
         self.log = log # if output is amplitude or log amplitude 
@@ -375,70 +286,109 @@ class NN(AmplitudeFactory):
         assert input_format in ('det','bond','pnsz','fermion','conv1','conv2',(0,1),(-1,1))
         self.input_format = input_format
         self.order = order
-
-        self.change_layer_every = None
-        self.lcurr = 0
-        self.nstep = 0
+        self.params = dict()
+        self.param_keys = []
+        self.sh = dict()
+        self.change_layer_every = None 
+        self.act_pattern = None
+    def init(self,key,eps,loc=0,iprint=False,normal=True):
+        if normal:
+            tsr = np.random.normal(loc=loc,scale=eps,size=self.sh[key])
+        else:
+            tsr = (np.random.rand(*self.sh[key])*2-1) * eps + loc 
+        COMM.Bcast(tsr,root=0)
+        self.params[key] = tsr
+        if RANK==0 and iprint:
+            print(key)
+            print(tsr)
     def get_block_dict(self):
         self.block_dict = []
         start = 0
-        for lr in self.lr:
-            if not lr.grad:
-                continue
-            lr.get_block_dict() 
-            stop = start + lr.nparam
+        keys = self.param_keys if self.change_layer_every is None else self.layer_keys[self.lcurr]
+        for key in keys:
+            stop = start + self.params[key].size
             self.block_dict.append((start,stop))
             start = stop
         self.nparam = stop
     def set_backend(self,backend):
         if backend=='numpy':
+            tsr = np.zeros(1)
+            self.jnp = np 
             self._input = self.input
         else:
+            tsr = torch.zeros(1)
+            self.jnp = torch
             def _input(config):
                 return tensor2backend(self.input(config),backend) 
             self._input = _input
+        ar.set_backend(tsr)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
-        for lr in self.lr:
-            lr.wfn2backend(backend=backend,requires_grad=requires_grad)
+        for key in self.param_keys:
+            if self.change_layer_every is None:
+                grad = requires_grad
+            else:
+                grad = requires_grad if key in self.layer_keys[self.lcurr] else False
+            self.params[key] = tensor2backend(self.params[key],backend,requires_grad=grad)
     def get_x(self,grad=False):
         ls = []
-        for lr in self.lr:
-            if not lr.grad: 
-                continue
-            ls.append(lr.get_x(grad=grad))
+        keys = self.param_keys if self.change_layer_every is None else self.layer_keys[self.lcurr]
+        for key in keys:
+            tsr = self.params[key]
+            if grad:
+                tsr = self.tensor_grad(tsr)
+            ls.append(tensor2backend(tsr,'numpy').flatten())
         return np.concatenate(ls)
     def extract_grad(self):
         return self.get_x(grad=True) 
     def load_from_disc(self,fname):
-        [lr.load_from_disc(fname) for lr in self.lr]
+        self.sh = dict()
+        f = h5py.File(fname,'r')
+        for key in self.param_keys:
+            try:
+                tsr = f[str(key)][:]
+                self.params[key] = tsr 
+                self.sh[key] = tsr.shape
+                if self.change_layer_every is not None:
+                    self.layer_keys[i].append(key)
+            except:
+                continue
+        f.close()
+        return self.params
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
             return
-        [lr.save_to_disc(fname) for lr in self.lr]
+        f = h5py.File(fname+'.hdf5','w')
+        for key in self.param_keys:
+            f.create_dataset(str(key),data=self.params[key]) 
+        f.close()
     def update(self,x,fname=None,root=0):
-        i = 0
-        for lr in self.lr:
-            if not lr.grad:
-                continue
+        if self.change_layer_every is None: 
+            keys = self.param_keys 
+        else:
+            keys = self.layer_keys[self.lcurr]
+            if RANK==0:
+                print('update layer=',self.lcurr) 
+        for i,key in enumerate(keys):
             start,stop = self.block_dict[i]
             size = stop - start
             xi,x = x[:size],x[size:]
-            lr.update(xi)
-            i += 1
+            self.params[key] = xi.reshape(self.sh[key])
         if fname is not None:
             self.save_to_disc(fname,root=root) 
         if self.change_layer_every is not None:
             self.nstep = (self.nstep + 1) % self.change_layer_every
             if self.nstep==0:
                 self.lcurr = (self.lcurr + 1) % len(self.nh)
-            for ix,lr in enumerate(self.lr):
-                lr.grad = True if ix==self.lcurr else False
             self.get_block_dict()
         self.wfn2backend()
         if self.act_pattern is None:
             return 
+        for i,amap in enumerate(self.act_pattern):
+            with open(fname+f'l{i}RANK{RANK}.pkl','wb') as f:
+                pickle.dump(amap,f) 
+        self.act_pattern = [dict() for _ in self.afn] 
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
             return pair_terms(i1,i2,spin) 
@@ -490,14 +440,6 @@ class NN(AmplitudeFactory):
             config = np.array(config)
         xmin,xmax = self.input_format
         return config * (xmax-xmin) + xmin 
-    def forward(self,config):
-        y = self._input(config)
-        for lr in self.lr:
-            y = lr.forward(y)
-        try:
-            return y.sum() 
-        except:
-            return y
     def log_prob(self,config):
         if self.phase:
             return 1
@@ -576,6 +518,239 @@ class NN(AmplitudeFactory):
         return cx,self.vx 
     def get_grad_from_plq(self,plq):
         return self.get_grad_deterministic(self.config,save=True)[1]
+class RBM(NN):
+    def __init__(self,nv,nh,**kwargs):
+        super().__init__(**kwargs)
+        self.nv,self.nh = nv,nh
+        self.param_keys += ['a','b','w']
+        self.sh.update({'a':(self.nv,),
+                        'b':(self.nh,),
+                        'w':(self.nv,self.nh)})
+        self.change_layer_every = None 
+    def forward(self,config): # NN output
+        y = self._input(config)
+        a = self.params['a']
+        b = self.params['b']
+        w = self.params['w']
+        y = self.jnp.dot(a,y) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(y,w) + b)))
+        return y
+class FNN(NN):
+    def __init__(self,nv,nh,afn,nf=1,bias=False,wf=True,scale=None,change_layer_every=None,act_pattern=False,**kwargs):
+        self.afn = afn 
+        super().__init__(**kwargs)
+        self.nv,self.nh,self.nf = nv,nh,nf
+        self.nl = len(nh)
+        self.act_pattern = [dict() for _ in afn] if act_pattern else None 
+        self.scale = scale
+        self.bias = bias
+
+        self.change_layer_every = change_layer_every
+        if change_layer_every is not None:
+            self.lcurr = 0
+            self.nstep = 0
+            self.layer_keys = [[] for i in range(len(nh))]
+        for i in range(self.nl):
+            self.set_layer(i)
+        if wf:
+            self.set_wf()
+        if len(afn)==self.nl:
+            pass
+        elif len(afn)==self.nl+1:
+            assert (not self.log)
+        else:
+            raise ValueError(f'number of hidden nodes={len(nh)},number of activation fxn={len(afn)}')
+    def set_layer(self,i):
+        key = i,'w'
+        self.param_keys.append(key)
+        sh1 = self.nv if i==0 else self.nh[i-1]
+        self.sh[key] = sh1,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+        if not self.bias:
+            return
+        key = i,'b'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[i],
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+    def set_wf(self):
+        key = 'wf'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[-1],self.nf
+        if self.change_layer_every is not None: # group with final layer
+            self.layer_keys[self.nl-1].append(key)
+    def get_layer_afn(self,i):
+        afn = self.afn[i]
+        # unsaturating 
+        if afn=='id':
+            def _afn(x):
+                return x
+        elif afn=='logcosh':
+            def _afn(x):
+                return self.jnp.log(self.jnp.cosh(x))
+        elif afn=='softplus':
+            def _afn(x):
+                return self.jnp.log(1.+self.jnp.exp(x))
+        elif afn=='silu':
+            def _afn(x):
+                return x/(1.+self.jnp.exp(-x))
+        elif afn=='relu':
+            def _afn(x):
+                try:
+                    return self.jnp.relu(x)
+                except AttributeError:
+                    return x*(x>0)
+        elif afn=='exp':
+            def _afn(x):
+                return self.jnp.exp(x)
+        elif afn=='sinh':
+            def _afn(x):
+                return self.jnp.sinh(x)
+        # saturating
+        elif afn=='logistic':
+            def _afn(x):
+                return self.scale[i] / (1.+self.jnp.exp(-x))    
+        elif afn=='tanh':
+            def _afn(x):
+                return self.scale[i] * self.jnp.tanh(x)
+        elif afn=='cos':
+            def _afn(x):
+                return self.scale[i] * self.jnp.cos(x)
+        elif afn=='sin':
+            def _afn(x):
+                return self.scale[i] * self.jnp.sin(x)
+        return _afn
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
+    def apply_wb(self,y,i):
+        return self.jnp.matmul(y,self.params[i,'w'])    
+    def apply_wf(self,y):
+        return self.jnp.matmul(y,self.params['wf'])
+    def layer_forward(self,y,i):
+        y = self.apply_w(y,i)
+        if (i,'b') in self.params:
+            y = y + self.params[i,'b']
+        return self._afn[i](y)
+    def add_act_pattern(self,y,i,config):
+        if self.act_pattern is None:
+            return   
+        y = tensor2backend(y,'numpy')
+        key = tuple(np.nonzero(y > 1e-10)[0])
+        if key not in self.act_pattern[i]:
+            self.act_pattern[i][key] = set() 
+        self.act_pattern[i][key].add(tuple(config))
+        return y
+    def forward(self,config):
+        y = self._input(config)
+        for i in range(len(self.nh)):
+            y = self.layer_forward(y,i)
+            self.add_act_pattern(y,i,config)
+        if len(self.afn)==len(self.nh)+1:
+            y = self._afn[-1](y)
+        if 'wf' in self.params:
+            return self.apply_wf(y)
+        return self.jnp.sum(y)
+class CNN(FNN):
+    def set_layer(self,i):
+        lx,ly = max(self.Lx-i-1,1),max(self.Ly-i-1,1)
+        key = i,'w'
+        self.param_keys.append(key)
+        sh1 = self.nv if i==0 else self.nh[i-1]
+        self.sh[key] = lx,ly,4*sh1,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+        if not self.bias:
+            return
+        key = i,'b'
+        self.param_keys.append(key)
+        self.sh[key] = lx*ly,self.nh[i]
+        if self.change_layer_every is not None:
+            self.layer_keys[i].append(key)
+    def set_wf(self):
+        lx,ly = max(self.Lx-self.nl,1),max(self.Ly-self.nl,1)
+        key = 'wf'
+        self.param_keys.append(key)
+        self.sh[key] = lx*ly*self.nh[-1],self.nf
+        if self.change_layer_every is not None: # group with final layer
+            self.layer_keys[self.nl-1].append(key)
+class LCFNN(FNN):
+    def __init__(self,nv,nh,afn,nbasis,**kwargs):
+        self.nbasis = nbasis
+        super().__init__(nv,nh,afn,**kwargs)
+    def set_layer(self,i):
+        super().set_layer(i)
+        key = i,'a'
+        self.param_keys.append(key)
+        self.sh[key] = self.nbasis[i],
+    def get_layer_afn(self,i):
+        afn = self.afn[i]
+        if afn=='pow':
+            def _afn(x):
+                return [x**p for p in range(1,self.nbasis[i]+1)]
+        elif afn=='fsin':
+            def _afn(x):
+                return [self.jnp.sin(x*p) for p in range(1,self.nbasis[i]+1)]
+        else:
+            raise NotImplementedError
+        return _afn
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            c = self._afn[i](c)
+            c = sum([ci*ai for ci,ai in zip(c,self.params[i,'a'])]) 
+        if len(self.afn)==len(self.nh)+1:
+            c = self._afn[-1](c)
+        if 'wf' in self.params:
+            return self.jnp.matmul(c,self.params['wf'])
+        return self.jnp.sum(c)
+class LRelu(FNN):
+    def __init__(self,nv,nh,afn=None,**kwargs):
+        _afn = ('id',)*len(nh)
+        if afn is not None:
+            _afn = _afn + (afn,) 
+        super().__init__(nv,nh,_afn,**kwargs)
+    def set_layer(self,i):
+        super().set_layer(i)
+        key = i,'a'
+        self.param_keys.append(key)
+        self.sh[key] = self.nh[i],
+    def load_from_relu(self,fname,eps=1e-2,a=0,b=1):
+        self.sh = dict()
+        f = h5py.File(fname,'r')
+        for key in self.param_keys:
+            try:
+                tsr = f[str(key)][:]
+                self.params[key] = tsr 
+                self.sh[key] = tsr.shape
+            except:
+                continue
+        f.close()
+        for i in range(len(self.nh)):
+            key = (i,'a')
+            self.sh[key] = self.nh[i],
+            self.init(key,eps,a=a,b=b)
+        return self.params
+    def forward(self,c):
+        for i in range(len(self.nh)):
+            c = self.jnp.matmul(c,self.params[i,'w'])    
+            if (i,'b') in self.params:
+                c = c + self.params[i,'b']
+            try:
+                cp = self.jnp.relu(c)
+                cm = self.jnp.relu(-c)
+                c = cp - self.params[i,'a'] * cm
+            except AttributeError:
+                cp = c*(c>0)
+                cm = c*(c<0)
+                c = cp + self.params[i,'a'] * cm
+        if len(self.afn)==len(self.nh)+1:
+            c = self._afn[-1](c)
+        if 'wf' in self.params:
+            return self.jnp.matmul(c,self.params['wf'])
+        return self.jnp.sum(c)
 def rotate(x,eps):
     nx = len(x)
     K = np.random.normal(loc=0,scale=eps,size=(nx,nx))
@@ -675,3 +850,66 @@ def relu_init_spin(nx,eps,eps_init=None):
         x = np.random.normal(loc=0,scale=eps,size=nx)
         b.append(np.dot(w[-1],x))
     return np.array(w),np.array(b)
+class _RNN(NN):
+    def __init__(self,nsite,D,nf=1,**kwargs):
+        super().__init__(**kwargs)
+        self.nsite = nsite
+        self.D = D
+        self.nf = nf
+        self.pdim = 4 if self.fermion else 2
+        for i in range(1,nsite):
+            key = f'v{i}'
+            self.param_keys.append(key)
+            self.sh[key] = self.pdim,self.pdim,D
+            if i==1:
+                continue
+            key = f'T{i}' 
+            self.param_keys.append(key)
+            self.sh[key] = i-1,self.pdim,D,D,D
+    #def input(self,config):
+    #    array = np.zeros((self.nsite,self.pdim)) 
+    #    for i,ci in enumerate(config):
+    #        array[i,ci] = 1
+    #    return array
+    def forward(self,config): 
+        #y = self._input(config)
+        ls = [None] * len(config)
+        n = 0
+        for i,ci in enumerate(config):
+            if i==0:
+                continue
+            v = self.params[f'v{i}'][config[0],ci,:]
+            for j in range(1,i):
+                v = self.jnp.einsum('i,j,ijk->k',v,ls[j],self.params[f'T{i}'][j-1,ci,...]) 
+            ls[i] = v
+        return sum(v)
+class _CNN(NN):
+    def __init__(self,nsite,D,nf=1,**kwargs):
+        super().__init__(**kwargs)
+        pdim = 4 if self.fermion else 2 
+        #key = 'in'
+        #self.param_keys.append(key)
+        #self.sh[key] = nsite,pdim,pdim
+
+        self.nf = nf
+        if isinstance(D,int):
+            D = (D,)
+        D = (pdim,) + tuple(D) 
+        Dix = 0
+        l = 0
+        self.init_dim()
+        while True:
+            l,Dix,_break = self.set_layer(l,Dix,D)
+            if _break:
+                break 
+    def forward(self,config):
+        self.init_dim()
+        #v = {self.flat2site(i):self.params['in'][i,ci,:] for i,ci in enumerate(config)}
+        #l = 0 
+        v = self.input_layer(config)
+        l = 1
+        while True:
+            l,v,_break = self.layer_forward(l,v)
+            if _break:
+                break 
+        return v 
