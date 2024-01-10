@@ -314,7 +314,7 @@ class RBM(Layer):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
 class Dense(Layer):
-    def __init__(self,nx,ny,afn,bias=True,scale=1,pre_act=False,post_act=True,**kwargs):
+    def __init__(self,nx,ny,afn,bias=True,pre_act=False,post_act=True,**kwargs):
         super().__init__(**kwargs)
         self.nx,self.ny = nx,ny
         self.afn = afn
@@ -324,7 +324,6 @@ class Dense(Layer):
         if not bias:
             self.sh.pop()
             self.params.pop()
-        self.scale = scale
         self.pre_act = pre_act 
         self.post_act = post_act
     def apply_w(self,x):
@@ -340,6 +339,7 @@ class Dense(Layer):
         return y
     def set_backend(self,backend):
         super().set_backend(backend)
+        _afn = None
         if self.afn=='tanh':
             def _afn(x):
                 return self.scale * self.jnp.tanh(x)

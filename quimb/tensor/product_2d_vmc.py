@@ -97,11 +97,12 @@ class NN2D(NN,AmplitudeFactory2D):
         self.Ly = Ly 
         super().__init__(lr,**kwargs)
 class CNN2D(Dense):
-    def __init__(self,lx,ly,nx,ny,afn,**kwargs):
+    def __init__(self,lx,ly,nx,ny,afn,npool=1,**kwargs):
         super().__init__(nx,ny,afn,**kwargs)
         self.lx,self.ly = lx,ly
+        self.npool = npool
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
-        self.sh = (lx,ly,4*nx,ny),(lx*ly,ny)
+        self.sh = (lx,ly,4*nx,ny*npool),(lx*ly,ny*npool)
     def apply_w(self,y):
         y = y.reshape(self.lx,self.ly,y.shape[-1]) 
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
@@ -122,3 +123,11 @@ class CNN2D(Dense):
                 yij = self.jnp.cat(yij)
             ynew.append(self.jnp.matmul(yij,W[i,j]))
         return self.jnp.stack(ynew,axis=0)
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        if self.npool==1:
+            return
+        def _afn(x):
+            x = x.reshape(x.shape[0],self.ny,self.npool)
+            return self.jnp.max(x,-1) 
+        self._afn = _afn
