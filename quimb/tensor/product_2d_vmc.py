@@ -7,7 +7,7 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
 from .product_vmc import (
-    RBM,FNN,LRelu,RNN,CNN,
+    RBM,FNN,LRelu,CNN,#RNN,
     CompoundAmplitudeFactory,
     ProductAmplitudeFactory,
     SumAmplitudeFactory,
@@ -123,11 +123,11 @@ class LRelu2D(LRelu,AmplitudeFactory2D):
         self.Ly = Ly 
         self.bmap = get_bond_map_2d(self)
         super().__init__(nv,nh,**kwargs)
-class RNN2D(RNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,D,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(Lx*Ly,D,input_format=(-1,1),**kwargs)
+#class RNN2D(RNN,AmplitudeFactory2D):
+#    def __init__(self,Lx,Ly,D,**kwargs):
+#        self.Lx = Lx
+#        self.Ly = Ly 
+#        super().__init__(Lx*Ly,D,input_format=(-1,1),**kwargs)
 #class SIGN2D(SIGN,AmplitudeFactory2D):
 #    def __init__(self,Lx,Ly,nv,nl,**kwargs):
 #        self.Lx = Lx
@@ -146,47 +146,32 @@ class FNN1D(FNN,AmplitudeFactory1D):
 #        self.nsite = nsite 
 #        super().__init__(nv,nl,**kwargs)
 class CNN2D(CNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,D,nf=1,**kwargs):
+    def __init__(self,Lx,Ly,nv,nh,afn,nf=1,**kwargs):
         self.Lx,self.Ly = Lx,Ly
-        super().__init__(Lx*Ly,D,**kwargs)
-    def apply_w(self,y,i):
-        if i==0:
-            self._apply_w0(y)
-    def _apply_w0(self,y):
-        ynew = dict()
-        l = 0
+        super().__init__(nv,nh,afn,**kwargs)
+    def apply_w(self,y,l):
+        lx = max(1,self.Lx-l)
+        ly = max(1,self.Ly-l)
+        dim1,dim2 = y.shape
+        assert lx * ly == dim1
+        y = y.reshape(lx,ly,dim2) 
         lx = max(1,self.Lx-l-1)
         ly = max(1,self.Ly-l-1)
         W = self.params[l,'w']
-        for i,j in itertools.product(lx,ly):
-            yij = [(i,j)]
-            if j<ly-1: 
-                yij.append((i,j+1))
-            if i<lx-1:
-                yij.append((i+1,j))
-            if i<lx-1 and j<ly-1:
-                yij.append((i+1,j+1))
-            yij = [y[self.flatten(site)] for site in yij]
-            yij = self.jnp.concatenate(yij)
-            ynew[i,j] = self.jnp.matmul(yij,W[i,j]) 
-        return ynew
-    def _apply_w(self,y,l):
-        ynew = dict()
-        lx = max(1,self.Lx-l-1)
-        ly = max(1,self.Ly-l-1)
-        W = self.params[l,'w']
-        for i,j in itertools.product(lx,ly):
-            yij = [(i,j)]
-            if j<ly-1: 
-                yij.append((i,j+1))
-            if i<lx-1:
-                yij.append((i+1,j))
-            if i<lx-1 and j<ly-1:
-                yij.append((i+1,j+1))
-            yij = [y[site] for site in yij]
-            yij = self.jnp.concatenate(yij)
-            ynew[i,j] = self.jnp.matmul(yij,W[i,j]) 
-        return ynew
+        ynew = []
+        for i,j in itertools.product(range(lx),range(ly)):
+            yij = (i,j),(i,j+1),(i+1,j),(i+1,j+1)
+            yij = [y[i_,j_] for i_,j_ in yij]
+            try:
+                yij = self.jnp.concatenate(yij)
+            except:
+                yij = self.jnp.cat(yij)
+            ynew.append(self.jnp.matmul(yij,W[i,j]))
+        return self.jnp.stack(ynew,axis=0)
+    def apply_wf(self,y):
+        dim1,dim2,dim3 = y.shape
+        y = y.reshape(dim1*dim2,dim3)
+        return self.jnp.matmul(y,self.params['wf'])
 ##########################################################
 class _CNN2D(CNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,D,nf=1,**kwargs):

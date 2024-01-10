@@ -79,12 +79,25 @@ class Walker:
         self.remain -= k+1
         if self.remain > 0:
             self.sample_offdiag() 
+def load(fname):
+    f = h5py.File(fname,'r')
+    config = f['config_new'][:] 
+    wf = f['f'][:]
+    ws = f['ws'][:]
+    we = f['we'][:]
+    f.close()
+    return config,wf,ws,we
+def compute_expectation(we,ws,f,L,eq=0):
+    we = we[eq:]
+    ws = ws[eq:]
+    f = f[eq:]
+    N = len(f)-L-1
+    G = np.array([f[i:i+L].prod() for i in range(N)])
+    return np.dot(G,we[L+1:])/np.dot(G,ws[L+1:])
 class SamplerSR:
-    def __init__(self,wk,L,N,seed=None):
+    def __init__(self,wk,seed=None):
         self.wk = wk
         self.nsite = wk.af.nsite 
-        self.L = L # product length
-        self.N = N # sum length
         self.f = []
         self.ws = []
         self.we = [] 
@@ -95,8 +108,10 @@ class SamplerSR:
         for step in range(start,stop):
             self.step = step
             self.sample()
-            self.SR()
+            terminate = self.SR()
             self.save(tmpdir)
+            if terminate:
+                break
     def sample(self):
         self.terminate = np.zeros(self.nsite+3)
         self.buf = np.zeros(6)
@@ -163,7 +178,8 @@ class SamplerSR:
         self.ws.append(np.sum(self.config[:,-2:],axis=0)) 
         self.we.append(np.dot(self.e,self.config[:,-2:]))
         # compute energy
-        self.E = self.compute_expectation(self.we) 
+        #self.E = self.compute_expectation(self.we) 
+        self.E = self.we[-1] / self.ws[-1]
         e = self.E + self.wk.shift 
         e /= self.nsite
         print(f'step={self.step},e={e[0]},e_eff={e[1]}')
@@ -185,39 +201,32 @@ class SamplerSR:
         if RANK!=0:
             return
         ws = self.ws[-1]
-        ws_ = np.fabs(self.w[:,-2]).sum()
+        w = self.config[:,-2:]
+        ws_ = np.fabs(w[:,1]).sum()
         print('\tave sign=',ws[0],ws_,ws[0]/ws_)
 
-        ops = [self.e]
-        ops_eff = [self.E[1]]
-        v = np.zeros((1,self.M))
-        for ix in range(1):
-            v[ix] = ops[ix] - ops_eff[ix]
-        S = np.einsum('kj,lj,j->kl',v,v,self.w[:,-1]) / ws[1]
-        b = np.dot(v,self.w[:,-2]) / ws[0]
-        alpha = np.linalg.solve(S,b)
+        v = self.e - self.E[1] 
+        var  = np.dot(self.e**2,w[:,1])-self.E[1]**2
+        alpha = (self.E[0]-self.E[1])/var
+        print('\terr_eff=',np.sqrt(var/self.M))
         print('\talpha',alpha)
         print('\tw=',ws[0]/self.M,ws[1]/self.M)
-        #print(self.w[0])
-        #print(self.w[1])
-        p = self.w[:,-1] * (1 + np.dot(alpha,v))
+        p = w[:,1] * (1 + alpha*v)
         psum = p.sum()
 
         prob = np.fabs(p)
         prob_sum = prob.sum()
-        print('\tbeta=',psum,prob_sum,psum/prob_sum)
+        beta = psum/prob_sum
+        print('\tbeta=',psum,prob_sum,beta)
         prob /= prob_sum 
         idx = self.rng.choice(self.M,size=self.M,p=prob) 
         self.config = self.config[idx]
         self.config[:,-2] = np.sign(p[idx])
         self.config[:,-1] = 1
 
-        f = ws[0]/self.M*prob_sum/psum
+        f = ws[0]/self.M/beta
         self.f.append(f)
-        if len(self.f)>self.N+self.L:
-            self.f.pop(0)
-            self.we.pop(0)
-            self.ws.pop(0)
+        return False
     def save(self,tmpdir):
         if RANK!=0:
             return
@@ -237,16 +246,11 @@ class SamplerSR:
     def load(self,fname):
         if RANK!=0:
             return
-        f = h5py.File(fname,'r')
-        self.config = f['config_new'][:] 
-        self.f += list(f['f'][:])
-        self.ws += list(f['ws'][:])
-        self.we += list(f['we'][:])
-        f.close()
+        self.config = load(fname)[0] 
         self.M = self.config.shape[0] # num walkers
         print(f'number of walkers=',self.M)
 class SamplerBranch(SamplerSR):
-    def __init__(self,wk,nmin,nmax,seed=None):
+    def __init__(self,wk,nmin,nmax,branch=False,seed=None):
         self.wk = wk
         self.nsite = wk.af.nsite 
         self.nmin = nmin
@@ -255,11 +259,14 @@ class SamplerBranch(SamplerSR):
         self.rng = np.random.default_rng(seed=seed)
         self.thresh = 1e-10
         self.progbar = False 
+        self.branch = branch
     def compute_energy(self):
         e = self.compute_expectation(self.e)
         e[:,0] += self.wk.shift
         e /= self.nsite
-        print(f'step={self.step},e={e[0,0]},err={e[0,1]},e_eff={e[1,0]},err_eff={e[1,1]}')
+        w = self.config[:,-2:]
+        rms = np.sqrt(np.sum(w**2,axis=0)/self.M)
+        print(f'step={self.step},e={e[0,0]},err={e[0,1]},e_eff={e[1,0]},err_eff={e[1,1]},rms={rms}')
     def compute_expectation(self,e):
         E = np.zeros((2,2))
         E[0] = blocking_analysis(e,weights=self.config[:,-2])
@@ -272,39 +279,47 @@ class SamplerBranch(SamplerSR):
         wmax = max(w)
         wmean = w.sum()/self.M
         print('\tweff max,min,ave=',wmax,min(w),wmean)
+        if not self.branch:
+            return False
 
-        idx = np.nonzero(w > wmax * self.thresh)[0]
-        self.config = self.config[idx] 
-        self.config[:,-2:] /= wmax 
-        self.M = len(idx)
-        if self.M >= self.nmin:
-            return
+        #idx = np.nonzero(w > wmax * self.thresh)[0]
+        #self.config = self.config[idx] 
+        #self.config[:,-2:] /= wmax 
+        #self.M = len(idx)
+        #if self.M >= self.nmin:
+        #    return
 
-        w = self.config[:,-1]
-        idx = np.argsort(w)
-        self.config = self.config[idx]
-        N = self.nmax - self.M 
-        self.config[-N:,-2:] /= 2
-        self.config = np.concatenate([self.config,self.config[-N:]],axis=0)
+        #w = self.config[:,-1]
+        #idx = np.argsort(w)
+        #self.config = self.config[idx]
+        #N = self.nmax - self.M 
+        #self.config[-N:,-2:] /= 2
+        #self.config = np.concatenate([self.config,self.config[-N:]],axis=0)
 
-        #for ix in range(self.M):
-        #    config = self.config[ix] 
-        #    m = int(config[-1]+self.rng.random())
-        #    if m==0:
-        #        if self.M < self.nmin:
-        #            config_new.append(config)
-        #        continue
-        #    if m==1:
-        #        config_new.append(config)
-        #        continue
-        #    if self.M > self.nmax:
-        #        config_new.append(config)
-        #        continue
-        #    config[-2:] /= m
-        #    config_new += [config.copy() for _ in range(m)]
-        #self.config = np.array(config_new)
+        config_new = []
+        for ix in range(self.M):
+            config = self.config[ix] 
+            m = int(config[-1]+self.rng.random())
+            if m==0:
+                #if self.M < self.nmin:
+                #    config_new.append(config)
+                continue
+            if m==1:
+                config_new.append(config)
+                continue
+            #if self.M > self.nmax:
+            #    config_new.append(config)
+            #    continue
+            config[-2:] /= m
+            config_new += [config.copy() for _ in range(m)]
+        self.config = np.array(config_new)
         self.M = self.config.shape[0]
         print(f'\tnumber of walkers=',self.M)
+        if self.M > self.nmax:
+            return True
+        if self.M < self.nmin:
+            return True
+        return False
     def save(self,tmpdir):
         if RANK!=0:
             return

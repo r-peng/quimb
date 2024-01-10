@@ -283,7 +283,7 @@ class NN(AmplitudeFactory):
         self.vx = None
 
         self.fermion = fermion
-        assert input_format in ('det','bond','pnsz','fermion',(0,1),(-1,1))
+        assert input_format in ('det','bond','pnsz','fermion','conv1','conv2',(0,1),(-1,1))
         self.input_format = input_format
         self.order = order
         self.params = dict()
@@ -417,7 +417,7 @@ class NN(AmplitudeFactory):
         v = np.zeros((len(config),2))
         pn_map = [0,1,1,2]
         sz_map = [0,1,-1,0]
-        for i,ci in enumerate(config)):
+        for i,ci in enumerate(config):
             v[i,0] = pn_map[ci]
             v[i,1] = sz_map[ci]
         return v
@@ -430,9 +430,14 @@ class NN(AmplitudeFactory):
             return self.input_bond(config)
         if self.input_format=='pnsz':
             return self.input_pnsz(config)
+        if self.input_format=='conv1':
+            return np.array(config,dtype=float).reshape(len(config),1) 
+        if self.input_format=='conv2':
+            return np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
         if self.fermion:
-            ca,cb = config_to_ab(config) 
-            config = np.stack([np.array(tsr,dtype=float) for tsr in (ca,cb)],axis=0).flatten(order=self.order)
+            config = np.stack([np.array(cf,dtype=float) for tsr in config_to_ab(config)],axis=0).flatten(order=self.order)
+        else:
+            config = np.array(config)
         xmin,xmax = self.input_format
         return config * (xmax-xmin) + xmin 
     def log_prob(self,config):
@@ -618,12 +623,10 @@ class FNN(NN):
     def set_backend(self,backend):
         super().set_backend(backend)
         self._afn = [self.get_layer_afn(i) for i in range(len(self.afn))]
-    def apply_w(self,y,i):
+    def apply_wb(self,y,i):
         return self.jnp.matmul(y,self.params[i,'w'])    
     def apply_wf(self,y):
-        if 'wf' in self.params:
-            return self.jnp.matmul(y,self.params['wf'])
-        return self.jnp.sum(y)
+        return self.jnp.matmul(y,self.params['wf'])
     def layer_forward(self,y,i):
         y = self.apply_w(y,i)
         if (i,'b') in self.params:
@@ -645,10 +648,10 @@ class FNN(NN):
             self.add_act_pattern(y,i,config)
         if len(self.afn)==len(self.nh)+1:
             y = self._afn[-1](y)
-        return self.apply_wf(y)
+        if 'wf' in self.params:
+            return self.apply_wf(y)
+        return self.jnp.sum(y)
 class CNN(FNN):
-    def __init__(self,nv,nh,afn,**kwargs):
-        super().__init__(None,nh,afn,**kwargs)
     def set_layer(self,i):
         lx,ly = max(self.Lx-i-1,1),max(self.Ly-i-1,1)
         key = i,'w'
@@ -661,14 +664,14 @@ class CNN(FNN):
             return
         key = i,'b'
         self.param_keys.append(key)
-        self.sh[key] = lx,ly,self.nh[i]
+        self.sh[key] = lx*ly,self.nh[i]
         if self.change_layer_every is not None:
             self.layer_keys[i].append(key)
-   def set_wf(self):
+    def set_wf(self):
         lx,ly = max(self.Lx-self.nl,1),max(self.Ly-self.nl,1)
         key = 'wf'
         self.param_keys.append(key)
-        self.sh[key] = lx,ly,self.nh[-1],self.nf
+        self.sh[key] = lx*ly*self.nh[-1],self.nf
         if self.change_layer_every is not None: # group with final layer
             self.layer_keys[self.nl-1].append(key)
 class LCFNN(FNN):

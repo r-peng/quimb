@@ -334,8 +334,6 @@ class SGD: # stochastic sampling
         err_max = 0.
         ncurr = 0
         t0 = time.time()
-        for worker in range(1,SIZE): 
-            COMM.Send(self.terminate,dest=worker,tag=1)
         while True:
             COMM.Recv(self.buf,tag=0)
             step = int(self.buf[4].real+.1)
@@ -377,9 +375,6 @@ class SGD: # stochastic sampling
         e = []
         configs = []
         while True:
-            COMM.Recv(self.terminate,source=0,tag=1)
-            if self.terminate[0]==1:
-                break
             config,omega = self.sampler.sample()
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
@@ -394,7 +389,6 @@ class SGD: # stochastic sampling
                     Hvx = np.zeros(self.nparam,dtype=self.dtype_o)
             self.buf[2] = ex
             self.buf[3] = err
-            COMM.Send(self.buf,dest=0,tag=0) 
             if compute_v:
                 self.vsum += vx
                 self.evsum += vx * ex.conj()
@@ -406,6 +400,10 @@ class SGD: # stochastic sampling
                 c.append(cx)
                 e.append(ex)
                 configs.append(list(config))
+            COMM.Send(self.buf,dest=0,tag=0) 
+            COMM.Recv(self.terminate,source=0,tag=1)
+            if self.terminate[0]==1:
+                break
 
         #self.sampler.config = self.config
         if compute_v:
