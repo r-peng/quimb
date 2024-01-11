@@ -1,5 +1,6 @@
 import time,itertools
 import numpy as np
+import torch
 
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
@@ -102,7 +103,9 @@ class CNN2D(Dense):
         self.lx,self.ly = lx,ly
         self.npool = npool
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
-        self.sh = (lx,ly,4*nx,ny*npool),(lx*ly,ny*npool)
+        self.sh = [(lx,ly,4*nx,ny*npool),(lx*ly,ny*npool)]
+        if not self.bias:
+            self.sh.pop()
     def apply_w(self,y):
         y = y.reshape(self.lx,self.ly,y.shape[-1]) 
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
@@ -124,10 +127,19 @@ class CNN2D(Dense):
             ynew.append(self.jnp.matmul(yij,W[i,j]))
         return self.jnp.stack(ynew,axis=0)
     def set_backend(self,backend):
-        super().set_backend(backend)
         if self.npool==1:
+            super().set_backend(backend)
             return
-        def _afn(x):
-            x = x.reshape(x.shape[0],self.ny,self.npool)
-            return self.jnp.max(x,-1) 
+        if backend=='numpy': 
+            self.jnp = np
+            def _afn(x):
+                x = x.reshape(x.shape[0],self.ny,self.npool)
+                y = self.jnp.max(x,axis=-1) 
+                return y
+        else:
+            self.jnp = torch
+            def _afn(x):
+                x = x.reshape(x.shape[0],self.ny,self.npool)
+                y,_ = self.jnp.max(x,-1) 
+                return y
         self._afn = _afn

@@ -279,7 +279,7 @@ class Layer(AmplitudeFactory):
             start = stop
         self.nparam = stop
     def set_backend(self,backend):
-        self.jnp = backend
+        self.jnp = np if backend=='numpy' else torch 
     def wfn2backend(self,backend=None,requires_grad=False):
         grad = requires_grad if self.grad else False
         self.params = [tensor2backend(p,backend,requires_grad=grad) for p in self.params]
@@ -309,7 +309,7 @@ class RBM(Layer):
     def __init__(self,nv,nh,**kwargs):
         super().__init__(**kwargs)
         self.sh = (nv,),(nh,),(nv,nh)
-        self.params[None] * 3
+        self.params = [None] * 3
     def forward(self,x):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
@@ -318,7 +318,7 @@ class Dense(Layer):
         super().__init__(**kwargs)
         self.nx,self.ny = nx,ny
         self.afn = afn
-        self.sh = (nx,ny),(ny,)
+        self.sh = [(nx,ny),(ny,)]
         self.params = [None] * 2
         self.bias = bias
         if not bias:
@@ -399,7 +399,7 @@ class NN:
             self._input = _input
         ar.set_backend(tsr)
         for lr in self.lr:
-            lr.set_backend(self.jnp)
+            lr.set_backend(backend)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
