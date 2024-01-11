@@ -106,10 +106,30 @@ class CNN2D(Dense):
         self.sh = [(lx,ly,4*nx,ny*npool),(lx*ly,ny*npool)]
         if not self.bias:
             self.sh.pop()
-    def apply_w(self,y):
-        y = y.reshape(self.lx,self.ly,y.shape[-1]) 
+    def apply_w(self,x):
+        x = x.reshape(self.lx,self.ly,x.shape[-1]) 
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
         W = self.params[0]
+        y = []
+        for i,j in itertools.product(range(lx),range(ly)):
+            yij = [(i,j)]
+            if self.ly>1:
+                yij.append((i,j+1))
+            if self.lx>1:
+                yij.append((i+1,j))
+            if self.lx>1 and self.ly>1:
+                yij.append((i+1,j+1))
+            yij = [x[i_,j_] for i_,j_ in yij]
+            try:
+                yij = self.jnp.concatenate(yij)
+            except:
+                yij = self.jnp.cat(yij)
+            y.append(self.jnp.matmul(yij,W[i,j]))
+        return self.jnp.stack(y,axis=0)
+    def _combine(self,x,y):
+        x = x.reshape(self.lx,self.ly,x.shape[-1]) 
+        lx,ly = max(1,self.lx-1),max(1,self.ly-1)
+        y = y.reshape(lx,ly,y.shape[-1]) 
         ynew = []
         for i,j in itertools.product(range(lx),range(ly)):
             yij = [(i,j)]
@@ -119,12 +139,12 @@ class CNN2D(Dense):
                 yij.append((i+1,j))
             if self.lx>1 and self.ly>1:
                 yij.append((i+1,j+1))
-            yij = [y[i_,j_] for i_,j_ in yij]
+            yij = [x[i_,j_] for i_,j_ in yij] + [y[i,j]]
             try:
                 yij = self.jnp.concatenate(yij)
             except:
                 yij = self.jnp.cat(yij)
-            ynew.append(self.jnp.matmul(yij,W[i,j]))
+            ynew.append(yij)
         return self.jnp.stack(ynew,axis=0)
     def set_backend(self,backend):
         if self.npool==1:

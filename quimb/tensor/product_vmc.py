@@ -314,12 +314,13 @@ class RBM(Layer):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
 class Dense(Layer):
-    def __init__(self,nx,ny,afn,bias=True,pre_act=False,post_act=True,**kwargs):
+    def __init__(self,nx,ny,afn,combine=False,bias=True,pre_act=False,post_act=True,**kwargs):
         super().__init__(**kwargs)
         self.nx,self.ny = nx,ny
         self.afn = afn
         self.sh = [(nx,ny),(ny,)]
         self.params = [None] * 2
+        self.combine = combine
         self.bias = bias
         if not bias:
             self.sh.pop()
@@ -328,7 +329,14 @@ class Dense(Layer):
         self.post_act = post_act
     def apply_w(self,x):
         return self.jnp.matmul(x,self.params[0])    
+    def _combine(self,x,y):
+        try:
+            return self.jnp.concatenate([x,y])
+        except:
+            return self.jnp.cat([x,y])
     def forward(self,x):
+        if xprev is not None:
+            x = self.combine(x,xprev)
         if self.pre_act:
             x = self._afn(x) 
         y = self.apply_w(x)
@@ -336,6 +344,8 @@ class Dense(Layer):
             y = y + self.params[1]
         if self.post_act:
             y = self._afn(y)
+        if self.combine:
+            y = self._combine(x,y)
         return y
     def set_backend(self,backend):
         super().set_backend(backend)
