@@ -148,7 +148,7 @@ class Sampler:
         self.ws.append(w) 
         e,err = blocking_analysis(self.e,weights=self.w)
         self.we.append(e)
-        print(f'step={self.step},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite}')
+        print(f'step={self.step},w={w},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite}')
 
         xi = self.rng.random()
         pc = np.cumsum(w/w.sum())
