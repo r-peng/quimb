@@ -36,10 +36,10 @@ class Walker:
         u = self.af.model.compute_local_energy_eigen(self.config) - self.shift
         self.e = sum(h.values()) + u
 
-        u += (1+self.gamma)*sum([val for val in self.h.values() if val > 0])
+        u += (1+self.gamma)*sum([val for val in h.values() if val > 0])
         
         logxi = np.log(self.rng.random())
-        td = min(self.remain,self.logxi/(self.e-u))
+        td = min(self.remain,logxi/(self.e-u))
         self.weight *= np.exp(-td*self.e)
         self.remain -= td
         if self.remain <= 0:
@@ -51,6 +51,7 @@ class Walker:
             keys.append(key)
             sign = -1 if val<0 else self.gamma
             p.append(val*sign)
+        p = np.array(p)
 
         idx = self.rng.choice(len(p),p=p/p.sum())
         self.config = keys[idx]
@@ -131,10 +132,10 @@ class Sampler:
     def _sample(self):
         while True:
             COMM.Recv(self.terminate,source=0,tag=1)
-            if int(self.terminate[-1]+.1)==1:
+            if self.terminate[-1]==1:
                 break
             
-            config = np.array(self.terminate[:-1]
+            config = tuple(self.terminate[:-1])
             self.wk.propagate(config)
             self.buf[2] = self.wk.e
             self.buf[3] = self.wk.weight
@@ -147,11 +148,10 @@ class Sampler:
         self.ws.append(w) 
         e,err = blocking_analysis(self.e,weights=self.w)
         self.we.append(e)
-        print(f'step={self.step},e={(e+shift)/self.nsite},err={err/self.nsite}')
+        print(f'step={self.step},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite}')
 
         xi = self.rng.random()
-        p = w/w.sum()
-        pcum = np.cumsum(p)
+        pc = np.cumsum(w/w.sum())
         config = np.zeros_like(self.config) 
         for i in range(self.M):
             z = i/self.M + xi 
@@ -169,7 +169,7 @@ class Sampler:
     def init(self,config):
         if RANK!=0:
             return
-        self.config = config
+        self.config = np.array(config+.1,dtype=int)
         self.M = config.shape[0]
         print(f'number of walkers=',self.M)
     def load(self,fname):
