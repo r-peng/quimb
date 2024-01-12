@@ -440,8 +440,7 @@ class NN:
         f = h5py.File(fname+'.hdf5','r')
         for i,lr in enumerate(self.lr):
             for j in range(len(lr.sh)):
-                lr.params.append(f[f'l{i}p{j}'][:])
-            print(lr.params)
+                lr.params[j] = f[f'l{i}p{j}'][:]
         f.close() 
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
