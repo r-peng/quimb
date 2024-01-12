@@ -21,22 +21,25 @@ def flat2site(ix,Ly): # ix in row order
 # amplitude fxns 
 ####################################################################################
 class AmplitudeFactory2D(AmplitudeFactory):
-    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,from_plq=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,from_plq=True,dmc=False,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
         self.sites = list(itertools.product(range(self.Lx),range(self.Ly)))
         psi.add_tag('KET')
         self.set_psi(psi) # current state stored in self.psi
-        self.backend = backend 
 
         self.data_map = self.get_data_map(phys_dim)
+
+        self.model = model
+        self.dmc = dmc
+        self.from_plq = False if dmc else from_plq
+        self.backend = backend 
         self.wfn2backend()
 
         # init contraction
         self.compress_opts = compress_opts
         self.pbc = pbc 
-        self.from_plq = from_plq
         self.deterministic = deterministic
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 

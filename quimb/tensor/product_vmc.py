@@ -330,13 +330,13 @@ class Dense(Layer):
     def apply_w(self,x):
         return self.jnp.matmul(x,self.params[0])    
     def _combine(self,x,y):
+        if not self.combine:
+            return y
         try:
             return self.jnp.concatenate([x,y])
         except:
             return self.jnp.cat([x,y])
     def forward(self,x):
-        if xprev is not None:
-            x = self.combine(x,xprev)
         if self.pre_act:
             x = self._afn(x) 
         y = self.apply_w(x)
@@ -344,8 +344,7 @@ class Dense(Layer):
             y = y + self.params[1]
         if self.post_act:
             y = self._afn(y)
-        if self.combine:
-            y = self._combine(x,y)
+        y = self._combine(x,y)
         return y
     def set_backend(self,backend):
         super().set_backend(backend)
@@ -359,6 +358,18 @@ class Dense(Layer):
                     return self.jnp.relu(x)
                 except AttributeError:
                     return x*(x>0)
+        if self.afn=='softplus':
+            def _afn(x):
+                return self.jnp.log(1+self.exp(x))
+        if self.afn=='sinh':
+            def _afn(x):
+                return self.jnp.sinh(x)
+        if self.afn=='cosh':
+            def _afn(x):
+                return self.jnp.cosh(x)
+        if self.afn=='exp':
+            def _afn(x):
+                return self.jnp.exp(x)
         self._afn = _afn
 class NN:
     def __init__(self,lr,sum_all=False,backend='numpy',log=True,phase=False,input_format=(0,1),order='F',fermion=False):
@@ -385,6 +396,7 @@ class NN:
         self.change_layer_every = None
         self.lcurr = 0
         self.nstep = 0
+        self.const = 0 if log else 1 
     def get_block_dict(self):
         self.block_dict = []
         start = 0
@@ -427,10 +439,10 @@ class NN:
     def load_from_disc(self,fname):
         f = h5py.File(fname+'.hdf5','r')
         for i,lr in enumerate(self.lr):
-            for j in len(lr.sh):
+            for j in range(len(lr.sh)):
                 lr.params.append(f[f'l{i}p{j}'][:])
+            print(lr.params)
         f.close() 
-        [lr.load_from_disc(fname) for lr in self.lr]
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
             return
@@ -505,7 +517,7 @@ class NN:
         if self.input_format=='conv2':
             return np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
         if self.fermion:
-            config = np.stack([np.array(cf,dtype=float) for tsr in config_to_ab(config)],axis=0).flatten(order=self.order)
+            config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=self.order)
         else:
             config = np.array(config)
         xmin,xmax = self.input_format
@@ -517,7 +529,7 @@ class NN:
             y = lr.forward(y)
             if l==self.nl-1 or self.sum_all:
                 _sum = _sum + y.sum() 
-        return _sum 
+        return _sum + self.const 
     def log_prob(self,config):
         if self.phase:
             return 1

@@ -106,6 +106,7 @@ class CNN2D(Dense):
         self.sh = [(lx,ly,4*nx,ny*npool),(lx*ly,ny*npool)]
         if not self.bias:
             self.sh.pop()
+        self.flatten = False
     def apply_w(self,x):
         x = x.reshape(self.lx,self.ly,x.shape[-1]) 
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
@@ -127,6 +128,8 @@ class CNN2D(Dense):
             y.append(self.jnp.matmul(yij,W[i,j]))
         return self.jnp.stack(y,axis=0)
     def _combine(self,x,y):
+        if not self.combine:
+            return y
         x = x.reshape(self.lx,self.ly,x.shape[-1]) 
         lx,ly = max(1,self.lx-1),max(1,self.ly-1)
         y = y.reshape(lx,ly,y.shape[-1]) 
@@ -145,7 +148,10 @@ class CNN2D(Dense):
             except:
                 yij = self.jnp.cat(yij)
             ynew.append(yij)
-        return self.jnp.stack(ynew,axis=0)
+        y = self.jnp.stack(ynew,axis=0)
+        if self.flatten:
+            y = y.flatten()
+        return y
     def set_backend(self,backend):
         if self.npool==1:
             super().set_backend(backend)
