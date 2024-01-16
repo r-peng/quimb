@@ -1,5 +1,5 @@
 import time,h5py,gc
-from pympler import muppy,summary
+#from pympler import muppy,summary
 import numpy as np
 from quimb.utils import progbar as Progbar
 from .tensor_vmc import (
@@ -79,6 +79,7 @@ class Sampler:
 
         self.rng = np.random.default_rng(seed=seed)
         self.progbar = False 
+        self.clear_every = 1
     def run(self,start,stop,tmpdir=None):
         for step in range(start,stop):
             self.step = step
@@ -86,10 +87,10 @@ class Sampler:
             self.SR()
             self.save(tmpdir)
     def sample(self):
-        if RANK==self.print_rank:
-            all_ = muppy.get_objects()
-            sum_ = summary.summarize(all_objects)
-            summary.print_(sum_)
+        #if RANK==self.print_rank:
+        #    all_ = muppy.get_objects()
+        #    sum_ = summary.summarize(all_)
+        #    summary.print_(sum_)
         self.terminate = np.zeros(self.nsite+1,dtype=int)
         self.buf = np.zeros(5)
         self.buf[0] = self.step 
@@ -146,6 +147,9 @@ class Sampler:
             self.buf[3] = self.wk.weight
             self.buf[4] = self.wk.nhop
             COMM.Send(self.buf,dest=0,tag=0)
+        if self.step % self.clear_every == 0:
+            self.wk.af.set_psi(self.wk.af.psi) 
+            gc.collect()
     def SR(self):
         if RANK!=0:
             return
