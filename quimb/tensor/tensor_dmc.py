@@ -1,4 +1,5 @@
-import time,scipy,functools,h5py,gc
+import time,h5py,gc
+from pympler import muppy,summary
 import numpy as np
 from quimb.utils import progbar as Progbar
 from .tensor_vmc import (
@@ -85,6 +86,10 @@ class Sampler:
             self.SR()
             self.save(tmpdir)
     def sample(self):
+        if RANK==self.print_rank:
+            all_ = muppy.get_objects()
+            sum_ = summary.summarize(all_objects)
+            summary.print_(sum_)
         self.terminate = np.zeros(self.nsite+1,dtype=int)
         self.buf = np.zeros(5)
         self.buf[0] = self.step 
