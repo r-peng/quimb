@@ -73,7 +73,7 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
             blks = [list(itertools.product(range(self.Lx),range(self.Ly)))]
         self.site_map = self.get_site_map(blks)
         self.constructors = self.get_constructors(psi)
-        self.block_dict = self.get_block_dict(blks)
+        self.get_block_dict(blks)
         if RANK==0:
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)

@@ -92,6 +92,8 @@ class Dense(Layer):
         self.pre_act = pre_act 
         self.post_act = post_act
     def apply_w(self,x):
+        print(len(x),self.params[0].shape)
+        exit()
         return self.jnp.matmul(x,self.params[0])    
     def _combine(self,x,y):
         if not self.combine:

@@ -1860,6 +1860,8 @@ class AmplitudeFactory:
             self.block_dict[bix] = start,stop
             start = stop
         self.nparam = stop
+        print('called')
+        exit()
     def dict2vecs(self,dict_):
         ls = [None] * len(self.constructors)
         for ix,(_,size,site) in enumerate(self.constructors):
