@@ -52,7 +52,6 @@ class AmplitudeFactory2D(AmplitudeFactory):
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
-        self.nparam = len(self.get_x())
         self.is_tn = True
 ##### wfn methods #####
     def flatten(self,site):
@@ -75,11 +74,18 @@ class AmplitudeFactory2D(AmplitudeFactory):
         sites = list(itertools.product(range(i0,i0+x_bsz),range(j0,j0+y_bsz)))
         return sites
     def get_cache(self,direction,step):
-        if direction=='row':
-            cache = self.cache_bot if step==1 else self.cache_top
-        else:
-            cache = self.cache_left if step==1 else self.cache_right
-        return cache
+        if self._backend=='numpy':
+            if direction=='row':
+                cache = self.cache_bot if step==1 else self.cache_top
+            else:
+                cache = self.cache_left if step==1 else self.cache_right
+            return cache
+        if self._backend=='torch':
+            if direction=='row':
+                cache = self._cache_bot if step==1 else self._cache_top
+            else:
+                cache = self._cache_left if step==1 else self._cache_right
+            return cache
     def cache_key(self,config,i,direction,step):
         if direction=='row':
             if step==1: # bottom env
@@ -100,7 +106,13 @@ class AmplitudeFactory2D(AmplitudeFactory):
             cache_top_new[key] = cache_top[key]
         return cache_bot_new,cache_top_new
     def update_cache(self,config):
+        # TODO: enable vertical compression
         self.cache_bot,self.cache_top = self._new_cache(config,self.cache_bot,self.cache_top)
+    def free_ad_cache(self):
+        self._cache_bot = dict()
+        self._cache_top = dict()
+        self._cache_left = dict()
+        self._cache_right = dict()
     def set_psi(self,psi):
         self.psi = psi
 
@@ -108,6 +120,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         self.cache_top = dict()
         self.cache_left = dict()
         self.cache_right = dict()
+        self.free_ad_cache() 
 ##### compress row methods  #####
     def get_mid_env(self,i,config,append='',psi=None,direction='row'):
         psi = self.psi if psi is None else psi 
@@ -171,8 +184,10 @@ class AmplitudeFactory2D(AmplitudeFactory):
             return self.compress_row_pbc(tn,i,direction=direction)
         else:
             return self.compress_row_obc(tn,i,direction=direction)
-    def get_benv(self,i,row,env_prev,config,step,cache=None,direction='row'):
-        cache = self.get_cache(direction,step) if cache is None else cache 
+    def combine_nn(self,*args):
+        return tn 
+    def get_benv(self,i,row,env_prev,config,step,direction='row'):
+        cache = self.get_cache(direction,step) 
         key = self.cache_key(config,i,direction,step)
         if key in cache: # reusable
             return cache[key]
@@ -207,18 +222,17 @@ class AmplitudeFactory2D(AmplitudeFactory):
             tn = None
         cache[key] = tn
         return tn 
-    def get_env_prev(self,config,i,step,cache=None,direction='row'):
+    def get_env_prev(self,config,i,step,direction='row'):
         if step==1 and i==0:
             return None 
         Lx = self.Lx if direction=='row' else self.Ly
         if step==-1 and i==Lx-1:
             return None
-        cache = self.get_cache(direction,step) if cache is None else cache 
+        cache = self.get_cache(direction,step) 
         key = self.cache_key(config,i-step,direction,step)
         return cache[key]
-    def _get_all_benvs(self,config,step,psi=None,cache=None,start=None,stop=None,append='',direction='row'):
+    def _get_all_benvs(self,config,step,psi=None,start=None,stop=None,append='',direction='row'):
         psi = self.psi if psi is None else psi
-        cache = self.get_cache(direction,step) if cache is None else cache 
 
         Lx = self.Lx if direction=='row' else self.Ly
         if step==1:
@@ -227,26 +241,23 @@ class AmplitudeFactory2D(AmplitudeFactory):
         else:
             start = Lx-1 if start is None else start
             stop = 0 if stop is None else stop 
-        env_prev = self.get_env_prev(config,start,step,cache=cache,direction=direction)
+        env_prev = self.get_env_prev(config,start,step,direction=direction)
         for i in range(start,stop,step):
             row = self.get_mid_env(i,config,append=append,psi=psi,direction=direction)
-            env_prev = self.get_benv(i,row,env_prev,config,step,cache=cache,direction=direction)
+            env_prev = self.get_benv(i,row,env_prev,config,step,direction=direction)
         return env_prev
-    def get_all_benvs(self,config,psi=None,cache_bot=None,cache_top=None,x_bsz=1,
-                      compute_bot=True,compute_top=True,imax=None,imin=None,direction='row'):
+    def get_all_benvs(self,config,psi=None,x_bsz=1,compute_bot=True,compute_top=True,imax=None,imin=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
-        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
         Lx = self.Lx if direction=='row' else self.Ly
 
         env_bot = None
         env_top = None
         if compute_bot: 
             stop = Lx-x_bsz if imax is None else imax+1 
-            env_bot = self._get_all_benvs(config,1,psi=psi,cache=cache_bot,stop=stop,direction=direction)
+            env_bot = self._get_all_benvs(config,1,psi=psi,stop=stop,direction=direction)
         if compute_top:
             stop = x_bsz-1 if imin is None else imin-1
-            env_top = self._get_all_benvs(config,-1,psi=psi,cache=cache_top,stop=stop,direction=direction)
+            env_top = self._get_all_benvs(config,-1,psi=psi,stop=stop,direction=direction)
         return env_bot,env_top
     def _contract_cols(self,cols,js,direction='col'):
         col_tag = self.col_tag if direction=='col' else self.row_tag
@@ -343,10 +354,10 @@ class AmplitudeFactory2D(AmplitudeFactory):
             except (AttributeError,TypeError): # lenv/renv is None
                 return plq
         return plq
-    def build_3row_tn(self,config,i,x_bsz,psi=None,cache_bot=None,cache_top=None,direction='row'):
+    def build_3row_tn(self,config,i,x_bsz,psi=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
-        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
+        cache_bot = self.get_cache(direction,1) 
+        cache_top = self.get_cache(direction,-1)
         Lx = self.Lx if direction=='row' else self.Ly
         try:
             tn = self.get_mid_env(i,config,psi=psi,direction=direction)
@@ -361,7 +372,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         except AttributeError:
             tn = None
         return tn 
-    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,cache_bot=None,cache_top=None,imin=None,imax=None,direction='row'):
+    def get_plq_from_benvs(self,config,x_bsz,y_bsz,psi=None,imin=None,imax=None,direction='row'):
         if direction=='row':
             Lx = self.Lx
             direction_ = 'col'
@@ -371,15 +382,13 @@ class AmplitudeFactory2D(AmplitudeFactory):
         imin = 0 if imin is None else imin
         imax = Lx-x_bsz if imax is None else imax
         psi = self.psi if psi is None else psi
-        cache_bot = self.get_cache(direction,1) if cache_bot is None else cache_bot
-        cache_top = self.get_cache(direction,-1) if cache_top is None else cache_top
         plq = dict()
         for i in range(imin,imax+1):
-            cols = self.build_3row_tn(config,i,x_bsz,psi=psi,cache_bot=cache_bot,cache_top=cache_top,direction=direction)
+            cols = self.build_3row_tn(config,i,x_bsz,psi=psi,direction=direction)
             if cols is not None:
                 plq = self.update_plq_from_3row(plq,cols,i,x_bsz,y_bsz,psi=psi,direction=direction_)
         return plq
-    def unsigned_amplitude(self,config,cache_bot=None,cache_top=None,to_numpy=True,i=None,direction='row'): 
+    def unsigned_amplitude(self,config,to_numpy=True,i=None,direction='row'): 
         if i is None:
             imax,imin = self.rix1,self.rix2
         elif i==0:
@@ -387,7 +396,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         else:
             imax,imin = i-1,i
         # always contract rows into the middle
-        env_bot,env_top = self.get_all_benvs(config,cache_bot=cache_bot,cache_top=cache_top,imax=imax,imin=imin,direction=direction)
+        env_bot,env_top = self.get_all_benvs(config,imax=imax,imin=imin,direction=direction)
 
         if env_bot is None and env_top is None:
             return None
@@ -412,18 +421,13 @@ class AmplitudeFactory2D(AmplitudeFactory):
         else:
             psi = self.psi.copy()
             psi.reorder('col',inplace=True)
-        cache_bot = dict() if new_cache else None
-        cache_top = dict() if new_cache else None
-        self._get_all_benvs(self.config,1,psi=psi,cache=cache_bot,stop=b.bix+1,direction=b.direction)
-        self._get_all_benvs(self.config,-1,psi=psi,cache=cache_top,stop=b.tix-1,direction=b.direction)
-        return cache_bot,cache_top
+        self._get_all_benvs(self.config,1,psi=psi,stop=b.bix+1,direction=b.direction)
+        self._get_all_benvs(self.config,-1,psi=psi,stop=b.tix-1,direction=b.direction)
     def batch_pair_energies(self,batch_key,new_cache):
         b = self.model.batched_pairs[batch_key]
         ex = dict() 
         if b.deterministic:
-            cache_bot = dict() if new_cache else None
-            cache_top = dict() if new_cache else None
-            cx = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
+            cx = self.amplitude(self.config,to_numpy=False)
             self.cx['deterministic'] = cx
 
             for where in b.pairs:
@@ -432,21 +436,21 @@ class AmplitudeFactory2D(AmplitudeFactory):
                     ex[where,tag] = eij,cx,eij/cx
             return ex,None
 
-        cache_bot,cache_top = self.batch_benvs(batch_key,new_cache) 
+        self.batch_benvs(batch_key,new_cache) 
         if self.from_plq and (not self.dmc):
             # form plqs
             plq = dict()
             for imin,imax,x_bsz,y_bsz in b.plq_types:
-                plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,cache_bot=cache_bot,cache_top=cache_top,imin=imin,imax=imax))
+                plq.update(self.get_plq_from_benvs(self.config,x_bsz,y_bsz,imin=imin,imax=imax))
             return self.pair_energies_from_plq(plq,b.pairs),plq
 
         for where in b.pairs:
             i = min([i for i,_ in where])
             if i not in self.cx:
-                self.cx[i] = self.amplitude(self.config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,i=i,to_numpy=False)
+                self.cx[i] = self.amplitude(self.config,direction=b.direction,i=i,to_numpy=False)
             cij = self.cx[i]
             
-            ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
+            ex_ij = self.update_pair_energy_from_benvs(where,direction=b.direction,i=i) 
             if self.dmc:
                 for tag,eij in ex_ij.items():
                     ex[tag] = eij/cij 
@@ -470,7 +474,147 @@ class AmplitudeFactory2D(AmplitudeFactory):
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cij,eij/cij
         return ex
+from .nn_core import NN,AmplitudeNN
+class AmplitudeNN2D(AmplitudeNN,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,lr,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(lr,**kwargs)
+def get_psi_info(psi):
+    gauge_inds = dict()
+    for i,j in itertools.product(range(psi.Lx-1),range(psi.Ly)):
+        gauge_ind[i,j] = tuple(psi[i,j].bond(psi[i+1,j]))[0] 
+    return gauge_inds
+class GaugeNN2D(NN):
+    def __init__(Lx,Ly,lr,**kwargs):
+        super().__init__(lr,**kwargs)
+        self.gauges = None
+        self._gauges = None
+    def forward(self,config):
+        gauges = self.gauges if self._backend=='numpy' else self._gauges
+        if gauges is not None:
+            _config,y = gauges
+            if _config==config:
+                return y
+            else:
+                pass 
+        
+        y = self._input(config)
+        for l,lr in enumerate(self.lr):
+            y = lr.forward(y)
 
+        y = y.reshape(self.Lx-1,self.Ly,-1) + self.const 
+        if self._backend=='numpy':
+            self.gauges = config,y
+        else:
+            self._gauges = config,y
+        return y
+class AFNN2D(AmplitudeFactory2D):
+    def __init__(self,psi,nn,model,**kwargs):
+        super().__init__(psi,model,**kwargs)
+        self.nn = nn
+        self.dmc = True
+        self.from_plq = False
+    def get_block_dict(self,blks):
+        super.get_block_dict(blks)
+        start = self.nparam
+        for _start,_stop in self.nn.block_dict:
+            stop = start + _stop - _start
+            self.block_dict.append((start,stop)) 
+        self.sections = self.nparam,stop
+        self.nparam = stop
+    def update(self,x,fname=None,root=0):
+        x = np.split(x,self.sections)
+        fname_ = None if fname is None else fname+f'_0' 
+        super().update(x[0],fname=fname_,root=root)
+
+        fname_ = None if fname is None else fname+f'_1' 
+        self.nn.update(x[1],fname=fname,root=root)
+    def wfn2backend(self,**kwrags):
+        super().wfn2backend(**kwargs)
+        self.nn.wfn2backend(**kwargs)
+    def extract_ad_grad(self):
+        vx = [] 
+        vx.append(super().extract_ad_grad())
+        vx.append(self.nn.extract_ad_grad())
+        return np.concatenate(vx)
+    def free_ad_cache(self):
+        super().free_ad_cache()
+        self.nn._gauges = None
+    def combine_nn(self,tn,config,i,p):
+        if tn is None:
+            return tn
+        y = self.nn.forward(config)
+        i_ = i if p=='u' else i-1
+        for j in enumerate(self.Ly):
+            ind = self.gauge_ind[i_,j]
+            tn[i,j].multiply_index_diagonal_(ind,y[i_,j]) 
+        return tn 
+    def get_benv(self,i,row,env_prev,config,step,direction='row'):
+        cache = self.get_cache(direction,step) 
+        key = self.cache_key(config,i,direction,step)
+        if key in cache: # reusable
+            return cache[key]
+        row = self.contract_mid_env(i,row,direction=direction)
+
+        # is terminal
+        if step==1 and i==0:
+            cache[key] = row
+            return row
+        Lx = self.Lx if direction=='row' else self.Ly
+        if step==-1 and i==Lx-1:
+            cache[key] = row
+            return row
+
+        # contraction fails
+        if row is None:
+            cache[key] = row
+            return row
+        if env_prev is None:
+            cache[key] = None 
+            return None
+
+        p = 'u' if step==1 else 'd' 
+        env_prev = self.combine_nn(env_prev,config,i-step,p)
+        if step==1:
+            tn = env_prev.copy()
+            tn.add_tensor_network(row,virtual=False)
+        else:
+            tn = row
+            tn.add_tensor_network(env_prev,virtual=False)
+        try:
+            tn = self.contract_boundary_single(tn,i,i-step,direction=direction)
+        except (ValueError,IndexError):
+            tn = None
+        cache[key] = tn
+        return tn 
+    def unsigned_amplitude(self,config,to_numpy=True,i=None,direction='row'): 
+        if i is None:
+            imax,imin = self.rix1,self.rix2
+        elif i==0:
+            imax,imin = 0,1
+        else:
+            imax,imin = i-1,i
+        # always contract rows into the middle
+        env_bot,env_top = self.get_all_benvs(config,imax=imax,imin=imin,direction=direction)
+
+        if env_bot is None and env_top is None:
+            return None
+
+        try:
+            tn = env_bot.copy()
+            p = 'u' if step==1 else 'd' 
+            tn = self.combine_nn(tn,config,imax,p)
+            tn.add_tensor_network(env_top,virtual=False)
+        except AttributeError:
+            return None 
+
+        cx = safe_contract(tn)
+        if cx is None:
+            return None
+        if to_numpy:
+            cx = tensor2backend(cx,'numpy')
+        return cx  
 ####################################################################
 # models
 ####################################################################

@@ -1787,6 +1787,11 @@ def tensor2backend(data,backend,requires_grad=False):
     else:
         pass
     return data
+def tensor_grad(tsr,set_zero=True):
+    grad = tsr.grad
+    if set_zero:
+        tsr.grad = None
+    return grad 
 from .tensor_core import Tensor,rand_uuid
 def _add_gate(tn,gate,order,where,site_ind,site_tag,contract=True):
     # reindex
@@ -1817,6 +1822,7 @@ class AmplitudeFactory:
 ##### wfn methods #####
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
+        self._backend = backend
         tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
         ar.set_backend(tsr)
         for site in self.sites:
@@ -1853,6 +1859,7 @@ class AmplitudeFactory:
                 stop += size
             blk_dict[bix] = start,stop
             start = stop
+        self.nparam = stop
         return blk_dict 
     def dict2vecs(self,dict_):
         ls = [None] * len(self.constructors)
@@ -1920,11 +1927,6 @@ class AmplitudeFactory:
     def vec2tensor(self,x,ix):
         shape = self.constructors[ix][0]
         return self.tensor2backend(x.reshape(shape))
-    def tensor_grad(self,tsr,set_zero=True):
-        grad = tsr.grad
-        if set_zero:
-            tsr.grad = None
-        return grad 
     def get_bra_tsr(self,ci,site,append=''):
         inds = self.site_ind(site)+append,
         tags = self.site_tags(site) + ('BRA',)
@@ -1980,8 +1982,8 @@ class AmplitudeFactory:
         T1.modify(data=T1C.data, inds=T1C.inds)
         T2.modify(data=T2C.data, inds=T2C.inds)
 ##### contraction & derivative #####
-    def amplitude(self,config,sign=True,cache_bot=None,cache_top=None,to_numpy=True,i=None,direction='row'):
-        cx = self.unsigned_amplitude(config,cache_bot=cache_bot,cache_top=cache_top,to_numpy=to_numpy,i=i,direction=direction)
+    def amplitude(self,config,sign=True,to_numpy=True,i=None,direction='row'):
+        cx = self.unsigned_amplitude(config,to_numpy=to_numpy,i=i,direction=direction)
         if cx is None:
             return None 
         if sign:
@@ -2007,25 +2009,24 @@ class AmplitudeFactory:
         if cx is None:
             return plq_new,None
         return plq_new,np.log(cx**2)
-    def extract_grad(self):
-        vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
+    def extract_ad_grad(self):
+        vx = {site:tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
         return self.dict2vec(vx)
     def propagate(self,ex):
         if not isinstance(ex,torch.Tensor):
             return 0.,np.zeros(self.nparam)
         ex.backward()
-        Hvx = self.extract_grad()
+        Hvx = self.extract_ad_grad()
         return tensor2backend(ex,'numpy'),Hvx 
     def get_grad_deterministic(self,config):
         self.wfn2backend(backend='torch',requires_grad=True)
-        cache_top = dict()
-        cache_bot = dict()
-        cx = self.amplitude(config,cache_top=cache_top,cache_bot=cache_bot,to_numpy=False)
+        cx = self.amplitude(config,to_numpy=False)
         if cx is None:
             return cx,np.zeros(self.nparam)
         cx,vx = self.propagate(cx)
         vx /= cx
         self.wfn2backend()
+        self.free_ad_cache()
         return cx,vx
     def get_grad_from_plq(self,plq):
         if plq is None:
@@ -2057,7 +2058,7 @@ class AmplitudeFactory:
                 ex[tag] = 0
             ex[tag] *= coeff 
         return ex 
-    def update_pair_energy_from_benvs(self,where,cache_bot,cache_top,**kwargs):
+    def update_pair_energy_from_benvs(self,where,**kwargs):
         ix1,ix2 = [self.flatten(site) for site in where]
         assert ix1<ix2
         i1,i2 = self.config[ix1],self.config[ix2]
@@ -2075,7 +2076,7 @@ class AmplitudeFactory:
             config_new = tuple(config_new)
             key = config_new if self.dmc else tag
             config_new = self.parse_config(config_new) 
-            ex[key] = self.amplitude(config_new,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False,**kwargs) 
+            ex[key] = self.amplitude(config_new,to_numpy=False,**kwargs) 
             if ex[key] is None:
                 ex[key] = 0
             ex[key] *= coeff_comm * coeff 
@@ -2101,6 +2102,7 @@ class AmplitudeFactory:
             self.get_grad_from_plq(plq) 
         if compute_Hv:
             self.wfn2backend()
+        self.free_ad_cache()
         return ex,Hvx
     def contraction_error(self):
         return contraction_error(self.cx) 
