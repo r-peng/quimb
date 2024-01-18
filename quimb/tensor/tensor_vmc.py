@@ -1849,7 +1849,7 @@ class AmplitudeFactory:
         return constructors
     def get_block_dict(self,blks):
         start = 0
-        self.blk_dict = [None] * len(blks)
+        self.block_dict = [None] * len(blks)
         for bix,blk in enumerate(blks):
             site_min,site_max = blk[0],blk[-1]
             ix_min,ix_max = self.site_map[site_min],self.site_map[site_max]
@@ -1857,7 +1857,7 @@ class AmplitudeFactory:
             for ix in range(ix_min,ix_max+1):
                 _,size,_ = self.constructors[ix]
                 stop += size
-            self.blk_dict[bix] = start,stop
+            self.block_dict[bix] = start,stop
             start = stop
         self.nparam = stop
     def dict2vecs(self,dict_):
