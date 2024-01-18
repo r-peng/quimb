@@ -21,7 +21,7 @@ def flat2site(ix,Ly): # ix in row order
 # amplitude fxns 
 ####################################################################################
 class AmplitudeFactory2D(AmplitudeFactory):
-    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',pbc=False,deterministic=False,from_plq=True,dmc=False,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',from_plq=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
@@ -32,15 +32,12 @@ class AmplitudeFactory2D(AmplitudeFactory):
         self.data_map = self.get_data_map(phys_dim)
 
         self.model = model
-        self.dmc = dmc
-        self.from_plq = False if dmc else from_plq
         self.backend = backend 
+        self.from_plq = from_plq 
         self.wfn2backend()
 
         # init contraction
         self.compress_opts = compress_opts
-        self.pbc = pbc 
-        self.deterministic = deterministic
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         if blks is None:
@@ -52,7 +49,11 @@ class AmplitudeFactory2D(AmplitudeFactory):
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
+
         self.is_tn = True
+        self.dmc = False 
+        self.pbc = False
+        self.deterministic = False 
 ##### wfn methods #####
     def flatten(self,site):
         i,j = site
@@ -488,6 +489,7 @@ def get_psi_info(psi):
 class GaugeNN2D(NN):
     def __init__(self,Lx,Ly,lr,**kwargs):
         super().__init__(lr,**kwargs)
+        self.Lx,self.Ly = Lx,Ly
         self.gauges = None
         self._gauges = None
     def forward(self,config):
@@ -512,9 +514,7 @@ class GaugeNN2D(NN):
 class AFNN2D(AmplitudeFactory2D):
     def __init__(self,psi,nn,model,**kwargs):
         self.nn = nn
-        super().__init__(psi,model,**kwargs)
-        self.dmc = True
-        self.from_plq = False
+        super().__init__(psi,model,from_plq=False,**kwargs)
     def get_block_dict(self,blks):
         super().get_block_dict(blks)
         self.nn.get_block_dict()
@@ -525,6 +525,11 @@ class AFNN2D(AmplitudeFactory2D):
             self.block_dict.append((start,stop)) 
         self.sections = self.nparam,stop
         self.nparam = stop
+    def get_x(self):
+        x = []
+        x.append(super().get_x())
+        x.append(self.nn.get_x())
+        return np.concatenate(x)
     def update(self,x,fname=None,root=0):
         x = np.split(x,self.sections)
         fname_ = None if fname is None else fname+f'_0' 
@@ -548,8 +553,8 @@ class AFNN2D(AmplitudeFactory2D):
             return tn
         y = self.nn.forward(config)
         i_ = i if p=='u' else i-1
-        for j in enumerate(self.Ly):
-            ind = self.gauge_ind[i_,j]
+        for j in range(self.Ly):
+            ind = self.gauge_inds[i_,j]
             tn[i,j].multiply_index_diagonal_(ind,y[i_,j]) 
         return tn 
     def get_benv(self,i,row,env_prev,config,step,direction='row'):
@@ -605,8 +610,7 @@ class AFNN2D(AmplitudeFactory2D):
 
         try:
             tn = env_bot.copy()
-            p = 'u' if step==1 else 'd' 
-            tn = self.combine_nn(tn,config,imax,p)
+            tn = self.combine_nn(tn,config,imax,'u')
             tn.add_tensor_network(env_top,virtual=False)
         except AttributeError:
             return None 

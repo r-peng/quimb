@@ -78,19 +78,21 @@ class RBM(Layer):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
 class Dense(Layer):
-    def __init__(self,nx,ny,afn,combine=False,bias=True,pre_act=False,post_act=True,**kwargs):
+    def __init__(self,nx,ny,afn,bias=True,**kwargs):
         super().__init__(**kwargs)
         self.nx,self.ny = nx,ny
         self.afn = afn
         self.sh = [(nx,ny),(ny,)]
         self.params = [None] * 2
-        self.combine = combine
         self.bias = bias
         if not bias:
             self.sh.pop()
             self.params.pop()
-        self.pre_act = pre_act 
-        self.post_act = post_act
+
+        self.combine = False 
+        self.pre_act = False 
+        self.post_act = True 
+        self.scale = 1
     def apply_w(self,x):
         return self.jnp.matmul(x,self.params[0])    
     def _combine(self,x,y):
@@ -265,7 +267,7 @@ class NN:
         if _order is not None:
             config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=_order)
         else:
-            config = np.array(config)
+            config = np.array(config,dtype=float)
         xmin,xmax = _format
         return config * (xmax-xmin) + xmin 
 class AmplitudeNN(NN):
@@ -403,13 +405,17 @@ def relu_init_rand(nx,ny,xmin,xmax):
     x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_normal(nx,ny,xmin,xmax,eps):
-    w = np.array([np.random.normal(loc=0,scale=eps,size=nx) for _ in range(ny)])
+def relu_init_normal(lr,xmin,xmax,scale,eps):
+    w = np.array([np.random.normal(loc=0,scale=scale,size=lr.nx) for _ in range(lr.ny)])
     w = compute_colinear(w)
     loc = (xmin+xmax) / 2 
-    x = np.array([np.random.normal(loc=loc,scale=eps,size=nx) for _ in range(ny)])
+    x = np.array([np.random.normal(loc=loc,scale=eps,size=lr.nx) for _ in range(lr.ny)])
     b = np.sum(w*x,axis=1) 
-    return w,b
+    COMM.Bcast(w,root=0)
+    COMM.Bcast(b,root=0)
+    lr.params[0] = w.T * eps
+    lr.params[1] = b * eps
+    return lr 
 def relu_init_sobol(nx,ny,xmin,xmax,eps):
     import qmcpy
     sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
