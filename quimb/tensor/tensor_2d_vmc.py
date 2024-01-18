@@ -47,7 +47,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             blks = [self.sites]
         self.site_map = self.get_site_map(blks)
         self.constructors = self.get_constructors(psi)
-        self.block_dict = self.get_block_dict(blks)
+        self.get_block_dict(blks)
         if RANK==0:
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
@@ -483,10 +483,10 @@ class AmplitudeNN2D(AmplitudeNN,AmplitudeFactory2D):
 def get_psi_info(psi):
     gauge_inds = dict()
     for i,j in itertools.product(range(psi.Lx-1),range(psi.Ly)):
-        gauge_ind[i,j] = tuple(psi[i,j].bond(psi[i+1,j]))[0] 
+        gauge_inds[i,j] = tuple(psi[i,j].bonds(psi[i+1,j]))[0] 
     return gauge_inds
 class GaugeNN2D(NN):
-    def __init__(Lx,Ly,lr,**kwargs):
+    def __init__(self,Lx,Ly,lr,**kwargs):
         super().__init__(lr,**kwargs)
         self.gauges = None
         self._gauges = None
@@ -511,12 +511,14 @@ class GaugeNN2D(NN):
         return y
 class AFNN2D(AmplitudeFactory2D):
     def __init__(self,psi,nn,model,**kwargs):
-        super().__init__(psi,model,**kwargs)
         self.nn = nn
+        super().__init__(psi,model,**kwargs)
         self.dmc = True
         self.from_plq = False
     def get_block_dict(self,blks):
-        super.get_block_dict(blks)
+        super().get_block_dict(blks)
+        self.nn.get_block_dict()
+        
         start = self.nparam
         for _start,_stop in self.nn.block_dict:
             stop = start + _stop - _start
@@ -530,7 +532,7 @@ class AFNN2D(AmplitudeFactory2D):
 
         fname_ = None if fname is None else fname+f'_1' 
         self.nn.update(x[1],fname=fname,root=root)
-    def wfn2backend(self,**kwrags):
+    def wfn2backend(self,**kwargs):
         super().wfn2backend(**kwargs)
         self.nn.wfn2backend(**kwargs)
     def extract_ad_grad(self):

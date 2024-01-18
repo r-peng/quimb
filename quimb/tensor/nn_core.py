@@ -1,4 +1,4 @@
-import time,itertools,functools,h5py
+import time,itertools,h5py,scipy
 import numpy as np
 from .tensor_vmc import (
     tensor2backend,
