@@ -104,9 +104,9 @@ class Dense(Layer):
         if dim>w.shape[0]:
             raise ValueError
         if step==1: 
-            return self.jnp.matmul(x,[:dim,:])    
+            return self.jnp.matmul(x,w[:dim,:])    
         else:
-            return self.jnp.matmul(x,[-dim:,:])    
+            return self.jnp.matmul(x,w[-dim:,:])    
     def _combine(self,x,y):
         if not self.combine:
             return y
