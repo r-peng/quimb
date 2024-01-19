@@ -475,88 +475,36 @@ class AmplitudeFactory2D(AmplitudeFactory):
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cij,eij/cij
         return ex
-from .nn_core import NN,AmplitudeNN
-class AmplitudeNN2D(AmplitudeNN,AmplitudeFactory2D):
-    def __init__(self,Lx,Ly,lr,**kwargs):
-        self.Lx = Lx
-        self.Ly = Ly 
-        super().__init__(lr,**kwargs)
-def get_psi_info(psi):
-    gauge_inds = dict()
-    for i,j in itertools.product(range(psi.Lx-1),range(psi.Ly)):
-        gauge_inds[i,j] = tuple(psi[i,j].bonds(psi[i+1,j]))[0] 
-    return gauge_inds
-class GaugeNN2D(NN):
-    def __init__(self,Lx,Ly,lr,**kwargs):
-        super().__init__(lr,**kwargs)
-        self.Lx,self.Ly = Lx,Ly
-        self.gauges = None
-        self._gauges = None
-    def forward(self,config):
-        gauges = self.gauges if self._backend=='numpy' else self._gauges
-        if gauges is not None:
-            _config,y = gauges
-            if _config==config:
-                return y
-            else:
-                pass 
-        
-        y = self._input(config)
-        for l,lr in enumerate(self.lr):
-            y = lr.forward(y)
-
-        y = y.reshape(self.Lx-1,self.Ly,-1) + self.const 
-        if self._backend=='numpy':
-            self.gauges = config,y
-        else:
-            self._gauges = config,y
-        return y
-class AFNN2D(AmplitudeFactory2D):
+class PerturbedAmplitudeFactory2D(AmplitudeFactory2D):
     def __init__(self,psi,nn,model,**kwargs):
         self.nn = nn
         super().__init__(psi,model,from_plq=False,**kwargs)
     def get_block_dict(self,blks):
         super().get_block_dict(blks)
         self.nn.get_block_dict()
-        
         start = self.nparam
         for _start,_stop in self.nn.block_dict:
             stop = start + _stop - _start
             self.block_dict.append((start,stop)) 
-        self.sections = self.nparam,stop
+            start = stop
         self.nparam = stop
     def get_x(self):
-        x = []
-        x.append(super().get_x())
-        x.append(self.nn.get_x())
-        return np.concatenate(x)
+        return np.concatenate([super().get_x(),self.nn.get_x()])
     def update(self,x,fname=None,root=0):
-        x = np.split(x,self.sections)
+        npsi = self.nparam - self.nn.nparam
         fname_ = None if fname is None else fname+f'_0' 
-        super().update(x[0],fname=fname_,root=root)
+        super().update(x[:npsi],fname=fname_,root=root)
 
         fname_ = None if fname is None else fname+f'_1' 
-        self.nn.update(x[1],fname=fname,root=root)
+        self.nn.update(x[npsi:],fname=fname,root=root)
     def wfn2backend(self,**kwargs):
         super().wfn2backend(**kwargs)
         self.nn.wfn2backend(**kwargs)
     def extract_ad_grad(self):
-        vx = [] 
-        vx.append(super().extract_ad_grad())
-        vx.append(self.nn.extract_ad_grad())
-        return np.concatenate(vx)
+        return np.concatenate([super().extract_ad_grad(),self.nn.extract_ad_grad()])
     def free_ad_cache(self):
         super().free_ad_cache()
-        self.nn._gauges = None
-    def combine_nn(self,tn,config,i,p):
-        if tn is None:
-            return tn
-        y = self.nn.forward(config)
-        i_ = i if p=='u' else i-1
-        for j in range(self.Ly):
-            ind = self.gauge_inds[i_,j]
-            tn[i,j].multiply_index_diagonal_(ind,y[i_,j]) 
-        return tn 
+        self.nn.free_ad_cache()
     def get_benv(self,i,row,env_prev,config,step,direction='row'):
         cache = self.get_cache(direction,step) 
         key = self.cache_key(config,i,direction,step)
@@ -581,8 +529,10 @@ class AFNN2D(AmplitudeFactory2D):
             cache[key] = None 
             return None
 
-        p = 'u' if step==1 else 'd' 
-        env_prev = self.combine_nn(env_prev,config,i-step,p)
+        try:
+            env_prev = self.nn.modify_mps_old(env_prev,config,i-step,step)
+        except NotImplementedError:
+            pass
         if step==1:
             tn = env_prev.copy()
             tn.add_tensor_network(row,virtual=False)
@@ -593,7 +543,12 @@ class AFNN2D(AmplitudeFactory2D):
             tn = self.contract_boundary_single(tn,i,i-step,direction=direction)
         except (ValueError,IndexError):
             tn = None
-        cache[key] = tn
+        try:
+            tn = self.nn.modify_mps_new(tn,config,i,step)
+        except NotImplementedError:
+            pass
+
+        cache[key] = tn 
         return tn 
     def unsigned_amplitude(self,config,to_numpy=True,i=None,direction='row'): 
         if i is None:
@@ -610,7 +565,7 @@ class AFNN2D(AmplitudeFactory2D):
 
         try:
             tn = env_bot.copy()
-            tn = self.combine_nn(tn,config,imax,'u')
+            tn = self.nn.modify_bot_mps(tn,config,imax)
             tn.add_tensor_network(env_top,virtual=False)
         except AttributeError:
             return None 

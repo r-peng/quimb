@@ -8,7 +8,14 @@ from .tensor_vmc import (
     contraction_error,
     AmplitudeFactory,
 )
-from .nn_core import config_to_ab
+from .nn_core import (
+    config_to_ab,
+    get_block_dict,
+    wfn2backend,
+    get_x,
+    extract_ad_grad,
+    free_ad_cache,
+    
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
@@ -16,7 +23,6 @@ RANK = COMM.Get_rank()
 class CompoundAmplitudeFactory(AmplitudeFactory):
     def __init__(self,af,fermion=False,update=None):
         self.af = af 
-        self._update = tuple(range(len(af))) if update is None else update
         self.Lx,self.Ly = af[0].Lx,af[0].Ly
         self.get_block_dict()
 
@@ -37,8 +43,7 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         self.flat2site = af[0].flat2site
         self.intermediate_sign = af[0].intermediate_sign
     def extract_ad_grad(self):
-        vx = [self.af[ix].extract_ad_grad() for ix in self._update] 
-        return np.concatenate(vx) 
+        return extract_ad_grad(self.af)
     def parse_config(self,config):
         if self.fermion:
             ca,cb = config_to_ab(config)
@@ -47,25 +52,17 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
             return [config] * len(self.af)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
-        for ix in self._update:
-            self.af[ix].wfn2backend(backend=backend,requires_grad=requires_grad)
+        wfn2backend(self.af,backend,requires_grad)
     def get_x(self):
-        return np.concatenate([self.af[ix].get_x() for ix in self._update])
+        return get_x(self.af) 
     def get_block_dict(self):
-        self.nparam = np.array([self.af[ix].nparam for ix in self._update])
-        self.sections = np.cumsum(self.nparam)[:-1]
-
-        self.block_dict = []
-        for i,ix in enumerate(self._update):
-            shift = 0 if i==0 else self.sections[i-1]
-            self.block_dict += [(start+shift,stop+shift) for start,stop in self.af[ix].block_dict]
-        self.nparam = sum(self.nparam)
+        self.nparam,self.sections,self.block_dict = get_block_dict(self.af)
     def update(self,x,fname=None,root=0):
         x = np.split(x,self.sections)
-        for i,ix in enumerate(self._update):
+        for i,af in enumerate(afs):
             fname_ = None if fname is None else fname+f'_{ix}' 
-            self.af[ix].update(x[i],fname=fname_,root=root)
-        self.get_block_dict()
+            af.update(x[i],fname=fname_,root=root)
+        self.wfn2backend()
     def set_config(self,config,compute_v):
         self.config = config 
         self.cx = dict()
@@ -73,6 +70,8 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         for af,config_ in zip(self.af,config):
             af.set_config(config_,compute_v)
         return config
+    def free_ad_cache(self):
+        free_ad_cache(self.af)
     def amplitude2scalar(self):
         for af in self.af:
             af.amplitude2scalar()

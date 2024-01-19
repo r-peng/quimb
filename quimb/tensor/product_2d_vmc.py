@@ -17,10 +17,6 @@ class CompoundAmplitudeFactory2D(CompoundAmplitudeFactory):
         for af,config_ in zip(self.af,config):
             if af.is_tn:
                 af.update_cache(config_)
-    def free_ad_cache(self):
-        for af in self.af:
-            if af.is_tn:
-                af.free_ad_cache()
     def _get_all_benvs(self,config,step,psi=None,start=None,stop=None,append='',direction='row'):
         env_prev = [None] * len(self.af) 
         for ix,af in enumerate(self.af):

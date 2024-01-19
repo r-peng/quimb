@@ -37,8 +37,8 @@ class Layer:
     def get_block_dict(self):
         self.block_dict = []
         start = 0
-        for p in self.params:
-            stop = start + p.size
+        for sh in self.sh:
+            stop = start + np.prod(np.array(sh))
             self.block_dict.append((start,stop))
             start = stop
         self.nparam = stop
@@ -53,7 +53,9 @@ class Layer:
             tsr = tensor_grad(p) if grad else p
             ls.append(tensor2backend(tsr,'numpy').flatten())
         return np.concatenate(ls)
-    def update(self,x,fname=None,root=0):
+    def extract_ad_grad(self):
+        return self.get_x(grad=True)
+    def update(self,x):
         for i,sh in enumerate(self.sh):
             start,stop = self.block_dict[i]
             size = stop - start
@@ -89,12 +91,22 @@ class Dense(Layer):
             self.sh.pop()
             self.params.pop()
 
+        # to be set 
         self.combine = False 
         self.pre_act = False 
         self.post_act = True 
         self.scale = 1
-    def apply_w(self,x):
-        return self.jnp.matmul(x,self.params[0])    
+    def apply_w(self,x,step=1):
+        dim = len(x)
+        w = self.params[0]
+        if dim==w.shape[0]:
+            return self.jnp.matmul(x,w)    
+        if dim>w.shape[0]:
+            raise ValueError
+        if step==1: 
+            return self.jnp.matmul(x,[:dim,:])    
+        else:
+            return self.jnp.matmul(x,[-dim:,:])    
     def _combine(self,x,y):
         if not self.combine:
             return y
@@ -137,29 +149,55 @@ class Dense(Layer):
                 return self.jnp.exp(x)
         self._afn = _afn
 
+def get_block_dict(afs,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    [afs[key].get_block_dict() for key in keys]
+
+    nparam = np.array([afs[key].nparam for key in keys])
+    sections = np.cumsum(nparam)[:-1]
+
+    block_dict = []
+    for i,key in enumerate(keys):
+        shift = 0 if i==0 else sections[i-1]
+        block_dict += [(start+shift,stop+shift) for start,stop in afs[key].block_dict]
+    nparam = sum(nparam)
+    return nparam,sections,block_dict 
+def wfn2backend(afs,backend,requires_grad,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    [afs[key].wfn2backend(backend=backend,requires_grad=requires_grad)for key in keys]
+def get_x(afs,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    return np.concatenate([afs[key].get_x() for key in keys])
+def extract_ad_grad(afs,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    return np.concatenate([afs[key].extract_ad_grad() for key in keys]) 
+def update(afs,x,sections,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    x = np.split(x,sections)
+    for i,key in enumerate(keys):
+        afs[key].update(x[i])
+def free_ad_cache(afs,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    for key in keys:
+        try:
+            afs[key].free_ad_cache()
+        except:
+            continue
 class NN:
-    def __init__(self,lr,backend='numpy',input_format=((-1,1),'F'),const=1):
-        self.lr = lr
-        self.nl = len(lr)
+    def __init__(self,af,backend='numpy'):
+        self.af = af
+        self.nl = len(af)
+        self.keys = range(self.nl) 
         self.backend = backend
         self.set_backend(backend)
-        self.input_format = input_format
-        self.const = const
 
-        self.change_layer_every = None
-        self.lcurr = 0
-        self.nstep = 0
+        # to be set
+        self.input_format = None 
+        self.const = None
+    def free_ad_cache(self):
+        free_ad_cache(self.af,keys=self.keys) 
     def get_block_dict(self):
-        self.block_dict = []
-        start = 0
-        for lr in self.lr:
-            if not lr.grad:
-                continue
-            lr.get_block_dict() 
-            stop = start + lr.nparam
-            self.block_dict.append((start,stop))
-            start = stop
-        self.nparam = stop
+        self.nparam,self.sections,self.block_dict = get_block_dict(self.af,keys=self.keys)
     def set_backend(self,backend):
         self._backend = backend
         if backend=='numpy':
@@ -173,55 +211,35 @@ class NN:
                 return tensor2backend(self.input(config),backend) 
             self._input = _input
         ar.set_backend(tsr)
-        for lr in self.lr:
-            lr.set_backend(backend)
+        for key in self.keys:
+            self.af[key].set_backend(backend)
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
-        for lr in self.lr:
-            lr.wfn2backend(backend=backend,requires_grad=requires_grad)
-    def get_x(self,grad=False):
-        ls = []
-        for lr in self.lr:
-            if not lr.grad: 
-                continue
-            ls.append(lr.get_x(grad=grad))
-        return np.concatenate(ls)
+        wfn2backend(self.af,backend,requires_grad,keys=self.keys)
+    def get_x(self):
+        return get_x(self.af,keys=self.keys) 
     def extract_ad_grad(self):
-        return self.get_x(grad=True) 
+        return extract_ad_grad(self.af,keys=self.keys) 
     def load_from_disc(self,fname):
         f = h5py.File(fname+'.hdf5','r')
-        for i,lr in enumerate(self.lr):
-            for j in range(len(lr.sh)):
-                lr.params[j] = f[f'l{i}p{j}'][:]
+        for i,key in enumerate(self.keys):
+            af = self.af[key]
+            for j in range(len(af.sh)):
+                af.params[j] = f[f'p{key},{j}'][:]
         f.close() 
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
             return
         f = h5py.File(fname+'.hdf5','w')
-        for i,lr in enumerate(self.lr):
-            for j,tsr in enumerate(lr.params):
-                f.create_dataset(f'l{i}p{j}',data=tensor2backend(tsr,'numpy'))
+        for i,key in enumerate(keys):
+            for j,tsr in enumerate(self.af[key].params):
+                f.create_dataset(f'p{key},{j}',data=tensor2backend(tsr,'numpy'))
         f.close()
     def update(self,x,fname=None,root=0):
-        i = 0
-        for lr in self.lr:
-            if not lr.grad:
-                continue
-            start,stop = self.block_dict[i]
-            size = stop - start
-            xi,x = x[:size],x[size:]
-            lr.update(xi)
-            i += 1
+        update(self.af,x,self.sections,keys=self.keys)
         if fname is not None:
             self.save_to_disc(fname,root=root) 
-        if self.change_layer_every is not None:
-            self.nstep = (self.nstep + 1) % self.change_layer_every
-            if self.nstep==0:
-                self.lcurr = (self.lcurr + 1) % len(self.nh)
-            for ix,lr in enumerate(self.lr):
-                lr.grad = True if ix==self.lcurr else False
-            self.get_block_dict()
         self.wfn2backend()
     def input_determinant(self,config):
         ls = [None] * 2
@@ -271,19 +289,19 @@ class NN:
         xmin,xmax = _format
         return config * (xmax-xmin) + xmin 
 class AmplitudeNN(NN):
-    def __init__(self,lr,sum_all=False,log=True,phase=False,fermion=True,**kwargs):
-        super().__init__(lr,**kwargs)
-        self.sum_all = sum_all
-        self.log = log # if output is amplitude or log amplitude 
-        self.phase = phase
-        if phase:
-            assert log
+    def __init__(self,af,**kwargs):
+        super().__init__(af,**kwargs)
 
-        self.fermion = fermion
         self.is_tn = False
         self.from_plq = False
         self.spin = None
         self.vx = None
+
+        # to be set
+        self.fermion = None 
+        self.sum_all = None 
+        self.log = None 
+        self.phase = None 
     def pair_terms(self,i1,i2,spin=None):
         if self.fermion:
             return pair_terms(i1,i2,spin) 
@@ -292,8 +310,8 @@ class AmplitudeNN(NN):
     def forward(self,config):
         y = self._input(config)
         _sum = 0
-        for l,lr in enumerate(self.lr):
-            y = lr.forward(y)
+        for l,af in enumerate(self.af):
+            y = af.forward(y)
             if l==self.nl-1 or self.sum_all:
                 _sum = _sum + y.sum() 
         return _sum + self.const 
@@ -375,6 +393,35 @@ class AmplitudeNN(NN):
         return cx,self.vx 
     def get_grad_from_plq(self,plq):
         return self.get_grad_deterministic(self.config,save=True)[1]
+class TensorNN(NN):
+    def __init__(self,af,**kwargs):
+        super().__init__(af,**kwargs)
+        #self.tensor = None
+        #self._tensor = None
+
+        # to be set
+        self.log = None
+    def forward(self,config):
+        #tensor = self.tensor if self._backend=='numpy' else self._tensor
+        #if tensor is not None:
+        #    _config,y = tensor 
+        #    if _config==config:
+        #        return y
+        
+        y = self._input(config)
+        for l,af in enumerate(self.af):
+            y = af.forward(y)
+        if self.log:
+            y = self.jnp.exp(y)
+        y += self.const 
+        #if self._backend=='numpy':
+        #    self.tensor = config,y
+        #else:
+        #    self._tensor = config,y
+        return y
+    def free_ad_cache(self):
+        self._tensor = None
+ 
 def rotate(x,eps):
     nx = len(x)
     K = np.random.normal(loc=0,scale=eps,size=(nx,nx))
@@ -405,17 +452,21 @@ def relu_init_rand(nx,ny,xmin,xmax):
     x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_normal(lr,xmin,xmax,scale,eps):
-    w = np.array([np.random.normal(loc=0,scale=scale,size=lr.nx) for _ in range(lr.ny)])
-    w = compute_colinear(w)
-    loc = (xmin+xmax) / 2 
-    x = np.array([np.random.normal(loc=loc,scale=eps,size=lr.nx) for _ in range(lr.ny)])
-    b = np.sum(w*x,axis=1) 
+def relu_init_normal(af,xmin,xmax,scale,eps):
+    if RANK==0:
+        w = np.array([np.random.normal(loc=0,scale=scale,size=af.nx) for _ in range(af.ny)])
+        w = compute_colinear(w)
+        loc = (xmin+xmax) / 2 
+        x = np.array([np.random.normal(loc=loc,scale=eps,size=af.nx) for _ in range(af.ny)])
+        b = np.sum(w*x,axis=1) 
+    else:
+        w = np.zeros((af.ny,af.nx))
+        b = np.zeros(af.ny)
     COMM.Bcast(w,root=0)
     COMM.Bcast(b,root=0)
-    lr.params[0] = w.T * eps
-    lr.params[1] = b * eps
-    return lr 
+    af.params[0] = w.T * eps
+    af.params[1] = b * eps
+    return af
 def relu_init_sobol(nx,ny,xmin,xmax,eps):
     import qmcpy
     sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
