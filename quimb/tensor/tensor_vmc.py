@@ -1832,9 +1832,9 @@ class AmplitudeFactory:
             self.data_map[key] = self.tensor2backend(self.data_map[key],backend=backend,requires_grad=False)
         if self.from_plq:
             self.model.gate2backend(backend)
-    def get_site_map(self,blks):
+    def get_site_map(self,):
         site_order = []
-        for blk in blks:
+        for blk in self.blks:
             site_order += blk
         site_map = dict()
         for ix,site in enumerate(site_order):
@@ -1847,10 +1847,10 @@ class AmplitudeFactory:
             ix = self.site_map[site]
             constructors[ix] = data.shape,len(data.flatten()),site
         return constructors
-    def get_block_dict(self,blks):
+    def get_block_dict(self):
         start = 0
-        self.block_dict = [None] * len(blks)
-        for bix,blk in enumerate(blks):
+        self.block_dict = [None] * len(self.blks)
+        for bix,blk in enumerate(self.blks):
             site_min,site_max = blk[0],blk[-1]
             ix_min,ix_max = self.site_map[site_min],self.site_map[site_max]
             stop = start
@@ -1988,10 +1988,10 @@ class AmplitudeFactory:
         if sign:
             cx *= self.config_sign(config)
         return cx
-    def log_prob(self, config):
+    def log_prob(self, config,i=None):
         """Calculate the probability of a configuration.
         """
-        cx = self.unsigned_amplitude(config)
+        cx = self.unsigned_amplitude(config,i=i)
         if cx is None:
             return None
         return np.log(cx ** 2)
@@ -2008,8 +2008,10 @@ class AmplitudeFactory:
         if cx is None:
             return plq_new,None
         return plq_new,np.log(cx**2)
+    def tensor_grad(self,tsr,set_zero=True):
+        return tensor_grad(tsr,set_zero=set_zero)
     def extract_ad_grad(self):
-        vx = {site:tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
+        vx = {site:self.tensor_grad(self.psi[self.site_tag(site)].data) for site in self.sites}
         return self.dict2vec(vx)
     def propagate(self,ex):
         if not isinstance(ex,torch.Tensor):

@@ -15,7 +15,8 @@ from .nn_core import (
     get_x,
     extract_ad_grad,
     free_ad_cache,
-    
+    free_sweep_cache,
+)    
 from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
@@ -33,6 +34,7 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
 
         self.pbc = af[0].pbc 
         self.from_plq = af[0].from_plq
+        self.dmc = af[0].dmc
         self.deterministic = af[0].deterministic 
 
         self.fermion = fermion 
@@ -59,8 +61,8 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         self.nparam,self.sections,self.block_dict = get_block_dict(self.af)
     def update(self,x,fname=None,root=0):
         x = np.split(x,self.sections)
-        for i,af in enumerate(afs):
-            fname_ = None if fname is None else fname+f'_{ix}' 
+        for i,af in enumerate(self.af):
+            fname_ = None if fname is None else fname+f'_{i}' 
             af.update(x[i],fname=fname_,root=root)
         self.wfn2backend()
     def set_config(self,config,compute_v):
@@ -72,19 +74,17 @@ class CompoundAmplitudeFactory(AmplitudeFactory):
         return config
     def free_ad_cache(self):
         free_ad_cache(self.af)
+    def free_sweep_cache(self,step):
+        free_sweep_cache(self.af,step)
     def amplitude2scalar(self):
         for af in self.af:
             af.amplitude2scalar()
 class ProductAmplitudeFactory:
-    def amplitude(self,config,sign=True,cache_bot=None,cache_top=None,to_numpy=True):
-        if cache_bot is None:
-            cache_bot = (None,) * len(self.af)
-        if cache_top is None:
-            cache_top = (None,) * len(self.af)
+    def amplitude(self,config,sign=True,to_numpy=True):
         cx = 1 
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                cx_ix = af.amplitude(config[ix],sign=sign,cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy)
+                cx_ix = af.amplitude(config[ix],sign=sign,to_numpy=to_numpy)
                 if cx_ix is None:
                     return None 
             else:
@@ -93,18 +93,13 @@ class ProductAmplitudeFactory:
         return cx 
     def get_grad_deterministic(self,config):
         cx = [None] * len(self.af)
-        vx = [None] * len(self._update)
-        for i,ix in enumerate(self._update):
-            cx[ix],vx[i] = af.get_grad_deterministic(config[ix])
-        for ix,af in enumerate(self.af):
-            if cx[ix] is not None:
-                continue
-            cx[ix] = af.amplitude(config[ix])
+        vx = [None] * len(self.af)
+        for i,af in enumerate(self.af):
+            cx[i],vx[i] = af.get_grad_deterministic(config[i])
         return np.prod(np.array(cx)),np.concatenate(vx)
     def parse_gradient(self):
-        vx = [None] * len(self._update) 
-        for i,ix in enumerate(self._update):
-            af = self.af[ix]
+        vx = [None] * len(self.af) 
+        for i,af in enumerate(self.af):
             vx[i] = af.dict2vec(af.vx) if af.is_tn else af.vx
             af.vx = None
             af.cx = None
@@ -151,10 +146,10 @@ class ProductAmplitudeFactory:
             if py[ix] is None:
                 return plq_new,None 
         return plq_new,sum(py)
-    def log_prob(self,config):
+    def log_prob(self,config,i=None):
         p = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
-            p[ix] = af.log_prob(config[ix])
+            p[ix] = af.log_prob(config[ix],i=i)
             if p[ix] is None:
                 return None 
         return sum(p) 
@@ -182,16 +177,11 @@ class SumAmplitudeFactory:
             config_i = tuple(configs[i,:])
             cx = self.amplitude(self.parse_config(config_i),_sum=False)
             print(config_i,cx)
-    def amplitude(self,config,_sum=True,cache_bot=None,cache_top=None,to_numpy=True,**kwargs):
-        if cache_bot is None:
-            cache_bot = (None,) * len(self.af)
-        if cache_top is None:
-            cache_top = (None,) * len(self.af)
-
+    def amplitude(self,config,_sum=True,to_numpy=True,**kwargs):
         cx = [0] * len(self.af) 
         for ix,af in enumerate(self.af):
             if af.is_tn:
-                cx[ix] = af.amplitude(config[ix],cache_bot=cache_bot[ix],cache_top=cache_top[ix],to_numpy=to_numpy,**kwargs)
+                cx[ix] = af.amplitude(config[ix],to_numpy=to_numpy,**kwargs)
                 if cx[ix] is None:
                     cx[ix] = 0
             else:
@@ -203,13 +193,7 @@ class SumAmplitudeFactory:
         return self.amplitude(config,**kwargs)
     def get_grad_deterministic(self,config):
         self.wfn2backend(backend='torch',requires_grad=True)
-        cache_bot = [None] * len(self.af) 
-        cache_top = [None] * len(self.af) 
-        for ix,af in enumerate(self.af):
-            if af.is_tn:
-                cache_bot[ix] = dict() 
-                cache_top[ix] = dict() 
-        cx = self.amplitude(config,cache_bot=cache_bot,cache_top=cache_top,to_numpy=False)
+        cx = self.amplitude(config,to_numpy=False)
         cx,vx = self.propagate(cx)
         self.wfn2backend()
         return cx,vx/cx 
@@ -220,20 +204,14 @@ class SumAmplitudeFactory:
             af.cx = None
             af.vx = None
     def batch_pair_energies(self,batch_key,compute_Hv):
-        cache_bot = [None] * len(self.af)
-        cache_top = [None] * len(self.af)
-        for ix,af in enumerate(self.af):
-            if not af.is_tn:
-                continue
-            cache_bot[ix],cache_top[ix] = af.batch_benvs(batch_key,compute_Hv)
         ex = dict() 
         b = self.model.batched_pairs[batch_key]
         config = [af.config for af in self.af]
-        cx = self.amplitude(config,cache_bot=cache_bot,cache_top=cache_top,direction=b.direction,to_numpy=False)
+        cx = self.amplitude(config,direction=b.direction,to_numpy=False)
         self.cx['deterministic'] = cx
         for where in b.pairs:
             i = min([i for i,_ in where])
-            ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top,direction=b.direction,i=i) 
+            ex_ij = self.update_pair_energy_from_benvs(where,direction=b.direction,i=i) 
             for tag,eij in ex_ij.items():
                 ex[where,tag] = eij,cx,eij/cx
         return ex,None

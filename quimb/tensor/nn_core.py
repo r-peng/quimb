@@ -32,8 +32,6 @@ def pair_terms(i1,i2,spin):
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
 class Layer:
-    def __init__(self):
-        self.grad = True
     def get_block_dict(self):
         self.block_dict = []
         start = 0
@@ -43,10 +41,10 @@ class Layer:
             start = stop
         self.nparam = stop
     def set_backend(self,backend):
+        self._backend = backend
         self.jnp = np if backend=='numpy' else torch 
     def wfn2backend(self,backend=None,requires_grad=False):
-        grad = requires_grad if self.grad else False
-        self.params = [tensor2backend(p,backend,requires_grad=grad) for p in self.params]
+        self.params = [tensor2backend(p,backend,requires_grad=requires_grad) for p in self.params]
     def get_x(self,grad=False):
         ls = []
         for p in self.params:
@@ -72,16 +70,14 @@ class Layer:
             print(key)
             print(tsr)
 class RBM(Layer):
-    def __init__(self,nv,nh,**kwargs):
-        super().__init__(**kwargs)
+    def __init__(self,nv,nh):
         self.sh = (nv,),(nh,),(nv,nh)
         self.params = [None] * 3
     def forward(self,x):
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
 class Dense(Layer):
-    def __init__(self,nx,ny,afn,bias=True,**kwargs):
-        super().__init__(**kwargs)
+    def __init__(self,nx,ny,afn,bias=True):
         self.nx,self.ny = nx,ny
         self.afn = afn
         self.sh = [(nx,ny),(ny,)]
@@ -114,10 +110,10 @@ class Dense(Layer):
             return self.jnp.concatenate([x,y])
         except:
             return self.jnp.cat([x,y])
-    def forward(self,x):
+    def forward(self,x,step=1):
         if self.pre_act:
             x = self._afn(x) 
-        y = self.apply_w(x)
+        y = self.apply_w(x,step=step)
         if self.bias:
             y = y + self.params[1]
         if self.post_act:
@@ -137,7 +133,7 @@ class Dense(Layer):
                     return x*(x>0)
         if self.afn=='softplus':
             def _afn(x):
-                return self.jnp.log(1+self.exp(x))
+                return self.jnp.log(1+self.jnp.exp(x))
         if self.afn=='sinh':
             def _afn(x):
                 return self.jnp.sinh(x)
@@ -183,10 +179,18 @@ def free_ad_cache(afs,keys=None):
             afs[key].free_ad_cache()
         except:
             continue
+def free_sweep_cache(afs,step,keys=None):
+    keys = range(len(afs)) if keys is None else keys
+    for key in keys:
+        try:
+            afs[key].free_sweep_cache(step)
+        except:
+            continue
+
 class NN:
-    def __init__(self,af,backend='numpy'):
-        self.af = af
-        self.nl = len(af)
+    def __init__(self,lr,backend='numpy'):
+        self.af = lr
+        self.nl = len(lr)
         self.keys = range(self.nl) 
         self.backend = backend
         self.set_backend(backend)
@@ -224,15 +228,15 @@ class NN:
     def load_from_disc(self,fname):
         f = h5py.File(fname+'.hdf5','r')
         for i,key in enumerate(self.keys):
-            af = self.af[key]
-            for j in range(len(af.sh)):
-                af.params[j] = f[f'p{key},{j}'][:]
+            lr = self.af[key]
+            for j in range(len(lr.sh)):
+                lr.params[j] = f[f'p{key},{j}'][:]
         f.close() 
     def save_to_disc(self,fname,root=0):
         if RANK!=root:
             return
         f = h5py.File(fname+'.hdf5','w')
-        for i,key in enumerate(keys):
+        for i,key in enumerate(self.keys):
             for j,tsr in enumerate(self.af[key].params):
                 f.create_dataset(f'p{key},{j}',data=tensor2backend(tsr,'numpy'))
         f.close()
@@ -289,8 +293,8 @@ class NN:
         xmin,xmax = _format
         return config * (xmax-xmin) + xmin 
 class AmplitudeNN(NN):
-    def __init__(self,af,**kwargs):
-        super().__init__(af,**kwargs)
+    def __init__(self,lr,**kwargs):
+        super().__init__(lr,**kwargs)
 
         self.is_tn = False
         self.from_plq = False
@@ -310,8 +314,8 @@ class AmplitudeNN(NN):
     def forward(self,config):
         y = self._input(config)
         _sum = 0
-        for l,af in enumerate(self.af):
-            y = af.forward(y)
+        for l,lr in enumerate(self.af):
+            y = lr.forward(y)
             if l==self.nl-1 or self.sum_all:
                 _sum = _sum + y.sum() 
         return _sum + self.const 
@@ -394,13 +398,14 @@ class AmplitudeNN(NN):
     def get_grad_from_plq(self,plq):
         return self.get_grad_deterministic(self.config,save=True)[1]
 class TensorNN(NN):
-    def __init__(self,af,**kwargs):
-        super().__init__(af,**kwargs)
+    def __init__(self,lr,**kwargs):
+        super().__init__(lr,**kwargs)
         #self.tensor = None
         #self._tensor = None
 
         # to be set
         self.log = None
+        self.ind = None
     def forward(self,config):
         #tensor = self.tensor if self._backend=='numpy' else self._tensor
         #if tensor is not None:
@@ -409,11 +414,11 @@ class TensorNN(NN):
         #        return y
         
         y = self._input(config)
-        for l,af in enumerate(self.af):
-            y = af.forward(y)
+        for l,lr in enumerate(self.af):
+            y = lr.forward(y)
         if self.log:
             y = self.jnp.exp(y)
-        y += self.const 
+        y = y.reshape(self.shape) + self.const 
         #if self._backend=='numpy':
         #    self.tensor = config,y
         #else:

@@ -40,7 +40,7 @@ def get_parity_cum(fpeps):
         parity.append(compute_fpeps_parity(fs,start,stop))
     return np.cumsum(np.array(parity[::-1]))
 class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D): 
-    def __init__(self,psi,model,blks=None,spinless=False,spin=None,backend='numpy',pbc=False,from_plq=True,dmc=False,deterministic=False,symmetry='u1',flat=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,spinless=False,symmetry='u1',flat=True,backend='numpy',from_plq=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
@@ -52,34 +52,32 @@ class FermionAmplitudeFactory2D(FermionAmplitudeFactory,AmplitudeFactory2D):
         self.symmetry = symmetry 
         self.flat = flat
         self.spinless = spinless
-        self.spin = spin
         self.data_map = self.get_data_map()
 
         self.model = model
-        self.dmc = dmc
-        self.from_plq = False if dmc else from_plq
         self.backend = backend
+        self.from_plq = from_plq 
         self.wfn2backend()
 
         # init contraction
         self.compress_opts = compress_opts
-        self.pbc = pbc
-        self.deterministic = deterministic
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
         self.parity_cum = get_parity_cum(psi)
-
-        if blks is None:
-            blks = [list(itertools.product(range(self.Lx),range(self.Ly)))]
-        self.site_map = self.get_site_map(blks)
+        self.blks = [self.sites] if blks is None else blks
+        self.site_map = self.get_site_map()
         self.constructors = self.get_constructors(psi)
-        self.get_block_dict(blks)
+        self.get_block_dict()
         if RANK==0:
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
-        self.nparam = len(self.get_x())
+
         self.is_tn = True
+        self.dmc = False 
+        self.spin = None 
+        self.pbc = False 
+        self.deterministic = False 
     def config_sign(self,config):
         parity = [None] * self.Lx
         for i in range(self.Lx):

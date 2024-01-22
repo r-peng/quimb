@@ -50,20 +50,13 @@ class ProductAmplitudeFactory2D(ProductAmplitudeFactory,
                 continue
             cols_new[ix],envs[ix] = af.get_all_envs(cols[ix],step,stop=stop,inplace=inplace)
         return cols_new,envs
-    def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
+    def _get_plq_sweep(self,j,y_bsz,cols,envs,step,direction='col'):
         plq = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             if not af.is_tn:
                 continue
-            plq[ix] = af._get_plq_forward(j,y_bsz,cols[ix],renvs[ix],direction=direction)
+            plq[ix] = af._get_plq_sweep(j,y_bsz,cols[ix],envs[ix],step,direction=direction)
         return plq
-    def _get_plq_backward(self,j,y_bsz,cols,lenvs,direction='col'):
-        plq = [None] * len(self.af) 
-        for ix,af in enumerate(self.af):
-            if not af.is_tn:
-                continue
-            plq[ix] = af._get_plq_backward(j,y_bsz,cols[ix],lenvs[ix],direction=direction)
-        return plq 
     def build_3row_tn(self,config,i,x_bsz,psi=None,direction='row'):
         tn = [None] * len(self.af) 
         for ix,af in enumerate(self.af):

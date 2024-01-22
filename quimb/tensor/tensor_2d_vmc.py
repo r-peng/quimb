@@ -17,6 +17,17 @@ def flatten(i,j,Ly): # flattern site to row order
     return i*Ly+j
 def flat2site(ix,Ly): # ix in row order
     return ix//Ly,ix%Ly
+def cache_key(config,i,direction,step,Ly):
+    if direction=='row':
+        if step==1: # bottom env
+            config = config[:(i+1)*Ly] 
+        else: # top env
+            config = config[i*Ly:]
+    else: 
+        cols = range(i+1) if step==1 else range(i,Ly)
+        nsite = len(config)
+        config = tuple([config[slc] for slc in [slice(col,nsite,Ly) for col in cols]])
+    return config,direction,step
 ####################################################################################
 # amplitude fxns 
 ####################################################################################
@@ -40,11 +51,10 @@ class AmplitudeFactory2D(AmplitudeFactory):
         self.compress_opts = compress_opts
         self.rix1,self.rix2 = (self.Lx-1) // 2, (self.Lx+1) // 2
 
-        if blks is None:
-            blks = [self.sites]
-        self.site_map = self.get_site_map(blks)
+        self.blks = [self.sites] if blks is None else blks
+        self.site_map = self.get_site_map()
         self.constructors = self.get_constructors(psi)
-        self.get_block_dict(blks)
+        self.get_block_dict()
         if RANK==0:
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
@@ -74,53 +84,29 @@ class AmplitudeFactory2D(AmplitudeFactory):
         (i0,j0),(x_bsz,y_bsz) = plq_key
         sites = list(itertools.product(range(i0,i0+x_bsz),range(j0,j0+y_bsz)))
         return sites
-    def get_cache(self,direction,step):
-        if self._backend=='numpy':
-            if direction=='row':
-                cache = self.cache_bot if step==1 else self.cache_top
-            else:
-                cache = self.cache_left if step==1 else self.cache_right
-            return cache
-        if self._backend=='torch':
-            if direction=='row':
-                cache = self._cache_bot if step==1 else self._cache_top
-            else:
-                cache = self._cache_left if step==1 else self._cache_right
-            return cache
     def cache_key(self,config,i,direction,step):
-        if direction=='row':
-            if step==1: # bottom env
-                return config[:(i+1)*self.Ly] 
-            else: # top env
-                return config[i*self.Ly:]
-        else: 
-            cols = range(i+1) if step==1 else range(i,self.Ly)
-            return tuple([config[slc] for slc in [slice(col,self.nsite,self.Ly) for col in cols]])
-    def _new_cache(self,config,cache_bot,cache_top):
-        cache_bot_new = dict()
+        return cache_key(config,i,direction,step,self.Ly)
+    def _new_cache(self,config,cache,direction='row'):
+        cache_new = dict()
         for i in range(self.rix1+1):
-            key = config[:(i+1)*self.Ly]
-            cache_bot_new[key] = cache_bot[key]
-        cache_top_new = dict()
+            key = self.cache_key(config,i,direction,1) 
+            cache_new[key] = cache[key]
         for i in range(self.rix2,self.Lx):
-            key = config[i*self.Ly:]
-            cache_top_new[key] = cache_top[key]
-        return cache_bot_new,cache_top_new
+            key = self.cache_key(config,i,direction,-1) 
+            cache_new[key] = cache[key]
+        return cache_new
     def update_cache(self,config):
         # TODO: enable vertical compression
-        self.cache_bot,self.cache_top = self._new_cache(config,self.cache_bot,self.cache_top)
+        self.cache = self._new_cache(config,self.cache)
     def free_ad_cache(self):
-        self._cache_bot = dict()
-        self._cache_top = dict()
-        self._cache_left = dict()
-        self._cache_right = dict()
+        self._cache = dict()
+    def free_sweep_cache(self,step,direction='row'):
+        keys = [key for key in self.cache if key[1:]==(direction,step)]
+        for key in keys:
+            self.cache.pop(key)
     def set_psi(self,psi):
         self.psi = psi
-
-        self.cache_bot = dict()
-        self.cache_top = dict()
-        self.cache_left = dict()
-        self.cache_right = dict()
+        self.cache = dict()
         self.free_ad_cache() 
 ##### compress row methods  #####
     def get_mid_env(self,i,config,append='',psi=None,direction='row'):
@@ -185,10 +171,8 @@ class AmplitudeFactory2D(AmplitudeFactory):
             return self.compress_row_pbc(tn,i,direction=direction)
         else:
             return self.compress_row_obc(tn,i,direction=direction)
-    def combine_nn(self,*args):
-        return tn 
     def get_benv(self,i,row,env_prev,config,step,direction='row'):
-        cache = self.get_cache(direction,step) 
+        cache = self.cache if self._backend=='numpy' else self._cache
         key = self.cache_key(config,i,direction,step)
         if key in cache: # reusable
             return cache[key]
@@ -229,7 +213,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         Lx = self.Lx if direction=='row' else self.Ly
         if step==-1 and i==Lx-1:
             return None
-        cache = self.get_cache(direction,step) 
+        cache = self.cache if self._backend=='numpy' else self._cache
         key = self.cache_key(config,i-step,direction,step)
         return cache[key]
     def _get_all_benvs(self,config,step,psi=None,start=None,stop=None,append='',direction='row'):
@@ -288,42 +272,29 @@ class AmplitudeFactory2D(AmplitudeFactory):
             except (ValueError,IndexError):
                 return cols,envs
         return cols,envs
-    def _get_plq_forward(self,j,y_bsz,cols,renvs,direction='col'):
-        # lenv from col, renv from renv
+    def _get_plq_sweep(self,j,y_bsz,cols,envs,step,direction='col'):
         if direction=='col':
             Ly = self.Ly 
             col_tag = self.col_tag
         else:
             Ly = self.Lx
             col_tag = self.row_tag
-        first_col = col_tag(0)
         tags = [col_tag(j+ix) for ix in range(y_bsz)]
         plq = cols.select(tags,which='any',virtual=False)
-        if j>0:
-            other = plq
-            plq = cols.select(first_col,virtual=False)
-            plq.add_tensor_network(other,virtual=False)
-        if j<Ly - y_bsz:
-            plq.add_tensor_network(renvs[j+y_bsz],virtual=False)
-        plq.view_like_(cols)
-        return plq
-    def _get_plq_backward(self,j,y_bsz,cols,lenvs,direction='col'):
-        # lenv from lenv, renv from cols
-        if direction=='col':
-            Ly = self.Ly 
-            col_tag = self.col_tag
+        if step==1:
+            if j>0:
+                other = plq
+                plq = cols.select(col_tag(0),virtual=False)
+                plq.add_tensor_network(other,virtual=False)
+            if j<Ly - y_bsz:
+                plq.add_tensor_network(envs[j+y_bsz],virtual=False)
         else:
-            Ly = self.Lx
-            col_tag = self.row_tag
-        last_col = col_tag(Ly-1)
-        tags = [col_tag(j+ix) for ix in range(y_bsz)] 
-        plq = cols.select(tags,which='any',virtual=False)
-        if j>0:
-            other = plq
-            plq = lenvs[j-1]
-            plq.add_tensor_network(other,virtual=False)
-        if j<Ly - y_bsz:
-            plq.add_tensor_network(cols.select(last_col,virtual=False),virtual=False)
+            if j>0:
+                other = plq
+                plq = envs[j-1]
+                plq.add_tensor_network(other,virtual=False)
+            if j<Ly - y_bsz:
+                plq.add_tensor_network(cols.select(col_tag(Ly-1),virtual=False),virtual=False)
         plq.view_like_(cols)
         return plq
     def _get_plq(self,j,y_bsz,cols,lenvs,renvs,direction='col'):
@@ -357,8 +328,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         return plq
     def build_3row_tn(self,config,i,x_bsz,psi=None,direction='row'):
         psi = self.psi if psi is None else psi
-        cache_bot = self.get_cache(direction,1) 
-        cache_top = self.get_cache(direction,-1)
+        cache = self.cache if self._backend=='numpy' else self._cache
         Lx = self.Lx if direction=='row' else self.Ly
         try:
             tn = self.get_mid_env(i,config,psi=psi,direction=direction)
@@ -366,10 +336,10 @@ class AmplitudeFactory2D(AmplitudeFactory):
                 tn.add_tensor_network(self.get_mid_env(i+ix,config,psi=psi,direction=direction),virtual=False)
             if i>0:
                 other = tn 
-                tn = cache_bot[self.cache_key(config,i-1,direction,1)].copy()
+                tn = cache[self.cache_key(config,i-1,direction,1)].copy()
                 tn.add_tensor_network(other,virtual=False)
             if i+x_bsz<Lx:
-                tn.add_tensor_network(cache_top[self.cache_key(config,i+x_bsz,direction,-1)],virtual=False)
+                tn.add_tensor_network(cache[self.cache_key(config,i+x_bsz,direction,-1)],virtual=False)
         except AttributeError:
             tn = None
         return tn 
@@ -432,7 +402,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
             self.cx['deterministic'] = cx
 
             for where in b.pairs:
-                ex_ij = self.update_pair_energy_from_benvs(where,cache_bot,cache_top)
+                ex_ij = self.update_pair_energy_from_benvs(where)
                 for tag,eij in ex_ij.items():
                     ex[where,tag] = eij,cx,eij/cx
             return ex,None
@@ -479,8 +449,8 @@ class PerturbedAmplitudeFactory2D(AmplitudeFactory2D):
     def __init__(self,psi,nn,model,**kwargs):
         self.nn = nn
         super().__init__(psi,model,from_plq=False,**kwargs)
-    def get_block_dict(self,blks):
-        super().get_block_dict(blks)
+    def get_block_dict(self):
+        super().get_block_dict()
         self.nn.get_block_dict()
         start = self.nparam
         for _start,_stop in self.nn.block_dict:
@@ -506,7 +476,7 @@ class PerturbedAmplitudeFactory2D(AmplitudeFactory2D):
         super().free_ad_cache()
         self.nn.free_ad_cache()
     def get_benv(self,i,row,env_prev,config,step,direction='row'):
-        cache = self.get_cache(direction,step) 
+        cache = self.cache if self._backend=='numpy' else self._cache    
         key = self.cache_key(config,i,direction,step)
         if key in cache: # reusable
             return cache[key]
@@ -564,8 +534,15 @@ class PerturbedAmplitudeFactory2D(AmplitudeFactory2D):
             return None
 
         try:
+            env_bot = self.nn.modify_bot_mps(env_bot,config,imax)
+        except NotImplementedError:
+            pass
+        try:
+            env_top = self.nn.modify_top_mps(env_top,config,imin)
+        except NotImplementedError:
+            pass
+        try:
             tn = env_bot.copy()
-            tn = self.nn.modify_bot_mps(tn,config,imax)
             tn.add_tensor_network(env_top,virtual=False)
         except AttributeError:
             return None 
@@ -856,23 +833,6 @@ class ExchangeSampler2D(ExchangeSampler):
         config_new[ix1] = i1_new
         config_new[ix2] = i2_new
         return (i1_new,i2_new),tuple(config_new)
-    def _update_pair_from_plq(self,site1,site2,plq,cols):
-        config_sites,config_new = self._new_pair(site1,site2)
-        if config_sites is None:
-            return plq,cols
-        config_sites = self.af.parse_config(config_sites)
-        config_new_ = self.af.parse_config(config_new)
-        plq_new,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,config_new_)
-        if py is None:
-            return plq,cols
-        acceptance = np.exp(py - self.px)
-        if acceptance < self.rng.uniform(): # reject
-            return plq,cols
-        # accept, update px & config & env_m
-        self.px = py
-        self.config = config_new
-        cols = self.af.replace_sites(cols,(site1,site2),config_sites)
-        return plq_new,cols 
     def get_pairs(self,i,j,x_bsz,y_bsz):
         if (x_bsz,y_bsz)==(1,2):
             pairs = [((i,j),(i,(j+1)%self.Ly))]
@@ -890,72 +850,67 @@ class ExchangeSampler2D(ExchangeSampler):
         else:
             raise NotImplementedError
         return pairs
-    def update_plq(self,i,j,x_bsz,y_bsz,plq,cols):
-        pairs = self.get_pairs(i,j,x_bsz,y_bsz)
-        for site1,site2 in pairs:
-            plq,cols = self._update_pair_from_plq(site1,site2,plq,cols) 
-        return cols
-    def sweep_col_forward(self,i,cols,x_bsz,y_bsz):
-        cols,renvs = self.af.get_all_envs(cols,-1,stop=y_bsz-1,inplace=False)
-        for j in range(self.Ly - y_bsz + 1): 
-            plq = self.af._get_plq_forward(j,y_bsz,cols,renvs)
-            cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
-            cols = self.af._contract_cols(cols,(0,j))
-    def sweep_col_backward(self,i,cols,x_bsz,y_bsz):
-        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.Ly-y_bsz,inplace=False)
-        for j in range(self.Ly - y_bsz,-1,-1): # Ly-1,...,1
-            plq = self.af._get_plq_backward(j,y_bsz,cols,lenvs)
-            cols = self.update_plq(i,j,x_bsz,y_bsz,plq,cols) 
-            cols = self.af._contract_cols(cols,(j+y_bsz-1,self.Ly-1))
-#    def sweep_col_pbc(self,i,cols,x_bsz,y_bsz,step):
-#        sweep = range(self.Ly-y_bsz+1) if step==1 else range(self.Ly-y_bsz,-1,-1)
-#        for j in sweep:
-#            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
-#            for site1,site2 in pairs:
-#                config_sites,config_new = self._new_pair(site1,site2)
-#                if config_sites is None:
-#                    continue
-#                config_sites = self.af.parse_config(config_sites)
-#                self.af.config_new = config_new
-#                cols_new,py = af._new_log_prob_pbc(cols,(site1,site2),config_sites,i,x_bsz) 
-#                if py is None:
-#                    continue
-#                acceptance = np.exp(py - self.px)
-#                if acceptance < self.rng.uniform(): # reject
-#                    continue
-#                # accept, update px & config & env_m
-#                self.px = py
-#                self.config = config_new
-#                cols = cols_new
-    def sweep_row_forward(self,x_bsz,y_bsz):
-        self.af.cache_bot = dict()
-        self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=x_bsz-1)
-
-        cdir = self.rng.choice([-1,1]) 
-        if self.af.pbc:
-            sweep_col = functools.partialmethod(self.sweep_col_pbc,step=cdir) 
-        else:
-            sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-
-        imax = self.Lx-x_bsz
-        for i in range(imax+1):
-            tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
-            sweep_col(i,tn,x_bsz,y_bsz)
-
-            self.af._get_all_benvs(self.af.parse_config(self.config),1,start=i,stop=i+x_bsz)
-    def sweep_row_backward(self,x_bsz,y_bsz):
-        self.af.cache_top = dict()
-        self.af._get_all_benvs(self.af.parse_config(self.config),1,stop=self.Lx-x_bsz)
-
-        cdir = self.rng.choice([-1,1]) 
-        sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
-
-        imax = self.Lx-x_bsz
-        for i in range(imax,-1,-1):
-            tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
-            sweep_col(i,tn,x_bsz,y_bsz)
-
-            self.af._get_all_benvs(self.af.parse_config(self.config),-1,stop=i-1,start=i+x_bsz-1)
+    def sweep_col_from_plq(self,i,cols,x_bsz,y_bsz):
+        step = self.rng.choice([-1,1])
+        stop = y_bsz-1 if step==1 else self.Ly-y_bsz
+        cols,envs = self.af.get_all_envs(cols,-step,stop=stop,inplace=False)
+        sweep = range(self.Ly - y_bsz + 1) if step==1 else \
+                range(self.Ly - y_bsz,-1,-1)
+        for j in sweep: 
+            plq = self.af._get_plq_sweep(j,y_bsz,cols,envs,step)
+            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
+            for site1,site2 in pairs:
+                config_sites,config_new = self._new_pair(site1,site2)
+                if config_sites is None:
+                    continue
+                config_sites = self.af.parse_config(config_sites)
+                config_new_ = self.af.parse_config(config_new)
+                _,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,config_new_)
+                if py is None:
+                    continue
+                acceptance = np.exp(py - self.px)
+                if acceptance < self.rng.uniform(): # reject
+                    continue
+                # accept, update px & config & env_m
+                self.px = py
+                self.config = config_new
+                cols = self.af.replace_sites(cols,(site1,site2),config_sites)
+            cix = (0,j) if step==1 else (j+y_bsz-1,self.Ly-1)
+            cols = self.af._contract_cols(cols,cix)
+    def sweep_col_from_benv(self,i,x_bsz,y_bsz):
+        step = self.rng.choice([-1,1])
+        sweep = range(self.Ly - y_bsz + 1) if step==1 else \
+                range(self.Ly - y_bsz,-1,-1)
+        for j in sweep:
+            pairs = self.get_pairs(i,j,x_bsz,y_bsz)
+            for site1,site2 in pairs:
+                _,config_new = self._new_pair(site1,site2)
+                if config_new is None:
+                    continue
+                config_new_ = self.af.parse_config(config_new)
+                py = self.af.log_prob(config_new_,i=i)
+                if py is None:
+                    continue
+                acceptance = np.exp(py - self.px)
+                if acceptance < self.rng.uniform(): # reject
+                    continue
+                self.px = py
+                self.config = config_new
+    def sweep_row(self,x_bsz,y_bsz):
+        step = self.rng.choice([-1,1])
+        self.af.free_sweep_cache(step)
+        stop = x_bsz-1 if step==1 else self.Lx-x_bsz 
+        self.af._get_all_benvs(self.af.parse_config(self.config),-step,stop=stop)
+        sweep = range(self.Lx-x_bsz+1) if step==1 else range(self.Lx-x_bsz-1,-1)
+        for i in sweep:
+            if self.af.from_plq:
+                tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
+                self.sweep_col_from_plq(i,tn,x_bsz,y_bsz)
+            else:
+                self.sweep_col_from_benv(i,x_bsz,y_bsz)
+            start = i if step==1 else i+x_bsz-1
+            stop = i+x_bsz if step==1 else i-1
+            self.af._get_all_benvs(self.af.parse_config(self.config),step,start=start,stop=stop)
     def get_bsz(self):
         if self.scheme=='hv':
             bsz = [(1,2),(2,1)][::self.rng.choice([1,-1])]
@@ -967,9 +922,7 @@ class ExchangeSampler2D(ExchangeSampler):
     def _sample(self):
         bsz = self.get_bsz()
         for (x_bsz,y_bsz) in bsz: 
-            sweep_fn = {0:self.sweep_row_forward,
-                        1:self.sweep_row_backward}[self.rng.choice([0,1])] 
-            sweep_fn(x_bsz,y_bsz) 
+            self.sweep_row(x_bsz,y_bsz) 
     def _update_pair(self,site1,site2):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
