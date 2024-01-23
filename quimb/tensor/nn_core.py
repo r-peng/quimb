@@ -31,6 +31,91 @@ def pair_terms(i1,i2,spin):
     else:
         raise ValueError
     return map_.get((i1,i2),(None,)*2)
+class AmplitudeFactory:
+    def pair_terms(self,i1,i2,spin=None):
+        if self.fermion:
+            return pair_terms(i1,i2,spin) 
+        else:
+            return i2,i1
+    def log_prob(self,config,**kwargs):
+        if self.phase:
+            return 1
+        cx = self.forward(config)
+        cx = tensor2backend(cx,'numpy') 
+        if self.log:
+            return 2 * cx 
+        else:
+            return np.log(cx**2) 
+    def amplitude(self,config,to_numpy=True):
+        cx = self.forward(config)
+        if self.log:
+            logcx = cx
+            if self.phase:
+                logcx = 1j*logcx
+            cx = self.jnp.exp(logcx)
+        if to_numpy:
+            cx = tensor2backend(cx,'numpy')
+        return cx
+    def batch_pair_energies(self,batch_key,new_cache):
+        spins = ('a','b') if self.fermion else (None,)
+
+        cx = self.forward(self.config)
+        if self.log:
+            logcx = cx 
+            if self.phase: 
+                logcx = 1j * logcx
+            cx = self.jnp.exp(logcx)
+
+        self.cx['deterministic'] = cx
+        ex = dict()
+        for where in self.model.batched_pairs[batch_key].pairs:
+            ix1,ix2 = [self.flatten(site) for site in where]
+            i1,i2 = self.config[ix1],self.config[ix2]
+            if not self.model.pair_valid(i1,i2): # term vanishes 
+                for spin in spins:
+                    ex[where,spin] = 0,cx,0
+                continue
+            for spin in spins:
+                i1_new,i2_new = self.pair_terms(i1,i2,spin)
+                if i1_new is None:
+                    ex[where,spin] = 0,cx,0 
+                    continue
+                config_new = list(self.config)
+                config_new[ix1] = i1_new
+                config_new[ix2] = i2_new 
+                cx_new = self.forward(config_new) 
+                if self.log:
+                    logcx_new = cx_new
+                    if self.phase:
+                        logcx_new = 1j * logcx_new
+                    cx_new = self.jnp.exp(logcx_new) 
+                    ratio = cx_new / cx if logcx is None else \
+                            self.jnp.exp(logcx_new-logcx)   
+                else:
+                    ratio = cx_new / cx
+                ex[where,spin] = cx_new, cx, ratio 
+        return ex,cx
+    def get_grad_deterministic(self,config,save=False):
+        if self.vx is not None:
+            cx = self.cx.get('deterministic',None)
+            return cx,self.vx
+        self.wfn2backend(backend='torch',requires_grad=True)
+        cx = self.forward(config) 
+        cx,self.vx = self.propagate(cx) 
+        if self.log:
+            if self.phase:
+                self.vx = 1j * self.vx
+                cx = 1j * cx
+            cx = np.exp(cx) 
+        else:
+            self.vx /= cx
+        self.wfn2backend()
+        if save:
+            self.cx['deterministic'] = cx
+        return cx,self.vx 
+    def get_grad_from_plq(self,plq):
+        return self.get_grad_deterministic(self.config,save=True)[1]
+
 class Layer:
     def get_block_dict(self):
         self.block_dict = []
@@ -144,7 +229,111 @@ class Dense(Layer):
             def _afn(x):
                 return self.jnp.exp(x)
         self._afn = _afn
+def input_determinant(config):
+    ls = [None] * 2
+    for ix,c in enumerate(config_to_ab(config)):
+        ls[ix] = np.where(c)[0]
+    c = np.concatenate(ls) 
+    return c/len(config)
+def input_bond(config,bmap):
+    ls = []
+    nb = len(bmap)
+    for conf in config_to_ab(config):
+        v = np.zeros(nb) 
+        for (ix1,ix2),ix in bmap.items():
+            c1,c2 = conf[ix1],conf[ix2]
+            if c1+c2==1:
+                v[ix] = 1
+        ls.append(v)
+    conf = np.array(config)
+    ls.append(np.array([len(conf[conf==3])]))
+    return np.concatenate(ls)
+def input_pnsz(config):
+    v = np.zeros((len(config),2))
+    pn_map = [0,1,1,2]
+    sz_map = [0,1,-1,0]
+    for i,ci in enumerate(config):
+        v[i,0] = pn_map[ci]
+        v[i,1] = sz_map[ci]
+    return v
+def _input(config,input_format,backend,bmap=None):
+    _format,_order = input_format
+    if _format=='det':
+        x = input_determinant(config)
+    elif _format=='fermion':
+        x = np.array(config,dtype=float) 
+    elif _format=='bond':
+        x = input_bond(config,bmap)
+    elif _format=='pnsz':
+        x = input_pnsz(config)
+    elif _format=='conv1':
+        x = np.array(config,dtype=float).reshape(len(config),1) 
+    elif _format=='conv2':
+        x = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
+    else:
+        if _order is not None:
+            config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=_order)
+        else:
+            config = np.array(config,dtype=float)
+        xmin,xmax = _format
+        x = config * (xmax-xmin) + xmin 
+    if backend=='numpy':
+        return x 
+    else:
+        return tensor2backend(x,backend) 
+class Fourier(Layer,AmplitudeFactory):
+    def __init__(self,nx,ny,backend='numpy'):
+        self.nx,self.ny = nx,ny
+        self.sh = [(2,nx,ny),(2,ny)]
+        self.params = [None] * len(self.sh) 
 
+        self.backend = backend
+        self.set_backend(backend)
+
+        self.is_tn = False
+        self.from_plq = False
+        self.spin = None
+        self.vx = None
+
+        # to be set
+        self.fermion = None 
+        self.log = None 
+        self.phase = None 
+        self.const = None
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        self.set_backend(backend)
+        super().wfn2backend(backend=backend,requires_grad=requires_grad)
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        ar.set_backend(self.jnp.zeros(1))
+    def forward(self,config):
+        y = _input(config,self.input_format,self._backend)
+        w,b = self.params
+        ls = [self.jnp.matmul(y,w[ix])+b[ix] for ix in (0,1)]
+        try:
+            ls[0] = self.jnp.relu(ls[0]) 
+        except AttributeError:
+            ls[0] = ls[0] * (ls[0]>0)
+        ls[1] = self.jnp.sin(np.pi*ls[1])
+        return self.jnp.dot(ls[0],ls[1])/self.nx + self.const
+    def load_from_disc(self,fname):
+        f = h5py.File(fname+'.hdf5','r')
+        for j in range(len(self.sh)):
+            self.params[j] = f[f'p{j}'][:]
+        f.close() 
+    def save_to_disc(self,fname,root=0):
+        if RANK!=root:
+            return
+        f = h5py.File(fname+'.hdf5','w')
+        for j,tsr in enumerate(self.params):
+            f.create_dataset(f'p{j}',data=tensor2backend(tsr,'numpy'))
+        f.close()
+    def update(self,x,fname=None,root=0):
+        super().update(x)
+        if fname is not None:
+            self.save_to_disc(fname,root=root) 
+        self.wfn2backend()
 def get_block_dict(afs,keys=None):
     keys = range(len(afs)) if keys is None else keys
     [afs[key].get_block_dict() for key in keys]
@@ -186,8 +375,7 @@ def free_sweep_cache(afs,step,keys=None):
             afs[key].free_sweep_cache(step)
         except:
             continue
-
-class NN:
+class FNN:
     def __init__(self,lr,backend='numpy'):
         self.af = lr
         self.nl = len(lr)
@@ -204,19 +392,10 @@ class NN:
         self.nparam,self.sections,self.block_dict = get_block_dict(self.af,keys=self.keys)
     def set_backend(self,backend):
         self._backend = backend
-        if backend=='numpy':
-            self._input = self.input
-            tsr = np.zeros(1)
-            self.jnp = np 
-        else:
-            tsr = torch.zeros(1)
-            self.jnp = torch
-            def _input(config):
-                return tensor2backend(self.input(config),backend) 
-            self._input = _input
-        ar.set_backend(tsr)
         for key in self.keys:
             self.af[key].set_backend(backend)
+        self.jnp = self.af[key].jnp
+        ar.set_backend(self.jnp.zeros(1))
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
@@ -245,54 +424,7 @@ class NN:
         if fname is not None:
             self.save_to_disc(fname,root=root) 
         self.wfn2backend()
-    def input_determinant(self,config):
-        ls = [None] * 2
-        for ix,c in enumerate(config_to_ab(config)):
-            ls[ix] = np.where(c)[0]
-        c = np.concatenate(ls) 
-        return c/len(config)
-    def input_bond(self,config):
-        ls = []
-        nb = len(self.bmap)
-        for conf in config_to_ab(config):
-            v = np.zeros(nb) 
-            for (ix1,ix2),ix in self.bmap.items():
-                c1,c2 = conf[ix1],conf[ix2]
-                if c1+c2==1:
-                    v[ix] = 1
-            ls.append(v)
-        conf = np.array(config)
-        ls.append(np.array([len(conf[conf==3])]))
-        return np.concatenate(ls)
-    def input_pnsz(self,config):
-        v = np.zeros((len(config),2))
-        pn_map = [0,1,1,2]
-        sz_map = [0,1,-1,0]
-        for i,ci in enumerate(config):
-            v[i,0] = pn_map[ci]
-            v[i,1] = sz_map[ci]
-        return v
-    def input(self,config):
-        _format,_order = self.input_format
-        if _format=='det':
-            return self.input_determinant(config)
-        if _format=='fermion':
-            return np.array(config,dtype=float) 
-        if _format=='bond':
-            return self.input_bond(config)
-        if _format=='pnsz':
-            return self.input_pnsz(config)
-        if _format=='conv1':
-            return np.array(config,dtype=float).reshape(len(config),1) 
-        if _format=='conv2':
-            return np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
-        if _order is not None:
-            config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=_order)
-        else:
-            config = np.array(config,dtype=float)
-        xmin,xmax = _format
-        return config * (xmax-xmin) + xmin 
-class AmplitudeNN(NN):
+class AmplitudeFNN(FNN,AmplitudeFactory):
     def __init__(self,lr,**kwargs):
         super().__init__(lr,**kwargs)
 
@@ -306,148 +438,52 @@ class AmplitudeNN(NN):
         self.sum_all = None 
         self.log = None 
         self.phase = None 
-    def pair_terms(self,i1,i2,spin=None):
-        if self.fermion:
-            return pair_terms(i1,i2,spin) 
-        else:
-            return i2,i1
     def forward(self,config):
-        y = self._input(config)
+        y = _input(config,self.input_format,self._backend)
         _sum = 0
         for l,lr in enumerate(self.af):
             y = lr.forward(y)
             if l==self.nl-1 or self.sum_all:
                 _sum = _sum + y.sum() 
         return _sum + self.const 
-    def log_prob(self,config):
-        if self.phase:
-            return 1
-        cx = self.forward(config)
-        cx = tensor2backend(cx,'numpy') 
-        if self.log:
-            return 2 * cx 
-        else:
-            return np.log(cx**2) 
-    def amplitude(self,config,to_numpy=True):
-        cx = self.forward(config)
-        if self.log:
-            logcx = cx
-            if self.phase:
-                logcx = 1j*logcx
-            cx = self.jnp.exp(logcx)
-        if to_numpy:
-            cx = tensor2backend(cx,'numpy')
-        return cx
-    def batch_pair_energies(self,batch_key,new_cache):
-        spins = ('a','b') if self.fermion else (None,)
-
-        cx = self.forward(self.config)
-        if self.log:
-            logcx = cx 
-            if self.phase: 
-                logcx = 1j * logcx
-            cx = self.jnp.exp(logcx)
-
-        self.cx['deterministic'] = cx
-        ex = dict()
-        for where in self.model.batched_pairs[batch_key].pairs:
-            ix1,ix2 = [self.flatten(site) for site in where]
-            i1,i2 = self.config[ix1],self.config[ix2]
-            if not self.model.pair_valid(i1,i2): # term vanishes 
-                for spin in spins:
-                    ex[where,spin] = 0,cx,0
-                continue
-            for spin in spins:
-                i1_new,i2_new = self.pair_terms(i1,i2,spin)
-                if i1_new is None:
-                    ex[where,spin] = 0,cx,0 
-                    continue
-                config_new = list(self.config)
-                config_new[ix1] = i1_new
-                config_new[ix2] = i2_new 
-                cx_new = self.forward(config_new) 
-                if self.log:
-                    logcx_new = cx_new
-                    if self.phase:
-                        logcx_new = 1j * logcx_new
-                    cx_new = self.jnp.exp(logcx_new) 
-                    ratio = cx_new / cx if logcx is None else \
-                            self.jnp.exp(logcx_new-logcx)   
-                else:
-                    ratio = cx_new / cx
-                ex[where,spin] = cx_new, cx, ratio 
-        return ex,cx
-    def get_grad_deterministic(self,config,save=False):
-        if self.vx is not None:
-            cx = self.cx.get('deterministic',None)
-            return cx,self.vx
-        self.wfn2backend(backend='torch',requires_grad=True)
-        cx = self.forward(config) 
-        cx,self.vx = self.propagate(cx) 
-        if self.log:
-            if self.phase:
-                self.vx = 1j * self.vx
-                cx = 1j * cx
-            cx = np.exp(cx) 
-        else:
-            self.vx /= cx
-        self.wfn2backend()
-        if save:
-            self.cx['deterministic'] = cx
-        return cx,self.vx 
-    def get_grad_from_plq(self,plq):
-        return self.get_grad_deterministic(self.config,save=True)[1]
-class TensorNN(NN):
+class TensorFNN(FNN):
     def __init__(self,lr,**kwargs):
         super().__init__(lr,**kwargs)
-        #self.tensor = None
-        #self._tensor = None
-
         # to be set
         self.log = None
         self.ind = None
     def forward(self,config):
-        #tensor = self.tensor if self._backend=='numpy' else self._tensor
-        #if tensor is not None:
-        #    _config,y = tensor 
-        #    if _config==config:
-        #        return y
-        
-        y = self._input(config)
+        y = _input(config,self.input_format,self._backend)
         for l,lr in enumerate(self.af):
             y = lr.forward(y)
         if self.log:
             y = self.jnp.exp(y)
         y = y.reshape(self.shape) + self.const 
-        #if self._backend=='numpy':
-        #    self.tensor = config,y
-        #else:
-        #    self._tensor = config,y
         return y
     def free_ad_cache(self):
         self._tensor = None
  
-def rotate(x,eps):
+def rotate(x,scale):
     nx = len(x)
-    K = np.random.normal(loc=0,scale=eps,size=(nx,nx))
+    K = np.random.normal(loc=0,scale=scale,size=(nx,nx))
     U = scipy.linalg.expm(K-K.T)
     return np.dot(U,x) 
-def compute_colinear(w,ny=None,eps=0,cos_max=.9,thresh=1e-6):
-    ny = w.shape[0] if ny is None else ny
-    nx = w.shape[1]
+def compute_colinear(nx,ny,scale,cos_max=.9,thresh=1e-6):
     nc = 0
-    ls = []
-    for i in range(w.shape[0]):
-        if len(ls)==ny:
-            break
-        norm = np.linalg.norm(w[i,:]) 
+    while True:
+        w = np.random.normal(loc=0,scale=scale,size=nx)
+        norm = np.linalg.norm(w)
         if norm < thresh:
             continue
-        wi = rotate(w[i,:] / norm,eps)
+        w /= norm 
+        break
+    ls = [w] 
+    for i in range(ny-1):
+        w = rotate(ls[-1],scale)
         for wj in ls:
-            if np.fabs(np.dot(wi,wj)) > cos_max:
+            if np.fabs(np.dot(w,wj)) > cos_max:
                 nc += 1
-        ls.append(wi)
+        ls.append(w)
     if RANK==0:
         print('collinear ratio=',nc/(ny*(ny-1)/2))
     return np.array(ls) 
@@ -457,21 +493,19 @@ def relu_init_rand(nx,ny,xmin,xmax):
     x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
     b = np.sum(w*x,axis=1) 
     return w,b
-def relu_init_normal(af,xmin,xmax,scale,eps):
+def relu_init_normal(nx,ny,xmin,xmax,s1=1,s2=None):
     if RANK==0:
-        w = np.array([np.random.normal(loc=0,scale=scale,size=af.nx) for _ in range(af.ny)])
-        w = compute_colinear(w)
+        w = compute_colinear(nx,ny,s1)
         loc = (xmin+xmax) / 2 
-        x = np.array([np.random.normal(loc=loc,scale=eps,size=af.nx) for _ in range(af.ny)])
+        s2 = (xmax-xmin) / 4 if s2 is None else s2
+        x = np.array([np.random.normal(loc=loc,scale=s2,size=nx) for _ in range(ny)])
         b = np.sum(w*x,axis=1) 
     else:
-        w = np.zeros((af.ny,af.nx))
-        b = np.zeros(af.ny)
+        w = np.zeros((ny,nx))
+        b = np.zeros(ny)
     COMM.Bcast(w,root=0)
     COMM.Bcast(b,root=0)
-    af.params[0] = w.T * eps
-    af.params[1] = b * eps
-    return af
+    return w.T,b 
 def relu_init_sobol(nx,ny,xmin,xmax,eps):
     import qmcpy
     sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
