@@ -300,6 +300,7 @@ class Fourier(Layer,AmplitudeFactory):
         self.log = None 
         self.phase = None 
         self.const = None
+        self.input_format = None
     def wfn2backend(self,backend=None,requires_grad=False):
         backend = self.backend if backend is None else backend
         self.set_backend(backend)
@@ -316,7 +317,7 @@ class Fourier(Layer,AmplitudeFactory):
         except AttributeError:
             ls[0] = ls[0] * (ls[0]>0)
         ls[1] = self.jnp.sin(np.pi*ls[1])
-        return self.jnp.dot(ls[0],ls[1])/self.nx + self.const
+        return self.jnp.dot(ls[0],ls[1])/self.ny + self.const
     def load_from_disc(self,fname):
         f = h5py.File(fname+'.hdf5','r')
         for j in range(len(self.sh)):
@@ -334,6 +335,34 @@ class Fourier(Layer,AmplitudeFactory):
         if fname is not None:
             self.save_to_disc(fname,root=root) 
         self.wfn2backend()
+class Product(Fourier):
+    def __init__(self,nx,ny,backend='numpy'):
+        super().__init__(nx,ny,backend=backend)
+        self.sh = [(2,nx,ny)]
+        self.params = [None]  
+    def forward(self,config):
+        y = _input(config,self.input_format,self._backend)
+        w = self.params[0]
+        y = w[0] + y.reshape((self.nx,1)) * w[1]
+        try:
+            y = self.jnp.prod(y,axis=1)
+        except:
+            y = self.jnp.prod(y,dim=1)
+        return self.jnp.sum(y)/self.ny
+class CP(Product): 
+    def __init__(self,nx,ny,pdim,backend='numpy'):
+        super().__init__(nx,ny,backend=backend)
+        self.sh = [(pdim,nx,ny)]
+    def forward(self,config):
+        w = self.params[0] 
+        w = [w[ci,i,:] for i,ci in enumerate(config)]
+        try:
+            w = self.jnp.stack(w,dim=0)
+            w = self.jnp.prod(w,dim=0)
+        except:
+            w = self.jnp.stack(w,axis=0)
+            w = self.jnp.prod(w,axis=0)
+        return self.jnp.sum(w)/self.ny + self.const 
 def get_block_dict(afs,keys=None):
     keys = range(len(afs)) if keys is None else keys
     [afs[key].get_block_dict() for key in keys]

@@ -2,7 +2,7 @@ import time,itertools,functools,h5py
 import numpy as np
 from .nn_core import (
 #    Dense,FNN,AmplitudeFNN,AmplitudeSNN,TensorFNN,
-    AmplitudeFNN,Fourier,
+    AmplitudeFNN,Fourier,CP,
     #tensor2backend,
     #relu_init_normal,
 )
@@ -17,6 +17,11 @@ class Fourier2D(Fourier,AmplitudeFactory2D):
         self.Lx = Lx
         self.Ly = Ly 
         super().__init__(nx,ny,**kwargs)
+class CP2D(CP,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nx,ny,pdim,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(nx,ny,pdim,**kwargs)
 class AmplitudeFNN2D(AmplitudeFNN,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,af,**kwargs):
         self.Lx = Lx
