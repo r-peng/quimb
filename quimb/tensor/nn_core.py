@@ -335,24 +335,45 @@ class Fourier(Layer,AmplitudeFactory):
         if fname is not None:
             self.save_to_disc(fname,root=root) 
         self.wfn2backend()
-class Product(Fourier):
+class HP(Fourier):
     def __init__(self,nx,ny,backend='numpy'):
         super().__init__(nx,ny,backend=backend)
-        self.sh = [(2,nx,ny)]
-        self.params = [None]  
+        self.sh = [(nx,ny)]
+        self.params = [None] 
+    def init(self,nsite,eps,scale=1,**kwargs):
+        nx,ny = self.sh[0]
+        if RANK==0:
+            w = compute_colinear(nx,ny,scale,**kwargs)
+            w *= np.sqrt(nx) * eps**(1/nsite)
+        else:
+            w = np.zeros((ny,nx))
+        COMM.Bcast(w,root=0)
+        self.params[0] = w.T
     def forward(self,config):
-        y = _input(config,self.input_format,self._backend)
         w = self.params[0]
-        y = w[0] + y.reshape((self.nx,1)) * w[1]
+        w = [w[ci,:] for ci in config] 
         try:
-            y = self.jnp.prod(y,axis=1)
+            w = self.jnp.stack(w,dim=0)
+            w = self.jnp.prod(w,dim=0)
         except:
-            y = self.jnp.prod(y,dim=1)
-        return self.jnp.sum(y)/self.ny
-class CP(Product): 
+            w = self.jnp.stack(w,axis=0)
+            w = self.jnp.prod(w,axis=0)
+        return self.jnp.sum(w)/self.ny + self.const 
+class CP(Fourier): 
     def __init__(self,nx,ny,pdim,backend='numpy'):
         super().__init__(nx,ny,backend=backend)
         self.sh = [(pdim,nx,ny)]
+        self.params = [None]
+    def init(self,eps,scale=1,**kwargs):
+        pdim,nx,ny = self.sh[0]
+        if RANK==0:
+            w = compute_colinear(pdim,nx*ny,scale,**kwargs)
+            w = w.reshape(nx,ny,pdim) 
+            w *= np.sqrt(pdim) * eps**(1/nx)
+        else:
+            w = np.zeros((nx,ny,pdim))
+        COMM.Bcast(w,root=0)
+        self.params[0] = w.transpose((2,0,1))
     def forward(self,config):
         w = self.params[0] 
         w = [w[ci,i,:] for i,ci in enumerate(config)]
