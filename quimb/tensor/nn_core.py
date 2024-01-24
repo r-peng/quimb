@@ -518,10 +518,10 @@ def rotate(x,scale):
     K = np.random.normal(loc=0,scale=scale,size=(nx,nx))
     U = scipy.linalg.expm(K-K.T)
     return np.dot(U,x) 
-def compute_colinear(nx,ny,scale,cos_max=.9,thresh=1e-6):
+def compute_colinear(nx,ny,scale,loc=0,cos_max=.9,thresh=1e-6):
     nc = 0
     while True:
-        w = np.random.normal(loc=0,scale=scale,size=nx)
+        w = np.random.normal(loc=loc,scale=scale,size=nx)
         norm = np.linalg.norm(w)
         if norm < thresh:
             continue
