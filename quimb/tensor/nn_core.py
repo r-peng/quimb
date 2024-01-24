@@ -349,6 +349,13 @@ class HP(Fourier):
             w = np.zeros((ny,nx))
         COMM.Bcast(w,root=0)
         self.params[0] = w.T
+    def init1(self,loc=1,scale=1):
+        if RANK==0:
+            w = np.random.normal(loc=loc,scale=scale,size=self.sh[0])
+        else:
+            w = np.zeros(self.sh[0])
+        COMM.Bcast(w,root=0)
+        self.params[0] = w
     def forward(self,config):
         w = self.params[0]
         w = [w[ci,:] for ci in config] 
@@ -374,6 +381,13 @@ class CP(Fourier):
             w = np.zeros((nx,ny,pdim))
         COMM.Bcast(w,root=0)
         self.params[0] = w.transpose((2,0,1))
+    def init1(self,loc=1,scale=1):
+        if RANK==0:
+            w = np.random.normal(loc=loc,scale=scale,size=self.sh[0])
+        else:
+            w = np.zeros(self.sh[0])
+        COMM.Bcast(w,root=0)
+        self.params[0] = w
     def forward(self,config):
         w = self.params[0] 
         w = [w[ci,i,:] for i,ci in enumerate(config)]
