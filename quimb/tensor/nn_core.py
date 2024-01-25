@@ -154,13 +154,104 @@ class Layer:
         if RANK==0 and iprint:
             print(key)
             print(tsr)
-class RBM(Layer):
-    def __init__(self,nv,nh):
+def input_determinant(config):
+    ls = [None] * 2
+    for ix,c in enumerate(config_to_ab(config)):
+        ls[ix] = np.where(c)[0]
+    c = np.concatenate(ls) 
+    return c/len(config)
+def input_bond(config,bmap):
+    ls = []
+    nb = len(bmap)
+    for conf in config_to_ab(config):
+        v = np.zeros(nb) 
+        for (ix1,ix2),ix in bmap.items():
+            c1,c2 = conf[ix1],conf[ix2]
+            if c1+c2==1:
+                v[ix] = 1
+        ls.append(v)
+    conf = np.array(config)
+    ls.append(np.array([len(conf[conf==3])]))
+    return np.concatenate(ls)
+def input_pnsz(config):
+    v = np.zeros((len(config),2))
+    pn_map = [0,1,1,2]
+    sz_map = [0,1,-1,0]
+    for i,ci in enumerate(config):
+        v[i,0] = pn_map[ci]
+        v[i,1] = sz_map[ci]
+    return v
+def _input(config,input_format,backend,bmap=None):
+    _format,_order = input_format
+    if _format=='det':
+        x = input_determinant(config)
+    elif _format=='fermion':
+        x = np.array(config,dtype=float) 
+    elif _format=='bond':
+        x = input_bond(config,bmap)
+    elif _format=='pnsz':
+        x = input_pnsz(config)
+    elif _format=='conv1':
+        x = np.array(config,dtype=float).reshape(len(config),1) 
+    elif _format=='conv2':
+        x = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
+    else:
+        if _order is not None:
+            config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=_order)
+        else:
+            config = np.array(config,dtype=float)
+        xmin,xmax = _format
+        x = config * (xmax-xmin) + xmin 
+    if backend=='numpy':
+        return x 
+    else:
+        return tensor2backend(x,backend) 
+class RBM(Layer,AmplitudeFactory):
+    def __init__(self,nv,nh,backend='numpy'):
         self.sh = (nv,),(nh,),(nv,nh)
         self.params = [None] * 3
-    def forward(self,x):
+
+        self.backend = backend
+        self.set_backend(backend)
+
+        self.is_tn = False
+        self.from_plq = False
+        self.spin = None
+        self.vx = None
+
+        # to be set
+        self.fermion = None 
+        self.log = True 
+        self.phase = None 
+        self.input_format = None 
+    def forward(self,config):
+        x = _input(config,self.input_format,self._backend)
         a,b,w = self.params
         return self.jnp.dot(a,x) + self.jnp.sum(self.jnp.log(self.jnp.cosh(self.jnp.matmul(x,w) + b)))
+    def wfn2backend(self,backend=None,requires_grad=False):
+        backend = self.backend if backend is None else backend
+        self.set_backend(backend)
+        super().wfn2backend(backend=backend,requires_grad=requires_grad)
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        ar.set_backend(self.jnp.zeros(1))
+    def load_from_disc(self,fname):
+        f = h5py.File(fname+'.hdf5','r')
+        for j in range(len(self.sh)):
+            self.params[j] = f[f'p{j}'][:]
+        f.close() 
+    def save_to_disc(self,fname,root=0):
+        if RANK!=root:
+            return
+        f = h5py.File(fname+'.hdf5','w')
+        for j,tsr in enumerate(self.params):
+            f.create_dataset(f'p{j}',data=tensor2backend(tsr,'numpy'))
+        f.close()
+    def update(self,x,fname=None,root=0):
+        super().update(x)
+        if fname is not None:
+            self.save_to_disc(fname,root=root) 
+        self.wfn2backend()
 class Dense(Layer):
     def __init__(self,nx,ny,afn,bias=True):
         self.nx,self.ny = nx,ny
@@ -229,85 +320,14 @@ class Dense(Layer):
             def _afn(x):
                 return self.jnp.exp(x)
         self._afn = _afn
-def input_determinant(config):
-    ls = [None] * 2
-    for ix,c in enumerate(config_to_ab(config)):
-        ls[ix] = np.where(c)[0]
-    c = np.concatenate(ls) 
-    return c/len(config)
-def input_bond(config,bmap):
-    ls = []
-    nb = len(bmap)
-    for conf in config_to_ab(config):
-        v = np.zeros(nb) 
-        for (ix1,ix2),ix in bmap.items():
-            c1,c2 = conf[ix1],conf[ix2]
-            if c1+c2==1:
-                v[ix] = 1
-        ls.append(v)
-    conf = np.array(config)
-    ls.append(np.array([len(conf[conf==3])]))
-    return np.concatenate(ls)
-def input_pnsz(config):
-    v = np.zeros((len(config),2))
-    pn_map = [0,1,1,2]
-    sz_map = [0,1,-1,0]
-    for i,ci in enumerate(config):
-        v[i,0] = pn_map[ci]
-        v[i,1] = sz_map[ci]
-    return v
-def _input(config,input_format,backend,bmap=None):
-    _format,_order = input_format
-    if _format=='det':
-        x = input_determinant(config)
-    elif _format=='fermion':
-        x = np.array(config,dtype=float) 
-    elif _format=='bond':
-        x = input_bond(config,bmap)
-    elif _format=='pnsz':
-        x = input_pnsz(config)
-    elif _format=='conv1':
-        x = np.array(config,dtype=float).reshape(len(config),1) 
-    elif _format=='conv2':
-        x = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=1) * 2 - 1
-    else:
-        if _order is not None:
-            config = np.stack([np.array(cf,dtype=float) for cf in config_to_ab(config)],axis=0).flatten(order=_order)
-        else:
-            config = np.array(config,dtype=float)
-        xmin,xmax = _format
-        x = config * (xmax-xmin) + xmin 
-    if backend=='numpy':
-        return x 
-    else:
-        return tensor2backend(x,backend) 
-class Fourier(Layer,AmplitudeFactory):
+class Fourier(RBM):
     def __init__(self,nx,ny,backend='numpy'):
-        self.nx,self.ny = nx,ny
+        super().__init__(None,None,backend=backend)
         self.sh = [(2,nx,ny),(2,ny)]
         self.params = [None] * len(self.sh) 
 
-        self.backend = backend
-        self.set_backend(backend)
-
-        self.is_tn = False
-        self.from_plq = False
-        self.spin = None
-        self.vx = None
-
         # to be set
-        self.fermion = None 
-        self.log = None 
-        self.phase = None 
         self.const = None
-        self.input_format = None
-    def wfn2backend(self,backend=None,requires_grad=False):
-        backend = self.backend if backend is None else backend
-        self.set_backend(backend)
-        super().wfn2backend(backend=backend,requires_grad=requires_grad)
-    def set_backend(self,backend):
-        super().set_backend(backend)
-        ar.set_backend(self.jnp.zeros(1))
     def forward(self,config):
         y = _input(config,self.input_format,self._backend)
         w,b = self.params
@@ -317,27 +337,10 @@ class Fourier(Layer,AmplitudeFactory):
         except AttributeError:
             ls[0] = ls[0] * (ls[0]>0)
         ls[1] = self.jnp.sin(np.pi*ls[1])
-        return self.jnp.dot(ls[0],ls[1])/self.ny + self.const
-    def load_from_disc(self,fname):
-        f = h5py.File(fname+'.hdf5','r')
-        for j in range(len(self.sh)):
-            self.params[j] = f[f'p{j}'][:]
-        f.close() 
-    def save_to_disc(self,fname,root=0):
-        if RANK!=root:
-            return
-        f = h5py.File(fname+'.hdf5','w')
-        for j,tsr in enumerate(self.params):
-            f.create_dataset(f'p{j}',data=tensor2backend(tsr,'numpy'))
-        f.close()
-    def update(self,x,fname=None,root=0):
-        super().update(x)
-        if fname is not None:
-            self.save_to_disc(fname,root=root) 
-        self.wfn2backend()
+        return self.jnp.dot(ls[0],ls[1])/len(ls[1]) + self.const
 class HP(Fourier):
     def __init__(self,nx,ny,backend='numpy'):
-        super().__init__(nx,ny,backend=backend)
+        super().__init__(None,None,backend=backend)
         self.sh = [(nx,ny)]
         self.params = [None] 
     def init(self,nsite,eps,scale=1,**kwargs):

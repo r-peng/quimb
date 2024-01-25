@@ -2,7 +2,7 @@ import time,itertools,functools,h5py
 import numpy as np
 from .nn_core import (
 #    Dense,FNN,AmplitudeFNN,AmplitudeSNN,TensorFNN,
-    AmplitudeFNN,Fourier,CP,HP,
+    AmplitudeFNN,RBM,Fourier,CP,HP,
     #tensor2backend,
     #relu_init_normal,
 )
@@ -12,6 +12,11 @@ from .tensor_2d_vmc import AmplitudeFactory2D,cache_key
 #COMM = MPI.COMM_WORLD
 #SIZE = COMM.Get_size()
 #RANK = COMM.Get_rank()
+class RBM2D(RBM,AmplitudeFactory2D):
+    def __init__(self,Lx,Ly,nx,ny,**kwargs):
+        self.Lx = Lx
+        self.Ly = Ly 
+        super().__init__(nx,ny,**kwargs)
 class Fourier2D(Fourier,AmplitudeFactory2D):
     def __init__(self,Lx,Ly,nx,ny,**kwargs):
         self.Lx = Lx
