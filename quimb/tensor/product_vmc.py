@@ -84,7 +84,7 @@ class ProductAmplitudeFactory:
         cx = [None] * len(self.af) 
         for ix,af in enumerate(self.af):
             cx[ix] = af.amplitude(config[ix])
-        print(config,cx)
+        print(config[0],cx)
     def amplitude(self,config,sign=True,to_numpy=True):
         cx = 1 
         for ix,af in enumerate(self.af):
