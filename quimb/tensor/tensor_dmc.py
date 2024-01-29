@@ -17,17 +17,47 @@ class Walker:
         self.tau = tau
         self.gamma = 0
         self.shift = 0 
+        self.kp = 10
         self.rng = np.random.default_rng(seed=seed)
     def propagate(self,config):
         self.config = config
         self.weight = 1 
         self.nhop = 0
-        self.remain = self.tau
+        #self.remain = self.tau
+        self.remain = self.kp
         while True:
             self.sample()
             if self.remain <= 0:
                 break
     def sample(self):
+        self.af.config = self.config 
+        self.af.cx = dict()
+
+        h = dict() 
+        for batch_key in self.af.model.batched_pairs:
+           h.update(self.af.batch_pair_energies(batch_key,False)[0])
+        u = self.af.model.compute_local_energy_eigen(self.config) - self.shift 
+        self.e = sum(h.values()) + u
+
+        keys = [self.config]
+        p = [1-self.tau * u]
+        if p[0]<0:
+            raise ValueError(f'diagonal={p[0]},u={u}')
+        for key,val in h.items():
+            if val >= 0:
+                continue
+            p.append(-self.tau * val)
+            keys.append(key)
+        
+        p = np.array(p)
+        b = p.sum()
+        self.weight *= b
+        idx = self.rng.choice(len(p),p=p/b)
+        self.config = keys[idx]
+        if idx>0:
+            self.nhop += 1
+        self.remain -= 1
+    def _sample(self):
         self.af.config = self.config 
         self.af.cx = dict()
 
@@ -41,6 +71,8 @@ class Walker:
         
         logxi = np.log(self.rng.random())
         td = min(self.remain,logxi/(self.e-u))
+        #print(self.config,td,self.e,h)
+        #exit()
         self.weight *= np.exp(-td*self.e)
         self.remain -= td
         if self.remain <= 0:
@@ -148,7 +180,7 @@ class Sampler:
             self.buf[4] = self.wk.nhop
             COMM.Send(self.buf,dest=0,tag=0)
         if self.step % self.clear_every == 0:
-            self.wk.af.set_psi(self.wk.af.psi) 
+            self.wk.af.cache = dict() 
             gc.collect()
     def SR(self):
         if RANK!=0:
@@ -157,7 +189,7 @@ class Sampler:
         self.ws.append(w) 
         e,err = blocking_analysis(self.e,weights=self.w)
         self.we.append(e)
-        print(f'step={self.step},w={w},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite}')
+        print(f'step={self.step},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite},w={w}')
 
         xi = self.rng.random()
         pc = np.cumsum(w/w.sum())
@@ -189,3 +221,40 @@ class Sampler:
         self.we = list(self.we)
         self.M = self.config.shape[0] # num walkers
         print(f'number of walkers=',self.M)
+
+class Hubbard1D:
+    def __init__(self,u,L):
+        self.u = u
+        self.L = L
+        self.batched_pairs = [None]       
+    def compute_local_energy_eigen(self,config):
+        config = np.array(config)
+        return self.u * len(config[config==3])
+    def pair_coeff(self,*args):
+        return -1
+def get_config(i1,i2):
+    pn_map = 0,1,1,2
+    n1,n2 = pn_map[i1],pn_map[i2]
+    if abs(n1-n2) == 1:
+        return [(i2,i1)]
+    if n1+n2==2 and n1==n2:
+        return [(0,3),(3,0)] 
+    if n1+n2==2 and n1!=n2:
+        return [(1,2),(2,1)]
+class ConstWFN1D:
+    def __init__(self,model):
+        self.model = model
+        self.nsite = self.model.L
+        self.psi = None
+    def batch_pair_energies(self,*args):
+        e = dict()
+        for i in range(self.model.L-1):
+            i1,i2 = self.config[i],self.config[i+1]
+            if i1==i2:
+                continue
+            for i1_new,i2_new in get_config(i1,i2):
+                config_new = list(self.config)
+                config_new[i] = i1_new
+                config_new[i+1] = i2_new
+                e[tuple(config_new)] = self.model.pair_coeff(i,i+1) 
+        return e,None
