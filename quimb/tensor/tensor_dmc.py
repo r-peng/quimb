@@ -185,18 +185,18 @@ class Sampler:
     def SR(self):
         if RANK!=0:
             return
-        w = self.w.sum()/self.M
-        self.ws.append(w) 
+        wsum = self.w.sum()
+        self.ws.append(wsum/self.M) 
         e,err = blocking_analysis(self.e,weights=self.w)
         self.we.append(e)
-        print(f'step={self.step},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite},w={w}')
+        print(f'step={self.step},e={(e+self.wk.shift)/self.nsite},err={err/self.nsite},wmean={self.ws[-1]}')
 
         xi = self.rng.random()
-        pc = np.cumsum(w/w.sum())
+        pc = np.cumsum(self.w/wsum)
         config = np.zeros_like(self.config) 
         for i in range(self.M):
-            z = i/self.M + xi 
-            idx = len(pc[pc<xi])
+            z = (i+xi)/self.M 
+            idx = len(pc[pc<z])
             config[i] = self.config[idx]
         self.config = config
     def save(self,tmpdir):
