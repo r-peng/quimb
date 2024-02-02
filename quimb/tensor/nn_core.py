@@ -154,6 +154,79 @@ class Layer:
         if RANK==0 and iprint:
             print(key)
             print(tsr)
+class Dense(Layer):
+    def __init__(self,nx,ny,afn,bias=True,normalize=None):
+        self.nx,self.ny = nx,ny
+        self.afn = afn
+        self.sh = [(nx,ny)]
+        self.params = [None]
+        self.bias = bias
+        self.normalize = normalize
+        if bias:
+            self.sh.append((ny,))
+            self.params.append(None)
+        if normalize is not None:
+            self.sh.append((ny,))
+            self.params.append(None)
+
+        # to be set 
+        self.pre_act = False 
+        self.post_act = True 
+        self.scale = 1
+    def apply_w(self,x):
+        wx = self.jnp.matmul(x,self.weight)    
+        if self.normalize!='layer':
+            return wx
+        mean = wx.sum()/self.ny
+        wx_shift = wx-mean
+        sigma = self.jnp.sqrt((wx_shift**2).sum()/self.ny)
+        return wx_shift * self.params[-1] / sigma
+    def forward(self,x):
+        if self.pre_act:
+            x = self._afn(x) 
+        y = self.apply_w(x)
+        if self.bias:
+            y = y + self.params[1]
+        if self.post_act:
+            y = self._afn(y)
+        return y 
+    def wfn2backend(self,backend=backend,requires_grad=False):
+        super().wfn2backend(backend=backend,requires_grad=requires_grad)
+        if self.normalize != 'weight':
+            self.weight = self.params[0]
+            return
+        w = self.params[0]
+        g = self.params[-1]
+        try:
+            norm = self.jnp.norm(w,dim=0)
+        except:
+            norm = self.jnp.linalg.norm(w,axis=0)
+        self.weight = w * (g/norm).reshape(1,self.ny)
+    def set_backend(self,backend):
+        super().set_backend(backend)
+        _afn = None
+        if self.afn=='tanh':
+            def _afn(x):
+                return self.scale * self.jnp.tanh(x)
+        if self.afn=='relu':
+            def _afn(x):
+                try:
+                    return self.jnp.relu(x)
+                except AttributeError:
+                    return x*(x>0)
+        if self.afn=='softplus':
+            def _afn(x):
+                return self.jnp.log(1+self.jnp.exp(x))
+        if self.afn=='sinh':
+            def _afn(x):
+                return self.jnp.sinh(x)
+        if self.afn=='cosh':
+            def _afn(x):
+                return self.jnp.cosh(x)
+        if self.afn=='exp':
+            def _afn(x):
+                return self.jnp.exp(x)
+        self._afn = _afn
 def input_determinant(config):
     ls = [None] * 2
     for ix,c in enumerate(config_to_ab(config)):
@@ -252,74 +325,6 @@ class RBM(Layer,AmplitudeFactory):
         if fname is not None:
             self.save_to_disc(fname,root=root) 
         self.wfn2backend()
-class Dense(Layer):
-    def __init__(self,nx,ny,afn,bias=True):
-        self.nx,self.ny = nx,ny
-        self.afn = afn
-        self.sh = [(nx,ny),(ny,)]
-        self.params = [None] * 2
-        self.bias = bias
-        if not bias:
-            self.sh.pop()
-            self.params.pop()
-
-        # to be set 
-        self.combine = False 
-        self.pre_act = False 
-        self.post_act = True 
-        self.scale = 1
-    def apply_w(self,x,step=1):
-        dim = len(x)
-        w = self.params[0]
-        if dim==w.shape[0]:
-            return self.jnp.matmul(x,w)    
-        if dim>w.shape[0]:
-            raise ValueError
-        if step==1: 
-            return self.jnp.matmul(x,w[:dim,:])    
-        else:
-            return self.jnp.matmul(x,w[-dim:,:])    
-    def _combine(self,x,y):
-        if not self.combine:
-            return y
-        try:
-            return self.jnp.concatenate([x,y])
-        except:
-            return self.jnp.cat([x,y])
-    def forward(self,x,step=1):
-        if self.pre_act:
-            x = self._afn(x) 
-        y = self.apply_w(x,step=step)
-        if self.bias:
-            y = y + self.params[1]
-        if self.post_act:
-            y = self._afn(y)
-        return self._combine(x,y)
-    def set_backend(self,backend):
-        super().set_backend(backend)
-        _afn = None
-        if self.afn=='tanh':
-            def _afn(x):
-                return self.scale * self.jnp.tanh(x)
-        if self.afn=='relu':
-            def _afn(x):
-                try:
-                    return self.jnp.relu(x)
-                except AttributeError:
-                    return x*(x>0)
-        if self.afn=='softplus':
-            def _afn(x):
-                return self.jnp.log(1+self.jnp.exp(x))
-        if self.afn=='sinh':
-            def _afn(x):
-                return self.jnp.sinh(x)
-        if self.afn=='cosh':
-            def _afn(x):
-                return self.jnp.cosh(x)
-        if self.afn=='exp':
-            def _afn(x):
-                return self.jnp.exp(x)
-        self._afn = _afn
 class Fourier(RBM):
     def __init__(self,nx,ny,backend='numpy'):
         super().__init__(None,None,backend=backend)
@@ -502,17 +507,13 @@ class AmplitudeFNN(FNN,AmplitudeFactory):
 
         # to be set
         self.fermion = None 
-        self.sum_all = None 
         self.log = None 
         self.phase = None 
     def forward(self,config):
         y = _input(config,self.input_format,self._backend)
-        _sum = 0
         for l,lr in enumerate(self.af):
             y = lr.forward(y)
-            if l==self.nl-1 or self.sum_all:
-                _sum = _sum + y.sum() 
-        return _sum + self.const 
+        return y.sum() + self.const 
 class TensorFNN(FNN):
     def __init__(self,lr,**kwargs):
         super().__init__(lr,**kwargs)
@@ -554,12 +555,6 @@ def compute_colinear(nx,ny,scale,loc=0,cos_max=.9,thresh=1e-6):
     if RANK==0:
         print('collinear ratio=',nc/(ny*(ny-1)/2))
     return np.array(ls) 
-def relu_init_rand(nx,ny,xmin,xmax):
-    w = np.random.rand(ny,nx) * 2 - 1
-    w = compute_colinear(w)
-    x = np.random.rand(ny,nx) * (xmax - xmin) + xmin 
-    b = np.sum(w*x,axis=1) 
-    return w,b
 def relu_init_normal(nx,ny,xmin,xmax,s1=1,s2=None):
     if RANK==0:
         w = compute_colinear(nx,ny,s1)
@@ -572,66 +567,5 @@ def relu_init_normal(nx,ny,xmin,xmax,s1=1,s2=None):
         b = np.zeros(ny)
     COMM.Bcast(w,root=0)
     COMM.Bcast(b,root=0)
-    return w.T,b 
-def relu_init_sobol(nx,ny,xmin,xmax,eps):
-    import qmcpy
-    sampler = qmcpy.discrete_distribution.digital_net_b2.Sobol(dimension=nx,randomize=False)
-    m = int(np.log2(ny*2)) + 1
-    p = sampler.gen_samples(2**m) 
-    w = p * 2 - 1
-    w = compute_colinear(w[ny:,],ny=ny,eps=eps)
-    x = p[:ny] * (xmax - xmin) + xmin
-    x += np.random.normal(loc=0,scale=eps,size=(ny,nx))  
-    b = np.sum(w*x,axis=1) 
-    return w,b
-def relu_init_grid(nx,ndiv,xmin,xmax,eps):
-    # generate ndiv * nx plaines
-    w = []
-    b = []
-    dx = (xmax - xmin) / ndiv
-    for i in range(nx):
-        wi = np.zeros(nx)
-        wi[i] = 1
-        for n in range(ndiv):
-            w.append(rotate(wi,eps))
+    return w.T,-b 
 
-            x = np.random.normal(loc=0,scale=eps,size=nx)
-            x[i] += n * dx + xmin + dx / 2
- 
-            b.append(np.dot(w[-1],x))
-    return np.array(w),np.array(b)
-def relu_init_quad(nx,ndiv,xmin,xmax,eps):
-    # generate ndiv * nx * (nx-1) / 2 plaines
-    w = []
-    b = [] 
-    dtheta = np.pi / ndiv
-    center = (xmin + xmax) / 2 
-    for i in range(nx):
-        for j in range(i):
-            theta0 = np.random.normal(loc=0,scale=np.pi)
-            for n in range(ndiv):
-                theta = theta0 + dtheta * n 
-                wi = np.zeros(nx) 
-                wi[i] = np.cos(theta)
-                wi[j] = np.sin(theta)
-                w.append(rotate(wi,eps))
-           
-                x = np.random.normal(loc=0,scale=eps*xmax,size=nx)
-                x[i] += center 
-                x[j] += center 
-
-                b.append(np.dot(w[-1],x))
-    return np.array(w),np.array(b)
-def relu_init_spin(nx,eps,eps_init=None):
-    if eps_init is None:
-        K = np.random.rand(nx,nx)
-    else:
-        K = np.random.normal(loc=0,scale=eps_init,size=(nx,nx))
-    U = scipy.linalg.expm(K-K.T)
-    w = []
-    b = []
-    for i in range(nx):
-        w.append(rotate(U[i,:],eps))
-        x = np.random.normal(loc=0,scale=eps,size=nx)
-        b.append(np.dot(w[-1],x))
-    return np.array(w),np.array(b)
