@@ -936,8 +936,8 @@ class RGN(SR):
         return self._transform_gradients_rgn(self.solve_full,self.solve_dense)
     def _transform_gradients_rgn(self,solve_full,solve_dense,sr=None,enforce_pos=True):
         if sr is None:
-            xnew_sr = self._transform_gradients_sr(True,False)
-            deltas_sr = self.deltas
+            deltas_sr = self._transform_gradients_sr(True,False)
+            xnew_sr = self.update(self.rate1)
         else:
             xnew_sr,deltas_sr = sr
 
@@ -946,7 +946,7 @@ class RGN(SR):
         if solve_dense:
             dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
         else:
-            dEm = self._transform_gradients_rgn_iterative(solve_full,delta_sr)
+            dEm = self._transform_gradients_rgn_iterative(solve_full,deltas_sr)
         deltas_rgn = self.deltas
 
         rate = self.rate2 if self.pure_newton else 1.
