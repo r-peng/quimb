@@ -1682,12 +1682,12 @@ class DenseSampler:
 class ExchangeSampler:
     def preprocess(self):
         self._burn_in()
-    def _burn_in(self,config=None,burn_in=None,progbar=False):
+    def _burn_in(self,config=None,burn_in=None,progbar=False,exclude_root=True):
         if config is not None:
             self.config = config 
         self.px = self.af.log_prob(self.af.parse_config(self.config))
 
-        if RANK==0:
+        if exclude_root and RANK==0:
             print('\tlog prob=',self.px)
             return 
         t0 = time.time()
@@ -1703,6 +1703,16 @@ class ExchangeSampler:
             print('\tburn in time=',time.time()-t0)
     def propose_new_pair(self,i1,i2):
         return i2,i1
+    def _new_pair(self,site1,site2):
+        ix1,ix2 = self.flatten(site1),self.flatten(site2)
+        i1,i2 = self.config[ix1],self.config[ix2]
+        if i1==i2: # continue
+            return (None,) * 2
+        i1_new,i2_new = self.propose_new_pair(i1,i2)
+        config_new = list(self.config)
+        config_new[ix1] = i1_new
+        config_new[ix2] = i2_new
+        return (i1_new,i2_new),tuple(config_new)
     def sample(self):
         if self.scheme=='random':
             self._sample_random()
@@ -1832,7 +1842,7 @@ class AmplitudeFactory:
             self.data_map[key] = self.tensor2backend(self.data_map[key],backend=backend,requires_grad=False)
         if self.from_plq:
             self.model.gate2backend(backend)
-    def get_site_map(self,):
+    def get_site_map(self):
         site_order = []
         for blk in self.blks:
             site_order += blk
@@ -2140,6 +2150,24 @@ class AmplitudeFactory:
         self.vx = None
         self.cx = None
         return cx,ex,vx,Hvx,err 
+#class CIAmplitudeFactory(AmplitudeFactory): # model for testing
+#    def wfn2backend(self,backend=None,requires_grad=False):
+#        backend = self.backend if backend is None else backend
+#        self._backend = backend
+#        tsr = np.zeros(1) if backend=='numpy' else torch.zeros(1)
+#        ar.set_backend(tsr)
+#        self.psi = self.tensor2backend(self.psi,backend=backend,requires_grad=requires_grad)
+#    def get_x(self):
+#        return self.tensor2backend(self.psi,backend='numpy')
+#    def write_tn_to_disc(self,tn,fname):
+#        np.save(fname+'.npy',tn)
+#    def update(self,x,fname=None,root=0):
+#        self.psi = self.tensor2backend(x)
+#        if RANK==root:
+#            if fname is not None: # save psi to disc
+#                self.write_tn_to_disc(x,fname)
+#        return psi
+#    def amplitude(self,config,
 class Model:
     def gate2backend(self,backend):
         self.gate = {tag:(tensor2backend(tsr,backend),order) for tag,(tsr,order) in self.gate.items()}

@@ -823,16 +823,6 @@ class ExchangeSampler2D(ExchangeSampler):
     def flat2site(self,site):
         i,j = site
         return flat2site(i,j,self.Ly)
-    def _new_pair(self,site1,site2):
-        ix1,ix2 = self.flatten(site1),self.flatten(site2)
-        i1,i2 = self.config[ix1],self.config[ix2]
-        if i1==i2: # continue
-            return (None,) * 2
-        i1_new,i2_new = self.propose_new_pair(i1,i2)
-        config_new = list(self.config)
-        config_new[ix1] = i1_new
-        config_new[ix2] = i2_new
-        return (i1_new,i2_new),tuple(config_new)
     def get_pairs(self,i,j,x_bsz,y_bsz):
         if (x_bsz,y_bsz)==(1,2):
             pairs = [((i,j),(i,(j+1)%self.Ly))]

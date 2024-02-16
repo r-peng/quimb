@@ -190,18 +190,17 @@ class Dense(Layer):
         if self.post_act:
             y = self._afn(y)
         return y 
-    def wfn2backend(self,backend=backend,requires_grad=False):
+    def wfn2backend(self,backend=None,requires_grad=False):
         super().wfn2backend(backend=backend,requires_grad=requires_grad)
         if self.normalize != 'weight':
             self.weight = self.params[0]
             return
         w = self.params[0]
-        g = self.params[-1]
         try:
             norm = self.jnp.norm(w,dim=0)
         except:
             norm = self.jnp.linalg.norm(w,axis=0)
-        self.weight = w * (g/norm).reshape(1,self.ny)
+        self.weight = w * (self.params[-1]/norm).reshape(1,self.ny)
     def set_backend(self,backend):
         super().set_backend(backend)
         _afn = None
