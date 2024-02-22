@@ -110,25 +110,18 @@ def __rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     deltas = np.dot(U,deltas) 
     wmin = w[0]
     return deltas,dE,wmin,eps
-def _rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
+def _rgn_block_solve(H,E,S,g,eta,eps,enforce_pos=True):
     sh = len(g)
     # hessian 
     hess = H - E * S
     R = S + eta * np.eye(sh)
 
-    wmin = -1. + 0.j
-    eps = eps0 * 2.
-    while wmin.real < 0.:
-        # smallest eigenvalue
-        eps /= 2.
-        w = np.linalg.eigvals(hess + R/eps)
-        idx = np.argmin(w.real)
-        wmin = w[idx]
+    w = np.linalg.eigvals(hess + R/eps)
     # solve
     deltas = np.linalg.solve(hess + R/eps,g)
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
-    return deltas,dE,wmin,eps
+    return deltas,dE,np.amin(w.real),eps
 def _newton_block_solve(H,E,S,g,cond,eigen=True,enforce_pos=True):
     # hessian 
     hess = H - E * S
@@ -414,7 +407,7 @@ class SGD: # stochastic sampling
             config = np.array(config,dtype=int)
             COMM.Send(config,dest=0,tag=2)
         if save_local:
-            f = h5py.File(f'./step{self.step}RANK{RANK}.hdf5','w')
+            f = h5py.File(self.tmpdir+f'step{self.step}RANK{RANK}.hdf5','w')
             if compute_Hv:
                 f.create_dataset('Hv',data=self.Hv)
             if compute_v:
@@ -946,7 +939,7 @@ class RGN(SR):
         if solve_dense:
             dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
         else:
-            dEm = self._transform_gradients_rgn_iterative(solve_full,deltas_sr)
+            dEm = self._transform_gradients_rgn_iterative(solve_full,deltas_sr*self.rate2)
         deltas_rgn = self.deltas
 
         rate = self.rate2 if self.pure_newton else 1.
@@ -1025,7 +1018,7 @@ class RGN(SR):
                 for ix,(start,stop) in enumerate(self.block_dict):
                     H[start:stop,start:stop] = self.H[ix] 
                     S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}','w')
+            f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
             f.create_dataset('H',data=H) 
             f.create_dataset('S',data=S) 
             f.create_dataset('E',data=np.array([self.E])) 
