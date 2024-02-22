@@ -11,7 +11,7 @@ SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 DISCARD = 1e3
 CG_TOL = 1e-4
-MAXITER = 100
+MAXITER = 500
 #MAXITER = 2
 ##################################################################################################
 # VMC utils
@@ -567,42 +567,35 @@ class SGD: # stochastic sampling
         f.close()
     def load(self,tmpdir):
         if RANK==0:
-            vmean = np.zeros(self.nparam,dtype=self.dtype)
-            evmean = np.zeros(self.nparam,dtype=self.dtype)
-            Hvmean = np.zeros(self.nparam,dtype=self.dtype)
-
-            self.e = [] 
-            for rank in range(1,SIZE):
-                print('rank=',rank)
-                e,vsum,evsum,Hvsum = COMM.recv(source=rank)
-                self.e.append(e)
-                vmean += vsum
-                evmean += evsum
-                Hvmean += Hvsum
-
+            count = np.array([0])
+        else:
+            f = h5py.File(f'step{self.step}RANK{RANK}.hdf5')
+            e = f['e'][:]
+            self.v = f['v'][:]
+            self.Hv = f['Hv'][:]
+            f.close()
+            count = np.array([len(e)])
+            e = e.newbyteorder('=')
+            self.v = self.v.newbyteorder('=')
+            self.Hv = self.Hv.newbyteorder('=')
+            self.vsum = np.sum(self.v,axis=0)
+            self.Hvsum = np.sum(self.Hv,axis=0)
+            self.evsum = np.dot(e,self.v)
+        counts = np.zeros(SIZE,dtype=int)
+        COMM.Gather(count,counts,root=0)
+        if RANK==0:
+            self.e = []
+            for worker in range(1,SIZE):
+                e = np.zeros(counts[worker])
+                COMM.Recv(e,source=worker,tag=0)
+                self.e.append(e.copy())
             self.e = np.concatenate(self.e)
             self.f = np.ones_like(self.e)
-            self.E,self.Eerr = blocking_analysis(self.e,weights=self.f)
-            self.n = len(self.e)
-
-            vmean /= self.n
-            evmean /= self.n
-            self.g = evmean - self.E * vmean
-            self.vmean = vmean 
-
-            Hvmean /= self.n
-            self.Hvmean = Hvmean
+            self.vsum = np.zeros(self.nparam)
+            self.Hvsum = np.zeros(self.nparam)
+            self.evsum = np.zeros(self.nparam)
         else:
-            f = h5py.File(tmpdir+f'step{self.step}RANK{RANK}.hdf5','r')
-            self.Hv = f['Hv'][:]
-            self.v = f['v'][:]
-            e = f['e'][:]
-            f.close()
-            vsum = self.v.sum(axis=0)
-            evsum = np.dot(e,self.v)
-            Hvsum = self.Hv.sum(axis=0)
-            COMM.send([e,vsum,evsum,Hvsum],dest=0)
-        COMM.Barrier()
+            COMM.Send(e,dest=0,tag=0)
     def _hess(self,solve_dense=None,mode='eig',gen=True,lin=True):
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         self.extract_S(solve_full=True,solve_dense=solve_dense)
@@ -1049,6 +1042,7 @@ class RGN(SR):
             self.terminate[0] = 0
             hessp = A(self.deltas)
             if RANK==0:
+                print('hessian inversion error=',np.linalg.norm(g - hessp) / np.linalg.norm(g))
                 dE = np.dot(self.deltas,hessp)
         else:
             dE = 0.
@@ -1080,6 +1074,27 @@ class RGN(SR):
             return - np.dot(self.g,self.deltas) + .5 * dE
         else:
             return 0. 
+    def hess_inv(self,init,tmpdir='./'):
+        if RANK==0:
+            print('init=',init)
+            print('maxiter=',self.maxiter)
+        self.load(tmpdir)
+        self.extract_energy_gradient()
+        delta_sr = self._transform_gradients_sr(True,False)
+        if init=='delta_sr':
+            x0 = delta_sr
+        elif init=='delta_sr*rate1':
+            x0 = delta_sr * self.rate1
+        elif init=='delta_sr*rate2':
+            x0 = delta_sr * self.rate2
+        elif init=='zero':
+            x0 = np.zeros_like(delta_sr)
+        else:
+            raise NotImplementedError
+        self.extract_S(True,False)
+        self.extract_H(True,False)
+        self._transform_gradients_rgn_iterative(True,x0)
+
 class lBFGS(SR):
     def __init__(self,sampler,npairs=(5,50),gamma_method=1,**kwargs):
         super().__init__(sampler,**kwargs) 
