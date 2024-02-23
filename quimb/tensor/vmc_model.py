@@ -106,7 +106,12 @@ class AmplitudeFactory:
             for i,(Hxi,xi,ci) in enumerate(zip(self.Hx,self.x,config)):
                 Hvx[i] = np.dot(H,vx[i])
                 Hvx[i] += (ex-Hxi[ci]/xi[ci]) * vx[i]
-        return cx,ex,vx.flatten(),Hvx.flatten(),0.
+
+        if compute_v:
+            vx = vx.flatten()
+        if compute_Hv:
+            Hvx = Hvx.flatten()
+        return cx,ex,vx,Hvx,0.
     def update(self,x,fname=None,root=0):
         self.x = np.array([wf(xi) for xi in x.reshape(self.nsite,2)])
     def parse_config(self,config):

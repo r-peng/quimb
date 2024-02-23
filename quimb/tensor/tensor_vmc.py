@@ -297,11 +297,9 @@ class SGD: # stochastic sampling
         compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
         save_local = self.save_local if save_local is None else save_local 
 
-        self.buf = np.zeros(5,dtype=self.dtype_o)
-        self.terminate = np.array([0])
-
-        self.buf[0] = RANK 
-        self.buf[4] = self.step 
+        self.buf = np.zeros(3,dtype=int)
+        self.buf[1] = RANK
+        self.buf[2] = self.step
         if compute_v:
             self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
@@ -321,51 +319,39 @@ class SGD: # stochastic sampling
         if self.progbar:
             pg = Progbar(total=samplesize)
 
-        self.f = []
-        self.e = []
-        err_mean = 0.
-        err_max = 0.
-        ncurr = 0
         t0 = time.time()
+        ncurr = 0
         while True:
             COMM.Recv(self.buf,tag=0)
-            step = int(self.buf[4].real+.1)
-            if step>self.step:
+            if self.buf[-1]>self.step:
                 raise ValueError
-            elif step<self.step:
+            if self.buf[-1]<self.step:
                 continue
 
-            rank = int(self.buf[0].real+.1)
-            self.f.append(self.buf[1]) 
-            self.e.append(self.buf[2])
-            err_mean += self.buf[3]
-            err_max = max(err_max,self.buf[3])
             ncurr += 1
             if ncurr >= samplesize: 
                 break
             if self.progbar:
                 pg.update()
-            COMM.Send(self.terminate,dest=rank,tag=1)
+            COMM.Send(self.buf,dest=self.buf[1],tag=1)
         # send termination message to all workers
-        self.terminate[0] = 1
+        self.buf[0] = 1
         for worker in range(1,SIZE): 
-            COMM.Send(self.terminate,dest=worker,tag=1)
+            COMM.Send(self.buf,dest=worker,tag=1)
 
         if save_config:
             ls = []
             for worker in range(1,SIZE):
                 config = np.zeros(self.nsite,dtype=int)
                 COMM.Recv(config,source=worker,tag=2)
-                ls.append(config)
+                ls.append(config.copy())
             np.save(self.tmpdir+f'config{self.step}.npy',np.array(ls))
         print('\tsample time=',time.time()-t0)
-        print('\tcontraction err=',err_mean / len(self.e),err_max)
-        self.e = np.array(self.e)
-        self.f = np.array(self.f)
     def _sample_stochastic(self,compute_v,compute_Hv,save_config,save_local):
-        self.buf[1] = 1.
-        c = []
-        e = []
+        self.c = []
+        self.e = []
+        self.err_max = 0.
+        self.err_sum = 0.
         configs = []
         while True:
             config,omega = self.sampler.sample()
@@ -380,8 +366,10 @@ class SGD: # stochastic sampling
                     vx = np.zeros(self.nparam,dtype=self.dtype_o)
                 if compute_Hv:
                     Hvx = np.zeros(self.nparam,dtype=self.dtype_o)
-            self.buf[2] = ex
-            self.buf[3] = err
+            self.c.append(cx)
+            self.e.append(ex)
+            self.err_sum += err
+            self.err_max = max(err,self.err_max)
             if compute_v:
                 self.vsum += vx
                 self.evsum += vx * ex.conj()
@@ -390,15 +378,15 @@ class SGD: # stochastic sampling
                 self.Hvsum += Hvx
                 self.Hv.append(Hvx)
             if save_local:
-                c.append(cx)
-                e.append(ex)
                 configs.append(list(config))
             COMM.Send(self.buf,dest=0,tag=0) 
-            COMM.Recv(self.terminate,source=0,tag=1)
-            if self.terminate[0]==1:
+            COMM.Recv(self.buf,source=0,tag=1)
+            if self.buf[0]==1:
                 break
 
         #self.sampler.config = self.config
+        self.e = np.array(self.e)
+        self.c = np.array(self.c)
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:
@@ -412,8 +400,8 @@ class SGD: # stochastic sampling
                 f.create_dataset('Hv',data=self.Hv)
             if compute_v:
                 f.create_dataset('v',data=self.v)
-            f.create_dataset('e',data=np.array(e))
-            f.create_dataset('c',data=np.array(c))
+            f.create_dataset('e',data=self.e)
+            f.create_dataset('c',data=self.c)
             f.create_dataset('config',data=np.array(configs))
             f.close()
     def _sample_exact(self,compute_v,compute_Hv): 
@@ -426,6 +414,10 @@ class SGD: # stochastic sampling
             print('\tnsamples per process=',ntotal)
 
         self.f = []
+        self.c = []
+        self.e = []
+        self.err_max = 0.
+        self.err_sum = 0.
         for ix in ixs:
             config = all_configs[ix]
             cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
@@ -434,9 +426,9 @@ class SGD: # stochastic sampling
             if np.fabs(ex.real)*p[ix] > DISCARD:
                 raise ValueError(f'RANK={RANK},config={config},cx={cx},ex={ex}')
             self.f.append(p[ix])
-            self.buf[1] = p[ix]
-            self.buf[2] = ex
-            self.buf[3] = err
+            self.e.append(ex)
+            self.err_sum += err
+            self.err_max = max(err,self.err_max)
             if compute_v:
                 self.vsum += vx * p[ix]
                 self.evsum += vx * ex.conj() * p[ix]
@@ -445,8 +437,10 @@ class SGD: # stochastic sampling
                 self.Hvsum += Hvx * p[ix]
                 self.Hv.append(Hvx)
             COMM.Send(self.buf,dest=0,tag=0) 
-            COMM.Recv(self.terminate,source=0,tag=1)
+            COMM.Recv(self.buf,source=0,tag=1)
         self.f = np.array(self.f)
+        self.e = np.array(self.e)
+        self.c = np.array(self.c)
         if compute_v:
             self.v = np.array(self.v)
         if compute_Hv:
@@ -466,15 +460,47 @@ class SGD: # stochastic sampling
                 print('Eerr=',self.Eerr)
             print('\tcollect g,Hv time=',time.time()-t0)
     def extract_energy(self):
+        count = 0 if RANK==0 else len(self.e)
+        count = np.array([count])
+        counts = np.zeros(SIZE,dtype=int)
+        COMM.Gather(count,counts,root=0)
+
+        self.err_sum = np.zeros(1) if RANK==0 else np.array([self.err_sum])
+        err_mean = np.zeros_like(self.err_sum)
+        COMM.Reduce(self.err_sum,err_mean,op=MPI.SUM,root=0)
+
+        self.err_max = np.zeros(1) if RANK==0 else np.array([self.err_max])
+        err_max = np.zeros(SIZE)
+        COMM.Gather(self.err_max,err_max,root=0)
+        
         if RANK>0:
+            COMM.Send(self.e,dest=0,tag=3)
+            if self.sampler.exact:
+                COMM.Send(self.f,dest=0,tag=4)
             return
+        n = counts.sum()
+        err_mean = err_mean[0] / n
+        err_max = np.amax(err_max)
+        print('\tcontraction err=',err_mean,err_max)
+        e = []
+        f = []
+        for worker in range(1,SIZE):
+            self.e = np.zeros(counts[worker],dtype=self.dtype_o)
+            COMM.Recv(self.e,source=worker,tag=3)
+            e.append(self.e.copy())
+            if self.sampler.exact:
+                self.f = np.zeros(counts[worker],dtype=self.dtype_o)
+                COMM.Recv(self.f,source=worker,tag=4)
+                f.append(self.f.copy())
+        e = np.concatenate(e)
         if self.sampler.exact:
             self.n = 1.
-            self.E = np.dot(self.f,self.e)
+            self.E = np.dot(np.concatenate(f),e)
             self.Eerr = 0.
         else:
-            self.n = len(self.e)
-            self.E,self.Eerr = blocking_analysis(self.e,weights=self.f)
+            self.n = n 
+            print('nsamples=',n)
+            self.E,self.Eerr = blocking_analysis(e)
     def extract_gradient(self):
         vmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.vsum,vmean,op=MPI.SUM,root=0)
@@ -565,22 +591,35 @@ class SGD: # stochastic sampling
         f.create_dataset('e',data=np.array(e_new))
         f.create_dataset('c',data=np.array(c_new))
         f.close()
-    def load(self,tmpdir):
+    def load(self,size,tmpdir='./'):
         if RANK==0:
             count = np.array([0])
         else:
-            f = h5py.File(f'step{self.step}RANK{RANK}.hdf5')
-            e = f['e'][:]
-            self.v = f['v'][:]
-            self.Hv = f['Hv'][:]
-            f.close()
-            count = np.array([len(e)])
-            e = e.newbyteorder('=')
-            self.v = self.v.newbyteorder('=')
-            self.Hv = self.Hv.newbyteorder('=')
+            start = (RANK-1) * size
+            print(start,start+size)
+            self.e = []
+            self.v = []
+            self.Hv = []
+            for rank in range(start,start+size):
+                try:
+                    f = h5py.File(f'step{self.step}RANK{rank}.hdf5')
+                    e = f['e'][:]
+                    v = f['v'][:]
+                    Hv = f['Hv'][:]
+                    f.close()
+                    self.e.append(e.newbyteorder('='))
+                    self.v.append(v.newbyteorder('='))
+                    self.Hv.append(Hv.newbyteorder('='))
+                except FileNotFoundError:
+                    break
+            self.e = np.concatenate(self.e)
+            self.v = np.concatenate(self.v,axis=0)
+            self.Hv = np.concatenate(self.Hv,axis=0)
             self.vsum = np.sum(self.v,axis=0)
             self.Hvsum = np.sum(self.Hv,axis=0)
-            self.evsum = np.dot(e,self.v)
+            self.evsum = np.dot(self.e,self.v)
+        self.err_sum = 0.
+        self.err_max = 0.
         counts = np.zeros(SIZE,dtype=int)
         COMM.Gather(count,counts,root=0)
         if RANK==0:
@@ -1078,7 +1117,7 @@ class RGN(SR):
         if RANK==0:
             print('init=',init)
             print('maxiter=',self.maxiter)
-        self.load(tmpdir)
+        self.load(size,tmpdir=tmpdir)
         self.extract_energy_gradient()
         delta_sr = self._transform_gradients_sr(True,False)
         if init=='delta_sr':
