@@ -620,21 +620,6 @@ class SGD: # stochastic sampling
             self.evsum = np.dot(self.e,self.v)
         self.err_sum = 0.
         self.err_max = 0.
-        counts = np.zeros(SIZE,dtype=int)
-        COMM.Gather(count,counts,root=0)
-        if RANK==0:
-            self.e = []
-            for worker in range(1,SIZE):
-                e = np.zeros(counts[worker])
-                COMM.Recv(e,source=worker,tag=0)
-                self.e.append(e.copy())
-            self.e = np.concatenate(self.e)
-            self.f = np.ones_like(self.e)
-            self.vsum = np.zeros(self.nparam)
-            self.Hvsum = np.zeros(self.nparam)
-            self.evsum = np.zeros(self.nparam)
-        else:
-            COMM.Send(e,dest=0,tag=0)
     def _hess(self,solve_dense=None,mode='eig',gen=True,lin=True):
         solve_dense = self.solve_dense if solve_dense is None else solve_dense
         self.extract_S(solve_full=True,solve_dense=solve_dense)
@@ -881,7 +866,7 @@ class SR(SGD):
                 print('niter=',nit)
         return deltas
 class RGN(SR):
-    def __init__(self,sampler,pure_newton=False,solver='lgmres',guess=0,**kwargs):
+    def __init__(self,sampler,pure_newton=False,solver='lgmres',guess=3,**kwargs):
         super().__init__(sampler,**kwargs) 
         self.optimizer = 'rgn' 
         self.compute_Hv = True
@@ -972,7 +957,7 @@ class RGN(SR):
         if solve_dense:
             dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
         else:
-            x0 = delta_sr * [0,self.rate1,self.rate2,1][self.guess] 
+            x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
             dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
         deltas_rgn = self.deltas
 
@@ -1115,27 +1100,17 @@ class RGN(SR):
             return - np.dot(self.g,self.deltas) + .5 * dE
         else:
             return 0. 
-    def hess_inv(self,init,tmpdir='./'):
+    def hess_inv(self,size,tmpdir='./'):
         if RANK==0:
             print('init=',init)
             print('maxiter=',self.maxiter)
         self.load(size,tmpdir=tmpdir)
         self.extract_energy_gradient()
         delta_sr = self._transform_gradients_sr(True,False)
-        if init=='delta_sr':
-            x0 = delta_sr
-        elif init=='delta_sr*rate1':
-            x0 = delta_sr * self.rate1
-        elif init=='delta_sr*rate2':
-            x0 = delta_sr * self.rate2
-        elif init=='zero':
-            x0 = np.zeros_like(delta_sr)
-        else:
-            raise NotImplementedError
         self.extract_S(True,False)
         self.extract_H(True,False)
+        x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
         self._transform_gradients_rgn_iterative(True,x0)
-
 class lBFGS(SR):
     def __init__(self,sampler,npairs=(5,50),gamma_method=1,**kwargs):
         super().__init__(sampler,**kwargs) 
