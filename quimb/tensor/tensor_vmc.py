@@ -881,13 +881,14 @@ class SR(SGD):
                 print('niter=',nit)
         return deltas
 class RGN(SR):
-    def __init__(self,sampler,pure_newton=False,solver='lgmres',**kwargs):
+    def __init__(self,sampler,pure_newton=False,solver='lgmres',guess=0,**kwargs):
         super().__init__(sampler,**kwargs) 
         self.optimizer = 'rgn' 
         self.compute_Hv = True
         self.pure_newton = pure_newton
         self.solver = {'lgmres':spla.lgmres,
                        'tfqmr':tfqmr}[solver] 
+        self.guess = guess
 
         self.rate2 = None # rate for LIN,RGN
         self.cond2 = None
@@ -971,7 +972,8 @@ class RGN(SR):
         if solve_dense:
             dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
         else:
-            dEm = self._transform_gradients_rgn_iterative(solve_full,deltas_sr*self.rate2)
+            x0 = delta_sr * [0,self.rate1,self.rate2,1][self.guess] 
+            dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
         deltas_rgn = self.deltas
 
         rate = self.rate2 if self.pure_newton else 1.
