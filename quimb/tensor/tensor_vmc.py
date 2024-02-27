@@ -593,16 +593,17 @@ class SGD: # stochastic sampling
         f.close()
     def load(self,size,tmpdir='./'):
         if RANK==0:
-            count = np.array([0])
+            self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
+            self.Hvsum = np.zeros(self.nparam,dtype=self.dtype_o)
+            self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
         else:
-            start = (RANK-1) * size
-            print(start,start+size)
+            start = 1 + (RANK-1) * size
             self.e = []
             self.v = []
             self.Hv = []
             for rank in range(start,start+size):
                 try:
-                    f = h5py.File(f'step{self.step}RANK{rank}.hdf5')
+                    f = h5py.File(tmpdir+f'step{self.step}RANK{rank}.hdf5','r')
                     e = f['e'][:]
                     v = f['v'][:]
                     Hv = f['Hv'][:]
@@ -1100,17 +1101,6 @@ class RGN(SR):
             return - np.dot(self.g,self.deltas) + .5 * dE
         else:
             return 0. 
-    def hess_inv(self,size,tmpdir='./'):
-        if RANK==0:
-            print('init=',init)
-            print('maxiter=',self.maxiter)
-        self.load(size,tmpdir=tmpdir)
-        self.extract_energy_gradient()
-        delta_sr = self._transform_gradients_sr(True,False)
-        self.extract_S(True,False)
-        self.extract_H(True,False)
-        x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
-        self._transform_gradients_rgn_iterative(True,x0)
 class lBFGS(SR):
     def __init__(self,sampler,npairs=(5,50),gamma_method=1,**kwargs):
         super().__init__(sampler,**kwargs) 

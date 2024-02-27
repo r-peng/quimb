@@ -114,6 +114,7 @@ class AmplitudeFactory:
         return cx,ex,vx,Hvx,0.
     def update(self,x,fname=None,root=0):
         self.x = np.array([wf(xi) for xi in x.reshape(self.nsite,2)])
+        #self.x = x.reshape(self.nsite,2)
     def parse_config(self,config):
         return config
 class Sampler(ExchangeSampler):
