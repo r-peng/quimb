@@ -110,7 +110,7 @@ def __rgn_block_solve(H,E,S,g,eta,eps0,enforce_pos=True):
     deltas = np.dot(U,deltas) 
     wmin = w[0]
     return deltas,dE,wmin,eps
-def _rgn_block_solve(H,E,S,g,eta,eps,enforce_pos=True):
+def _rgn_block_solve(H,E,S,g,eta,eps):
     sh = len(g)
     # hessian 
     hess = H - E * S
@@ -141,9 +141,9 @@ def _newton_block_solve(H,E,S,g,cond,eigen=True,enforce_pos=True):
     # compute model energy
     dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
     return deltas,dE,wmin
-def _lin_block_solve(H,E,S,g,Hvmean,vmean,cond):
+def _lin_block_solve(H,E,S,g,hmean,vmean,cond):
     Hi0 = g
-    H0j = Hvmean - E * vmean
+    H0j = hmean - E * vmean
     sh = len(g)
 
     A = np.block([[np.array([[E]]),H0j.reshape(1,sh)],
@@ -202,6 +202,14 @@ def blocking_analysis(energies, weights=None, neql=0, printQ=True):
             print(f'Stocahstic error estimate: {plateauError:.6e}\n')
 
     return meanEnergy, plateauError
+def to_square(S,sh,idx=None):
+    idx = np.triu_indices(sh) if idx is None else idx
+    # assume first dim is triangular
+    Snew = np.zeros((sh,)*2+S.shape[1:],dtype=S.dtype) 
+    Snew[idx] = S
+    Snew = np.swapaxes(Snew,0,1)
+    Snew[idx] = S
+    return Snew
 ##################################################################################################
 # VMC engine 
 ##################################################################################################
@@ -232,7 +240,7 @@ class SGD: # stochastic sampling
         self.optimizer = optimizer
         self.solve_full = solve_full
         self.solve_dense = solve_dense
-        self.compute_Hv = False
+        self.compute_h = False
         self.maxiter = MAXITER if maxiter is None else maxiter
 
         # to be set before run
@@ -254,13 +262,17 @@ class SGD: # stochastic sampling
             self.g = None
         self.v = None
         self.vmean = None
+        self.evmean = None
         self.vsum = None
         self.evsum = None
-        self.Hv = None
-        self.Hvmean = None
-        self.Hvsum = None
+        self.h = None
+        self.hmean = None
+        self.hsum = None
+
         self.S = None
+        self.vvmean = None
         self.H = None
+        self.vhmean = None
         self.Sx1 = None
         self.Hx1 = None
         self.deltas = None
@@ -286,7 +298,7 @@ class SGD: # stochastic sampling
             COMM.Bcast(x,root=0) 
             fname = self.tmpdir+f'psi{step+1}' if save_wfn else None
             psi = self.sampler.af.update(x,fname=fname,root=0)
-    def sample(self,samplesize=None,save_local=None,compute_v=True,compute_Hv=None,save_config=True):
+    def sample(self,samplesize=None,save_local=None,compute_v=True,compute_h=None,save_config=True):
         self.sampler.preprocess()
 
         if self.sampler.exact:
@@ -294,7 +306,7 @@ class SGD: # stochastic sampling
             save_config = False
         else:
             samplesize = self.batchsize if samplesize is None else samplesize
-        compute_Hv = self.compute_Hv if compute_Hv is None else compute_Hv
+        compute_h = self.compute_h if compute_h is None else compute_h
         save_local = self.save_local if save_local is None else save_local 
 
         self.buf = np.zeros(3,dtype=int)
@@ -304,17 +316,17 @@ class SGD: # stochastic sampling
             self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.v = []
-        if compute_Hv:
-            self.Hvsum = np.zeros(self.nparam,dtype=self.dtype_o)
-            self.Hv = [] 
+        if compute_h:
+            self.hsum = np.zeros(self.nparam,dtype=self.dtype_o)
+            self.h = [] 
 
         if RANK==0:
             self._ctr(samplesize,save_config)
         else:
             if self.sampler.exact:
-                self._sample_exact(compute_v,compute_Hv)
+                self._sample_exact(compute_v,compute_h)
             else:
-                self._sample_stochastic(compute_v,compute_Hv,save_config,save_local)
+                self._sample_stochastic(compute_v,compute_h,save_config,save_local)
     def _ctr(self,samplesize,save_config):
         if self.progbar:
             pg = Progbar(total=samplesize)
@@ -347,7 +359,7 @@ class SGD: # stochastic sampling
                 ls.append(config.copy())
             np.save(self.tmpdir+f'config{self.step}.npy',np.array(ls))
         print('\tsample time=',time.time()-t0)
-    def _sample_stochastic(self,compute_v,compute_Hv,save_config,save_local):
+    def _sample_stochastic(self,compute_v,compute_h,save_config,save_local):
         self.c = []
         self.e = []
         self.err_max = 0.
@@ -357,15 +369,15 @@ class SGD: # stochastic sampling
             config,omega = self.sampler.sample()
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
-            cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
+            cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_h=compute_h)
             if cx is None or np.fabs(ex.real) > DISCARD:
                 print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = np.zeros(1)[0]
                 err = 0.
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype_o)
-                if compute_Hv:
-                    Hvx = np.zeros(self.nparam,dtype=self.dtype_o)
+                if compute_h:
+                    hx = np.zeros(self.nparam,dtype=self.dtype_o)
             self.c.append(cx)
             self.e.append(ex)
             self.err_sum += err
@@ -374,9 +386,9 @@ class SGD: # stochastic sampling
                 self.vsum += vx
                 self.evsum += vx * ex.conj()
                 self.v.append(vx)
-            if compute_Hv:
-                self.Hvsum += Hvx
-                self.Hv.append(Hvx)
+            if compute_h:
+                self.hsum += hx
+                self.h.append(hx)
             if save_local:
                 configs.append(list(config))
             COMM.Send(self.buf,dest=0,tag=0) 
@@ -389,22 +401,22 @@ class SGD: # stochastic sampling
         self.c = np.array(self.c)
         if compute_v:
             self.v = np.array(self.v)
-        if compute_Hv:
-            self.Hv = np.array(self.Hv)
+        if compute_h:
+            self.h = np.array(self.h)
         if save_config:
             config = np.array(config,dtype=int)
             COMM.Send(config,dest=0,tag=2)
         if save_local:
             f = h5py.File(self.tmpdir+f'step{self.step}RANK{RANK}.hdf5','w')
-            if compute_Hv:
-                f.create_dataset('Hv',data=self.Hv)
+            if compute_h:
+                f.create_dataset('h',data=self.h)
             if compute_v:
                 f.create_dataset('v',data=self.v)
             f.create_dataset('e',data=self.e)
             f.create_dataset('c',data=self.c)
             f.create_dataset('config',data=np.array(configs))
             f.close()
-    def _sample_exact(self,compute_v,compute_Hv): 
+    def _sample_exact(self,compute_v,compute_h): 
         # assumes exact contraction
         p = self.sampler.p
         all_configs = self.sampler.all_configs
@@ -420,7 +432,7 @@ class SGD: # stochastic sampling
         self.err_sum = 0.
         for ix in ixs:
             config = all_configs[ix]
-            cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_Hv=compute_Hv)
+            cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_h=compute_h)
             if cx is None:
                 raise ValueError
             if np.fabs(ex.real)*p[ix] > DISCARD:
@@ -433,9 +445,9 @@ class SGD: # stochastic sampling
                 self.vsum += vx * p[ix]
                 self.evsum += vx * ex.conj() * p[ix]
                 self.v.append(vx)
-            if compute_Hv:
-                self.Hvsum += Hvx * p[ix]
-                self.Hv.append(Hvx)
+            if compute_h:
+                self.hsum += hx * p[ix]
+                self.h.append(hx)
             COMM.Send(self.buf,dest=0,tag=0) 
             COMM.Recv(self.buf,source=0,tag=1)
         self.f = np.array(self.f)
@@ -443,14 +455,14 @@ class SGD: # stochastic sampling
         self.c = np.array(self.c)
         if compute_v:
             self.v = np.array(self.v)
-        if compute_Hv:
-            self.Hv = np.array(self.Hv)
+        if compute_h:
+            self.h = np.array(self.h)
     def extract_energy_gradient(self):
         t0 = time.time()
         self.extract_energy()
         self.extract_gradient()
         if self.optimizer in ['rgn','lin','trust']:
-            self._extract_Hvmean()
+            self._extract_hmean()
         if RANK==0:
             try:
                 dE = 0 if self.Eold is None else self.E-self.Eold
@@ -458,7 +470,7 @@ class SGD: # stochastic sampling
             except TypeError:
                 print('E=',self.E)
                 print('Eerr=',self.Eerr)
-            print('\tcollect g,Hv time=',time.time()-t0)
+            print('\tcollect g,h time=',time.time()-t0)
     def extract_energy(self):
         count = 0 if RANK==0 else len(self.e)
         count = np.array([count])
@@ -472,14 +484,15 @@ class SGD: # stochastic sampling
         self.err_max = np.zeros(1) if RANK==0 else np.array([self.err_max])
         err_max = np.zeros(SIZE)
         COMM.Gather(self.err_max,err_max,root=0)
+        self.n = 1 if self.sampler.exact else counts.sum() 
         
+        self.E = np.zeros(1)[0]
         if RANK>0:
             COMM.Send(self.e,dest=0,tag=3)
             if self.sampler.exact:
                 COMM.Send(self.f,dest=0,tag=4)
             return
-        n = counts.sum()
-        err_mean = err_mean[0] / n
+        err_mean = err_mean[0] / self.n
         err_max = np.amax(err_max)
         print('\tcontraction err=',err_mean,err_max)
         e = []
@@ -494,12 +507,11 @@ class SGD: # stochastic sampling
                 f.append(self.f.copy())
         e = np.concatenate(e)
         if self.sampler.exact:
-            self.n = 1.
-            self.E = np.dot(np.concatenate(f),e)
+            f = np.concatenate(f)
+            self.E = np.dot(f,e)
             self.Eerr = 0.
         else:
-            self.n = n 
-            print('nsamples=',n)
+            print('nsamples=',self.n)
             self.E,self.Eerr = blocking_analysis(e)
     def extract_gradient(self):
         vmean = np.zeros(self.nparam,dtype=self.dtype_o)
@@ -507,11 +519,10 @@ class SGD: # stochastic sampling
         evmean = np.zeros(self.nparam,dtype=self.dtype_o)
         COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
         if RANK>0:
-            return
-        vmean /= self.n
-        evmean /= self.n
-        self.g = (evmean - self.E.conj() * vmean).real
-        self.vmean = vmean
+            return 
+        self.vmean = vmean/self.n
+        self.evmean = evmean/self.n
+        self.g = (self.evmean - self.E.conj() * self.vmean).real
     def update(self,rate):
         x = self.sampler.af.get_x()
         return self.normalize(x - rate * self.deltas)
@@ -528,7 +539,7 @@ class SGD: # stochastic sampling
             raise NotImplementedError
         return self.update(self.rate1)
     def measure(self,fname=None):
-        self.sample(compute_v=False,compute_Hv=False)
+        self.sample(compute_v=False,compute_h=False)
 
         sendbuf = np.array([self.ham.n])
         recvbuf = np.zeros_like(sendbuf) 
@@ -560,25 +571,25 @@ class SGD: # stochastic sampling
         e_new = []
         c_new = []
         v_new = []
-        Hv_new = []
+        h_new = []
         n = len(e)
         print(f'RANK={RANK},n={n}')
         for i in range(n):
             config = tuple(configs[i,:])
-            cx,ex,vx,Hvx,err = self.sampler.af.compute_local_energy(
-                config,compute_v=True,compute_Hv=True)
+            cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(
+                config,compute_v=True,compute_h=True)
             if cx is None or np.fabs(ex) > DISCARD:
                 print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = 0.
                 err = 0.
                 if compute_v:
                     vx = np.zeros(self.nparam,dtype=self.dtype)
-                if compute_Hv:
-                    Hvx = np.zeros(self.nparam,dtype=self.dtype)
+                if compute_h:
+                    hx = np.zeros(self.nparam,dtype=self.dtype)
             e_new.append(ex) 
             c_new.append(cx) 
             v_new.append(vx)
-            Hv_new.append(Hvx)
+            h_new.append(hx)
             err_e = np.fabs(ex-e[i])
             err_v = np.linalg.norm(vx-v[i,:])
             if err_e > 1e-6 or err_v > 1e-6: 
@@ -586,7 +597,7 @@ class SGD: # stochastic sampling
             #else:
             #    print(f'RANK={RANK},i={i}')
         f = h5py.File(f'./step{step}RANK{RANK}.hdf5','w')
-        f.create_dataset('Hv',data=np.array(Hv_new))
+        f.create_dataset('h',data=np.array(h_new))
         f.create_dataset('v',data=np.array(v_new))
         f.create_dataset('e',data=np.array(e_new))
         f.create_dataset('c',data=np.array(c_new))
@@ -594,30 +605,30 @@ class SGD: # stochastic sampling
     def load(self,size,tmpdir='./'):
         if RANK==0:
             self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
-            self.Hvsum = np.zeros(self.nparam,dtype=self.dtype_o)
+            self.hsum = np.zeros(self.nparam,dtype=self.dtype_o)
             self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
         else:
             start = 1 + (RANK-1) * size
             self.e = []
             self.v = []
-            self.Hv = []
+            self.h = []
             for rank in range(start,start+size):
                 try:
                     f = h5py.File(tmpdir+f'step{self.step}RANK{rank}.hdf5','r')
                     e = f['e'][:]
                     v = f['v'][:]
-                    Hv = f['Hv'][:]
+                    h = f['h'][:]
                     f.close()
                     self.e.append(e.newbyteorder('='))
                     self.v.append(v.newbyteorder('='))
-                    self.Hv.append(Hv.newbyteorder('='))
+                    self.h.append(h.newbyteorder('='))
                 except FileNotFoundError:
                     break
             self.e = np.concatenate(self.e)
             self.v = np.concatenate(self.v,axis=0)
-            self.Hv = np.concatenate(self.Hv,axis=0)
+            self.h = np.concatenate(self.h,axis=0)
             self.vsum = np.sum(self.v,axis=0)
-            self.Hvsum = np.sum(self.Hv,axis=0)
+            self.hsum = np.sum(self.h,axis=0)
             self.evsum = np.dot(self.e,self.v)
         self.err_sum = 0.
         self.err_max = 0.
@@ -684,7 +695,7 @@ class SGD: # stochastic sampling
                 xH1 = np.zeros_like(self.xH1)
                 COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
                 return self.xH1 / self.n \
-                     - np.dot(x,self.vmean) * self.Hvmean \
+                     - np.dot(x,self.vmean) * self.hmean \
                      - np.dot(x,self.g) * self.vmean
         else:
             def _rmatvec(x):
@@ -693,9 +704,9 @@ class SGD: # stochastic sampling
                     return 0 
                 COMM.Bcast(x,root=0)
                 if self.sampler.exact:
-                    xH1 = np.dot(self.f * np.dot(self.v,x),self.Hv)
+                    xH1 = np.dot(self.f * np.dot(self.v,x),self.h)
                 else:
-                    xH1 = np.dot(np.dot(self.v,x),self.Hv)
+                    xH1 = np.dot(np.dot(self.v,x),self.h)
                 COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
                 return x 
 
@@ -729,6 +740,35 @@ class SR(SGD):
         super().__init__(sampler,**kwargs) 
         self.optimizer = 'sr' 
         self.eigen_thresh = eigen_thresh 
+    def from_square(self,S,idx=None):
+        # assume first 2 dim are square
+        idx = self.triu_idx if idx is None else idx
+        return S[idx]
+    def to_square(self,S,sh=None):
+        if sh is None:
+            sh = self.nparam
+            idx = self.triu_idx
+        else:
+            idx = np.triu_indices(sh)
+        return to_square(S,sh,idx=idx)
+    def _save_grad_hess(self,deltas=None):
+        if not self.save_grad_hess:
+            return
+        if RANK>0:
+            return
+        if self.solve_full:
+            S = self.S
+        else:
+            S = np.zeros((self.nparam,self.nparam))
+            for ix,(start,stop) in enumerate(self.block_dict):
+                S[start:stop,start:stop] = self.S[ix]
+        f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+        f.create_dataset('S',data=S) 
+        f.create_dataset('E',data=np.array([self.E])) 
+        f.create_dataset('g',data=self.g) 
+        if deltas is not None:
+            f.create_dataset('deltas',data=deltas) 
+        f.close()
     def extract_S(self,solve_full,solve_dense):
         fxn = self._get_Smatrix if solve_dense else self._get_S_iterative
         self.Sx1 = np.zeros(self.nparam,dtype=self.dtype_i)
@@ -741,24 +781,29 @@ class SR(SGD):
     def _get_Smatrix(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop
         t0 = time.time()
+        sh = stop-start
+        idx = np.triu_indices(sh) 
+        np2 = (1 + sh) * sh // 2
         if RANK==0:
-            sh = stop-start
-            vvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
+            vvsum = np.zeros(np2,dtype=self.dtype_i)
         else:
             v = self.v[:,start:stop] 
             if self.sampler.exact:
-                vvsum_ = np.einsum('s,si,sj->ij',self.f,v.conj(),v)
+                vvsum = np.einsum('s,si,sj->ij',self.f,v.conj(),v)
             else:
-                vvsum_ = np.dot(v.T.conj(),v)
-        vvsum_ = np.ascontiguousarray(vvsum_.real)
-        vvsum = np.zeros_like(vvsum_)
-        COMM.Reduce(vvsum_,vvsum,op=MPI.SUM,root=0)
-        S = None
-        if RANK==0:
-            vmean = self.vmean[start:stop]
-            S = vvsum / self.n - np.outer(vmean.conj(),vmean).real
-            print('\tcollect S matrix time=',time.time()-t0)
-        return S
+                vvsum = np.dot(v.T.conj(),v)
+            vvsum = self.from_square(vvsum,idx=idx)
+        vvsum = np.ascontiguousarray(vvsum.real)
+        vvmean = np.zeros_like(vvsum)
+        COMM.Reduce(vvsum,vvmean,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        vmean = self.vmean[start:stop]
+        self.vvmean = vvmean / self.n
+ 
+        print('\tcollect S matrix time=',time.time()-t0)
+        return self.to_square(self.vvmean,sh=sh) \
+             - np.outer(vmean.conj(),vmean).real
     def _get_S_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
         if RANK==0:
@@ -815,19 +860,7 @@ class SR(SGD):
                 S = self.S[ix] + self.cond1 * np.eye(stop-start)
                 self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
         print('\tSR solver time=',time.time()-t0)
-        if self.save_grad_hess:
-            if self.solve_full:
-                S = self.S
-            else:
-                S = np.zeros((self.nparam,self.nparam))
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
-            f.create_dataset('S',data=S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
+        self._save_grad_hess(deltas=self.deltas)
         return self.deltas
     def _transform_gradients_sr_iterative(self,solve_full):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
@@ -870,7 +903,7 @@ class RGN(SR):
     def __init__(self,sampler,pure_newton=False,solver='lgmres',guess=3,**kwargs):
         super().__init__(sampler,**kwargs) 
         self.optimizer = 'rgn' 
-        self.compute_Hv = True
+        self.compute_h = True
         self.pure_newton = pure_newton
         self.solver = {'lgmres':spla.lgmres,
                        'tfqmr':tfqmr}[solver] 
@@ -879,14 +912,35 @@ class RGN(SR):
         self.rate2 = None # rate for LIN,RGN
         self.cond2 = None
         self.check = [1] 
-    def _extract_Hvmean(self):
-        Hvmean = np.zeros(self.nparam,dtype=self.dtype_o)
-        COMM.Reduce(self.Hvsum,Hvmean,op=MPI.SUM,root=0)
-        self.Hvsum = None
-        if RANK==0:
-            Hvmean /= self.n
-            #print(Hvmean)
-            self.Hvmean = Hvmean
+    def _save_grad_hess(self,deltas=None):
+        if not self.save_grad_hess:
+            return
+        if RANK>0:
+            return
+        if self.solve_full:
+            H = self.H
+            S = self.S
+        else:
+            H = np.zeros((self.nparam,self.nparam))
+            S = np.zeros((self.nparam,self.nparam))
+            for ix,(start,stop) in enumerate(self.block_dict):
+                H[start:stop,start:stop] = self.H[ix] 
+                S[start:stop,start:stop] = self.S[ix]
+        #print(H)
+        f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+        f.create_dataset('H',data=H) 
+        f.create_dataset('S',data=S) 
+        f.create_dataset('E',data=np.array([self.E])) 
+        f.create_dataset('g',data=self.g) 
+        if deltas is not None:
+            f.create_dataset('deltas',data=deltas) 
+        f.close()
+    def _extract_hmean(self):
+        hmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Reduce(self.hsum,hmean,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        self.hmean = hmean/self.n
     def extract_H(self,solve_full,solve_dense):
         fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
         self.Hx1 = np.zeros(self.nparam,dtype=self.dtype_i)
@@ -901,25 +955,24 @@ class RGN(SR):
         t0 = time.time()
         if RANK==0:
             sh = stop-start
-            vHvsum_ = np.zeros((sh,)*2,dtype=self.dtype_i)
+            vhsum = np.zeros((sh,)*2,dtype=self.dtype_i)
         else:
             v = self.v[:,start:stop] 
-            Hv = self.Hv[:,start:stop] 
+            h = self.h[:,start:stop] 
             if self.sampler.exact:
-                vHvsum_ = np.einsum('s,si,sj->ij',self.f,v,Hv)
+                vhsum = np.einsum('s,si,sj->ij',self.f,v,h)
             else:
-                vHvsum_ = np.dot(v.T,Hv)
-        vHvsum = np.zeros_like(vHvsum_)
-        COMM.Reduce(vHvsum_,vHvsum,op=MPI.SUM,root=0)
-        H = None
-        if RANK==0:
-            #print(start,stop,np.linalg.norm(vHvsum-vHvsum.T))
-            Hvmean = self.Hvmean[start:stop]
-            vmean = self.vmean[start:stop]
-            g = self.g[start:stop]
-            H = vHvsum / self.n - np.outer(vmean,Hvmean) - np.outer(g,vmean)
-            print('\tcollect H matrix time=',time.time()-t0)
-        return H
+                vhsum = np.dot(v.T,h)
+        vhmean = np.zeros_like(vhsum)
+        COMM.Reduce(vhsum,vhmean,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        hmean = self.hmean[start:stop]
+        vmean = self.vmean[start:stop]
+        g = self.g[start:stop]
+        self.vhmean = vhmean / self.n
+        print('\tcollect H matrix time=',time.time()-t0)
+        return self.vhmean - np.outer(vmean,hmean) - np.outer(g,vmean)
     def _get_H_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
         if RANK==0:
@@ -929,7 +982,7 @@ class RGN(SR):
                 Hx1 = np.zeros_like(self.Hx1[start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
                 return self.Hx1[start:stop] / self.n \
-                     - self.vmean[start:stop] * np.dot(self.Hvmean[start:stop],x) \
+                     - self.vmean[start:stop] * np.dot(self.hmean[start:stop],x) \
                      - self.g[start:stop] * np.dot(self.vmean[start:stop],x)
         else:
             def matvec(x):
@@ -938,9 +991,9 @@ class RGN(SR):
                     return 0 
                 COMM.Bcast(x,root=0)
                 if self.sampler.exact:
-                    Hx1 = np.dot(self.f * np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
+                    Hx1 = np.dot(self.f * np.dot(self.h[:,start:stop],x),self.v[:,start:stop])
                 else:
-                    Hx1 = np.dot(np.dot(self.Hv[:,start:stop],x),self.v[:,start:stop])
+                    Hx1 = np.dot(np.dot(self.h[:,start:stop],x),self.v[:,start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
                 return 0 
         return matvec
@@ -953,14 +1006,28 @@ class RGN(SR):
         else:
             xnew_sr,deltas_sr = sr
 
+        #self.extract_S(solve_full,solve_dense)
+        #self.extract_H(solve_full,solve_dense)
+        #if solve_dense:
+        #    dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
+        #else:
+        #    x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
+        #    dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
+        #deltas_rgn = self.deltas
+
+        solve_dense = True
         self.extract_S(solve_full,solve_dense)
         self.extract_H(solve_full,solve_dense)
-        if solve_dense:
-            dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
-        else:
-            x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
-            dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
+        dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
+        deltas_rgn_dense = self.deltas
+        solve_dense = False 
+        self.extract_S(solve_full,solve_dense)
+        self.extract_H(solve_full,solve_dense)
+        x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
+        dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
         deltas_rgn = self.deltas
+        if RANK==0:
+            print('rgn delta error=',np.linalg.norm(deltas_rgn-deltas_rgn_dense))
 
         rate = self.rate2 if self.pure_newton else 1.
         if self.check is None:
@@ -981,7 +1048,7 @@ class RGN(SR):
             self.sampler.config = config
 
             self.free_quantities()
-            self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+            self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_h=False,save_config=False)
             self.extract_energy()
             if RANK==0:
                 Enew[ix] = self.E
@@ -1009,7 +1076,7 @@ class RGN(SR):
                 self.deltas,dE,w = _newton_block_solve(self.H,self.E,self.S,self.g,self.cond2,eigen=self.sampler.exact,enforce_pos=enforce_pos) 
                 print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
             else:
-                self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2,enforce_pos=enforce_pos) 
+                self.deltas,dE,w,eps = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond1,self.rate2) 
                 print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w},eps={eps}')
         else:
             blk_dict = self.sampler.af.block_dict
@@ -1028,23 +1095,7 @@ class RGN(SR):
             w = min(np.array(w).real)
             dE = np.sum(dE)
             print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
-        if self.save_grad_hess:
-            if self.solve_full:
-                H = self.H
-                S = self.S
-            else:
-                H = np.zeros((self.nparam,self.nparam))
-                S = np.zeros((self.nparam,self.nparam))
-                for ix,(start,stop) in enumerate(self.block_dict):
-                    H[start:stop,start:stop] = self.H[ix] 
-                    S[start:stop,start:stop] = self.S[ix]
-            f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
-            f.create_dataset('H',data=H) 
-            f.create_dataset('S',data=S) 
-            f.create_dataset('E',data=np.array([self.E])) 
-            f.create_dataset('g',data=self.g) 
-            f.create_dataset('deltas',data=self.deltas) 
-            f.close()
+        self._save_grad_hess(deltas=self.deltas)
         return dE
     def _transform_gradients_rgn_iterative(self,solve_full,x0):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
@@ -1069,7 +1120,7 @@ class RGN(SR):
             self.terminate[0] = 0
             hessp = A(self.deltas)
             if RANK==0:
-                print('hessian inversion error=',np.linalg.norm(g - hessp) / np.linalg.norm(g))
+                print('hessian inversion error=',np.linalg.norm(g - hessp))
                 dE = np.dot(self.deltas,hessp)
         else:
             dE = 0.
@@ -1299,7 +1350,7 @@ class TrustRegionRGN(RGN,TrustRegion):
         COMM.Bcast(xnew_trust,root=0) 
         self.sampler.af.update(xnew_trust)
         self.free_quantities()
-        self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_Hv=False,save_config=False)
+        self.sample(samplesize=self.batchsize_small,save_local=False,compute_v=False,compute_h=False,save_config=False)
         self.extract_energy()
         self.sampler.config = config
         if RANK>0:
@@ -1535,7 +1586,7 @@ class LinearMethod(RGN):
         t0 = time.time()
         if solve_full:
             w,self.deltas,v0,inorm = \
-                _lin_block_solve(self.H,self.E,self.S,self.g,self.Hvmean,self.vmean,self.cond2) 
+                _lin_block_solve(self.H,self.E,self.S,self.g,self.hmean,self.vmean,self.cond2) 
         else:
             w = np.zeros(self.nsite)
             v0 = np.zeros(self.nsite)
@@ -1544,14 +1595,14 @@ class LinearMethod(RGN):
             for ix,(start,stop) in enumerate(self.block_dict):
                 w[ix],self.deltas[start:stop],v0[ix],inorm[ix] = \
                     _lin_block_solve(self.H[ix],self.E,self.S[ix],self.g[start:stop],
-                                     self.Hvmean[start:stop],self.vmean[start:stop],self.cond2) 
+                                     self.hmean[start:stop],self.vmean[start:stop],self.cond2) 
             inorm = inorm.sum()
             w = w.sum()
         print(f'\tLIN solver time={time.time()-t0},inorm={inorm},eigenvalue={w},scale1={v0}')
         self._scale_eigenvector()
         if self.save_grad_hess:
             Hi0 = self.g
-            H0j = self.Hvmean - self.E * self.vmean
+            H0j = self.hmean - self.E * self.vmean
             if self.solve_full:
                 H = self.H
                 S = self.S
@@ -1573,7 +1624,7 @@ class LinearMethod(RGN):
         return w-self.E 
     def _transform_gradients_lin_iterative(self,cond):
         Hi0 = self.g
-        H0j = self.Hvmean - self.E * self.vmean
+        H0j = self.hmean - self.E * self.vmean
         def A(x):
             x0,x1 = x[0],x[1:]
             y = np.zeros_like(x)
@@ -2041,8 +2092,8 @@ class AmplitudeFactory:
         if not isinstance(ex,torch.Tensor):
             return 0.,np.zeros(self.nparam)
         ex.backward()
-        Hvx = self.extract_ad_grad()
-        return tensor2backend(ex,'numpy'),Hvx 
+        hx = self.extract_ad_grad()
+        return tensor2backend(ex,'numpy'),hx 
     def get_grad_deterministic(self,config):
         self.wfn2backend(backend='torch',requires_grad=True)
         cx = self.amplitude(config,to_numpy=False)
@@ -2113,22 +2164,22 @@ class AmplitudeFactory:
             return tensor2backend(sum([eij for _,_,eij in ex.values()]),'numpy')
         else:
             return sum([eij for eij,_,_ in ex.values()])
-    def batch_quantities(self,batch_key,compute_v,compute_Hv): 
-        if compute_Hv:
+    def batch_quantities(self,batch_key,compute_v,compute_h): 
+        if compute_h:
             self.wfn2backend(backend='torch',requires_grad=True)
-        ex,plq = self.batch_pair_energies(batch_key,compute_Hv)
+        ex,plq = self.batch_pair_energies(batch_key,compute_h)
 
-        Hvx = 0
-        if compute_Hv:
-            _,Hvx = self.propagate(self.parse_energy(ex,batch_key,False))
+        hx = 0
+        if compute_h:
+            _,hx = self.propagate(self.parse_energy(ex,batch_key,False))
         ex = self.parse_energy(ex,batch_key,True)
         self.amplitude2scalar()
         if compute_v:
             self.get_grad_from_plq(plq) 
-        if compute_Hv:
+        if compute_h:
             self.wfn2backend()
         self.free_ad_cache()
-        return ex,Hvx
+        return ex,hx
     def contraction_error(self):
         return contraction_error(self.cx) 
     def set_config(self,config,compute_v):
@@ -2140,7 +2191,7 @@ class AmplitudeFactory:
     def parse_gradient(self):
         vx = self.dict2vec(self.vx) 
         return vx
-    def compute_local_energy(self,config,compute_v=True,compute_Hv=False):
+    def compute_local_energy(self,config,compute_v=True,compute_h=False):
         config = self.set_config(config,compute_v)
         vx = None
         if not self.from_plq:
@@ -2149,21 +2200,21 @@ class AmplitudeFactory:
             else:
                 cx,vx = self.amplitude(config),None
 
-        ex,Hvx = 0.,0.
+        ex,hx = 0.,0.
         for batch_key in self.model.batched_pairs:
-            ex_,Hvx_ = self.batch_quantities(batch_key,compute_v,compute_Hv)
+            ex_,hx_ = self.batch_quantities(batch_key,compute_v,compute_h)
             ex += ex_
-            Hvx += Hvx_
+            hx += hx_
         cx,err = self.contraction_error() 
         eu = self.model.compute_local_energy_eigen(self.config)
         ex += eu
         if self.from_plq and compute_v:
             vx = self.parse_gradient()
-        if compute_Hv:
-            Hvx = Hvx / cx + eu * vx
+        if compute_h:
+            hx = hx / cx + eu * vx
         self.vx = None
         self.cx = None
-        return cx,ex,vx,Hvx,err 
+        return cx,ex,vx,hx,err 
 #class CIAmplitudeFactory(AmplitudeFactory): # model for testing
 #    def wfn2backend(self,backend=None,requires_grad=False):
 #        backend = self.backend if backend is None else backend
