@@ -736,9 +736,10 @@ class SGD: # stochastic sampling
         if RANK==0:
             print(w,np.sqrt(w))
 class SR(SGD):
-    def __init__(self,sampler,eigen_thresh=None,**kwargs):
+    def __init__(self,sampler,solve_reduce=False,eigen_thresh=None,**kwargs):
         super().__init__(sampler,**kwargs) 
         self.optimizer = 'sr' 
+        self.solve_reduce = solve_reduce 
         self.eigen_thresh = eigen_thresh 
     def from_square(self,S,idx=None):
         # assume first 2 dim are square
@@ -770,6 +771,8 @@ class SR(SGD):
             f.create_dataset('deltas',data=deltas) 
         f.close()
     def extract_S(self,solve_full,solve_dense):
+        if self.solve_reduce:
+            return self._get_S_reduce() 
         fxn = self._get_Smatrix if solve_dense else self._get_S_iterative
         self.Sx1 = np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full:
@@ -830,6 +833,56 @@ class SR(SGD):
                 COMM.Reduce(Sx1,self.Sx1[start:stop],op=MPI.SUM,root=0)     
                 return 0 
         return matvec
+    def _get_S_reduce(self):
+        if RANK==0:
+            nsi = np.array([1])
+        else:
+            u,s,vh = np.linalg.svd(self.v,full_matrices=False)
+            s = s[s>np.sqrt(self.eigen_thresh)]**2
+            nsi = len(s)
+            u = u[:,:nsi]
+            vh = vh[:nsi,:]
+            #self.v = {'u':u,'s':s,'v':v} 
+            nsi = np.array([nsi])
+        ns = np.zeros(SIZE,dtype=int)
+        COMM.Gather(nsi,ns,root=0)
+        if RANK>0:
+            COMM.Send(vh,dest=0,tag=5)
+            COMM.Send(s,dest=0,tag=6)
+            return 
+        vh_ls = [self.vmean.reshape(1,self.nparam)]
+        s_ls = [-np.ones(1)]
+        for worker in range(1,SIZE):
+            vh = np.zeros((ns[worker],self.nparam))
+            COMM.Recv(vh,source=worker,tag=5)
+            vh_ls.append(vh) 
+
+            s = np.zeros(ns[worker])
+            COMM.Recv(s,source=worker,tag=6)
+            s_ls.append(s/self.n) 
+        vh = np.concatenate(vh_ls,axis=0) 
+        s_mid = np.concatenate(s_ls,axis=0) 
+
+        # decompose vh
+        u,s,vh = np.linalg.svd(vh,full_matrices=False)
+        s = s[s>self.eigen_thresh]
+        ns = len(s)
+        u = u[:,:ns]
+        vh = vh[:ns,:]
+        s_mid = np.einsum('si,sj,s->ij',u,u,s_mid)
+        s = np.einsum('i,j,ij->ij',s,s,s_mid)
+
+        # decompose s 
+        u,s,vh_ = np.linalg.svd(s,full_matrices=False,hermitian=True)
+        s = s[s>self.eigen_thresh]
+        ns = len(s)
+        u = u[:,:ns]
+        vh_ = vh_[:ns,:]
+        
+        rhs = s**(-1) * np.dot(u.T,np.dot(vh,self.g))
+        lhs = np.dot(vh_,vh)
+        self.S = lhs,rhs
+        print('number of singular values in S=',ns)
     def transform_gradients(self):
         deltas = self._transform_gradients_sr(self.solve_full,self.solve_dense)
         if RANK>0:
@@ -837,6 +890,8 @@ class SR(SGD):
         return self.update(self.rate1)
     def _transform_gradients_sr(self,solve_full,solve_dense):
         self.extract_S(solve_full,solve_dense)
+        if self.solve_reduce:
+            return self._transform_gradients_sr_reduce()
         if solve_dense:
             return self._transform_gradients_sr_dense(solve_full)
         else:
@@ -877,6 +932,13 @@ class SR(SGD):
         if RANK>0:
             return np.zeros(self.nparam,dtype=self.dtype_i)  
         return self.deltas
+    def _transform_gradients_sr_reduce(self):
+        if RANK>0:
+            return np.zeros(self.nparam,dtype=self.dtype_i) 
+        lhs,rhs = self.S
+        deltas,res,rank,s = np.linalg.lstsq(lhs,rhs,rcond=self.eigen_thresh)
+        print('lstsq res=',res)
+        return deltas
     def solve_iterative(self,A,b,symm,x0=None):
         self.terminate = np.array([0])
         deltas = np.zeros_like(b)

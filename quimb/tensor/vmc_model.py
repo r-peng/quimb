@@ -1,7 +1,8 @@
 import numpy as np
 import itertools,h5py
 import scipy.linalg
-from .tensor_vmc import (
+#from .tensor_vmc import (
+from .tensor_vmc_red import (
     DISCARD,
     Progbar,
     DenseSampler,
@@ -64,29 +65,38 @@ def make_matrices(x):
     ovlp = ovlp.reshape(L*2,L*2)
     hess = hess.reshape(L*2,L*2) - E * ovlp
     return E,g,ovlp,hess
-def sample_matrices(sampler,sample_size=None,tmpdir=None,exact_variance=False):
+def sample_matrices(sampler,samplesize=None,tmpdir=None,exact_variance=False):
     sampler.config = tuple([0] * sampler.nsite)
     eng = CovRGN if exact_variance else RGN
-    vmc = eng(sampler,normalize=False,solve_full=True,solve_dense=True)
-    vmc.batchsize = sample_size
-    vmc.tmpdir = tmpdir
-    vmc.save_grad_hess = False if tmpdir is None else True 
+    vmc = eng(sampler,normalize=False)
     vmc.progbar = True
     vmc.step = 0
     vmc.Eold = 0
+    vmc.tmpdir = tmpdir
+    vmc.batchsize = samplesize
     vmc.nparam = vmc.sampler.af.nparam
-    vmc.np2 = (1+vmc.nparam)*vmc.nparam//2
-    vmc.triu_idx = np.triu_indices(vmc.nparam)
+    vmc.rate2 = .5
     vmc.sample(save_config=False)
     vmc.extract_energy_gradient()
-    vmc.extract_S(solve_full=True,solve_dense=True)
-    vmc.extract_H(solve_full=True,solve_dense=True)
-    vmc._save_grad_hess()
-    if not exact_variance:
-        return 
-    if RANK>0:
-        return
-    vmc.covariance() 
+
+    vmc.eigen_thresh = 1e-3 
+    deltas_sr = vmc._transform_gradients_sr()
+    deltas_rgn,_ = vmc._transform_gradients_rgn()
+    return deltas_sr,deltas_rgn
+#
+#    if RANK==0:
+#        print(deltas0)
+#        print(deltas1)
+#    exit()
+#
+#
+#    vmc.extract_H(solve_full=True,solve_dense=True)
+#    vmc._save_grad_hess()
+#    if not exact_variance:
+#        return 
+#    if RANK>0:
+#        return
+#    vmc.covariance() 
 def from_noisy(mean,ns,nparam,sample_size):
     x = mean + ns/np.sqrt(sample_size+1e-10)
     np2 = (1+nparam) * nparam // 2
