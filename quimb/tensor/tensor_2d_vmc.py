@@ -840,6 +840,22 @@ class ExchangeSampler2D(ExchangeSampler):
         else:
             raise NotImplementedError
         return pairs
+    def _update_pair_from_plq(self,site1,site2,plq,cols):
+        config_sites,config_new = self._new_pair(site1,site2)
+        if config_sites is None:
+            return cols
+        config_sites = self.af.parse_config(config_sites)
+        _,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,self.af.parse_config(config_new))
+        if py is None:
+            return cols
+        acceptance = np.exp(py - self.px)
+        if acceptance < self.rng.uniform(): # reject
+            return cols
+        # accept, update px & config & env_m
+        self.px = py
+        self.config = config_new
+        cols = self.af.replace_sites(cols,(site1,site2),config_sites)
+        return cols
     def sweep_col_from_plq(self,i,cols,x_bsz,y_bsz):
         step = self.rng.choice([-1,1])
         stop = y_bsz-1 if step==1 else self.Ly-y_bsz
@@ -850,21 +866,7 @@ class ExchangeSampler2D(ExchangeSampler):
             plq = self.af._get_plq_sweep(j,y_bsz,cols,envs,step)
             pairs = self.get_pairs(i,j,x_bsz,y_bsz)
             for site1,site2 in pairs:
-                config_sites,config_new = self._new_pair(site1,site2)
-                if config_sites is None:
-                    continue
-                config_sites = self.af.parse_config(config_sites)
-                config_new_ = self.af.parse_config(config_new)
-                _,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,config_new_)
-                if py is None:
-                    continue
-                acceptance = np.exp(py - self.px)
-                if acceptance < self.rng.uniform(): # reject
-                    continue
-                # accept, update px & config & env_m
-                self.px = py
-                self.config = config_new
-                cols = self.af.replace_sites(cols,(site1,site2),config_sites)
+                cols = self._update_pair_from_plq(site1,site2,plq,cols)
             cix = (0,j) if step==1 else (j+y_bsz-1,self.Ly-1)
             cols = self.af._contract_cols(cols,cix)
     def sweep_col_from_benv(self,i,x_bsz,y_bsz):
@@ -874,18 +876,7 @@ class ExchangeSampler2D(ExchangeSampler):
         for j in sweep:
             pairs = self.get_pairs(i,j,x_bsz,y_bsz)
             for site1,site2 in pairs:
-                _,config_new = self._new_pair(site1,site2)
-                if config_new is None:
-                    continue
-                config_new_ = self.af.parse_config(config_new)
-                py = self.af.log_prob(config_new_,i=i)
-                if py is None:
-                    continue
-                acceptance = np.exp(py - self.px)
-                if acceptance < self.rng.uniform(): # reject
-                    continue
-                self.px = py
-                self.config = config_new
+                self._update_pair(site1,site2,i=i)
     def sweep_row(self,x_bsz,y_bsz):
         step = self.rng.choice([-1,1])
         self.af.free_sweep_cache(step)
@@ -913,11 +904,11 @@ class ExchangeSampler2D(ExchangeSampler):
         bsz = self.get_bsz()
         for (x_bsz,y_bsz) in bsz: 
             self.sweep_row(x_bsz,y_bsz) 
-    def _update_pair(self,site1,site2):
+    def _update_pair(self,site1,site2,i=None):
         config_sites,config_new = self._new_pair(site1,site2)
         if config_sites is None:
             return
-        py = self.af.log_prob(self.af.parse_config(config_new))
+        py = self.af.log_prob(self.af.parse_config(config_new),i=i)
         if py is None:
             return
         acceptance = np.exp(py - self.px)

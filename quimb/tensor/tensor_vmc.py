@@ -1107,28 +1107,28 @@ class RGN(SR):
         else:
             xnew_sr,deltas_sr = sr
 
+        self.extract_S(solve_full,solve_dense)
+        self.extract_H(solve_full,solve_dense)
+        if solve_dense:
+            dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
+        else:
+            x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
+            dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
+        deltas_rgn = self.deltas
+
+        #solve_dense = True
         #self.extract_S(solve_full,solve_dense)
         #self.extract_H(solve_full,solve_dense)
-        #if solve_dense:
-        #    dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
-        #else:
-        #    x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
-        #    dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
+        #dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
+        #deltas_rgn_dense = self.deltas
+        #solve_dense = False 
+        #self.extract_S(solve_full,solve_dense)
+        #self.extract_H(solve_full,solve_dense)
+        #x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
+        #dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
         #deltas_rgn = self.deltas
-
-        solve_dense = True
-        self.extract_S(solve_full,solve_dense)
-        self.extract_H(solve_full,solve_dense)
-        dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
-        deltas_rgn_dense = self.deltas
-        solve_dense = False 
-        self.extract_S(solve_full,solve_dense)
-        self.extract_H(solve_full,solve_dense)
-        x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
-        dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
-        deltas_rgn = self.deltas
-        if RANK==0:
-            print('rgn delta error=',np.linalg.norm(deltas_rgn-deltas_rgn_dense))
+        #if RANK==0:
+        #    print('rgn delta error=',np.linalg.norm(deltas_rgn-deltas_rgn_dense))
 
         rate = self.rate2 if self.pure_newton else 1.
         if self.check is None:

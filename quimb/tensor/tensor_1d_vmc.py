@@ -19,29 +19,32 @@ from .tensor_2d_vmc import (
     ExchangeSampler2D,
 )
 class AmplitudeFactory1D(AmplitudeFactory2D):
-    def __init__(self,psi,blks=None,phys_dim=2,backend='numpy',pbc=False,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',pbc=False,**compress_opts):
         self.Lx,self.Ly = 1,psi.L
         self.nsite = psi.L
         self.sites = list(range(self.nsite))
         psi.add_tag('KET')
         self.set_psi(psi)
-        self.backend = backend 
 
         self.data_map = self.get_data_map(phys_dim)
-        self.wfn2backend()
-        self.pbc = pbc 
-        self.deterministic = False
 
-        if blks is None:
-            blks = [self.sites]
-        self.site_map = self.get_site_map(blks)
+        self.model = model
+        self.backend = backend 
+        self.from_plq = True
+        self.wfn2backend()
+
+        self.blks = [self.sites] if blks is None else blks
+        self.site_map = self.get_site_map()
         self.constructors = self.get_constructors(psi)
-        self.block_dict = self.get_block_dict(blks)
+        self.get_block_dict()
         if RANK==0:
             sizes = [stop-start for start,stop in self.block_dict]
             print('block_dict=',self.block_dict)
             print('sizes=',sizes)
-        self.nparam = len(self.get_x())
+        self.is_tn = True
+        self.dmc = False 
+        self.pbc = pbc 
+        self.deterministic = False
     def flatten(self,site):
         return site
     def site_tag(self,site):
@@ -85,7 +88,7 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         for j in range(self.nsite-bsz+1):
             plq[j,bsz] = self._get_plq(j,bsz,cols,lenvs,renvs)
         return plq 
-    def unsigned_amplitude(self,config,to_numpy=True):
+    def unsigned_amplitude(self,config,i=None,to_numpy=True):
         tn = self.get_mid_env(config)
         cx = safe_contract(tn)
         if cx is None:
@@ -129,8 +132,7 @@ class J1J2(Model1D):
         super().__init__(L,**kwargs)
         self.J1,self.J2 = J1,J2
 
-        self.gate = get_gate2((1.,1.,0.))
-        self.order = 'b1,k1,b2,k2'
+        self.gate = {None:(get_gate2((1.,1.,0.)),'b1,k1,b2,k2')}
 
         self.batched_pairs = dict()
         self.pairs_nn()
@@ -176,31 +178,32 @@ class ExchangeSampler1D(ExchangeSampler2D):
         return i
     def flat2site(self,i):
         return i
-    def sweep_col_forward(self,cols,bsz):
-        cols,renvs = self.af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
-        for j in range(self.nsite - bsz + 1): 
-            plq = self.af._get_plq_forward(j,bsz,cols,renvs)
-            plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
-            try:
-                cols = self.af._contract_cols(cols,(0,j))
-            except (ValueError,IndexError):
-                return
-    def sweep_col_backward(self,cols,bsz):
-        cols,lenvs = self.af.get_all_envs(cols,1,stop=self.nsite-bsz,inplace=False)
-        for j in range(self.nsite - bsz,-1,-1): # Ly-1,...,1
-            plq = self.af._get_plq_backward(j,bsz,cols,lenvs)
-            plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
-            try:
-                cols = self.af._contract_cols(cols,(j+bsz-1,self.nsite-1))
-            except (ValueError,IndexError):
-                return
+    def get_pairs(self,i,j,x_bsz,y_bsz):
+        assert y_bsz == 2
+        return [(j,(j+1)%self.Ly)]
+    #def sweep_col_forward(self,cols,bsz):
+    #    cols,renvs = self.af.get_all_envs(cols,-1,stop=bsz-1,inplace=False)
+    #    for j in range(self.nsite - bsz + 1): 
+    #        plq = self.af._get_plq_sweep(j,bsz,cols,renvs,1)
+    #        plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
+    #        try:
+    #            cols = self.af._contract_cols(cols,(0,j))
+    #        except (ValueError,IndexError):
+    #            return
+    #def sweep_col_backward(self,cols,bsz):
+    #    cols,lenvs = self.af.get_all_envs(cols,1,stop=self.nsite-bsz,inplace=False)
+    #    for j in range(self.nsite - bsz,-1,-1): # Ly-1,...,1
+    #        plq = self.af._get_plq_backward(j,bsz,cols,lenvs)
+    #        plq,cols = self._update_pair_from_plq(j,j+1,plq,cols) 
+    #        try:
+    #            cols = self.af._contract_cols(cols,(j+bsz-1,self.nsite-1))
+    #        except (ValueError,IndexError):
+    #            return
     def sample(self):
         cdir = self.rng.choice([-1,1]) 
         for _ in range(self.nsweep):
-            sweep_col = self.sweep_col_forward if cdir == 1 else self.sweep_col_backward
             tn = self.af.get_mid_env(self.af.parse_config(self.config))
-            sweep_col(tn,2)
-            cdir *= -1
+            self.sweep_col_from_plq(None,tn,1,2)
         return self.config,self.px
 from .tensor_1d import MatrixProductState,MatrixProductOperator
 from .tensor_core import Tensor,TensorNetwork,rand_uuid
@@ -218,7 +221,7 @@ def get_product_state(L,config=None,bdim=1,eps=0.,pdim=4,normalize=True,pbc=Fals
             data = np.zeros(shape)
             ix = config[i]
             data[(0,)*(len(shape)-1)+(ix,)] = 1.
-        data += eps * np.random.rand(*shape)
+        dataqueue += eps * np.random.rand(*shape)
         if normalize:
             data /= np.linalg.norm(data)
         arrays.append(data)
@@ -227,7 +230,6 @@ def compute_energy(mps,terms,order,pbc=False):
     # terms: tebd ham terms
     norm,_,bra = mps.make_norm(return_all=True)
     bsz = max([abs(i-j)+1 for i,j in terms.keys()])
-    set_options(pbc=pbc)
     af = AmplitudeFactory1D(mps) 
     _,lenvs = af.get_all_envs(norm,1,stop=mps.L-bsz,inplace=False) 
     _,renvs = af.get_all_envs(norm,-1,stop=bsz-1,inplace=False)
