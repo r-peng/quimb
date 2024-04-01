@@ -71,6 +71,11 @@ def gram_schmidt(Q,R,ak,thresh):
         R = np.array([[nk]])
         return Q,R
     nb,ns = R.shape
+    #uk = ak.copy()
+    #ejak = np.zeros(nb)
+    #for i in range(nb):
+    #    ejak[i] = np.dot(ak,Q[:,i])
+    #    uk -= ejak[i] * Q[:,i] 
     ejak = np.dot(ak,Q)
     uk = ak - np.dot(Q,ejak)
     nk = np.linalg.norm(uk)
@@ -78,6 +83,11 @@ def gram_schmidt(Q,R,ak,thresh):
         R = np.concatenate([R,ejak.reshape(nb,1)],axis=1)
         return Q,R
     ek = uk / nk
+    ekak = np.dot(ek,ak)
+    dmax = np.amax(np.fabs(np.diag(R)))
+    if abs(ekak)/dmax < thresh:
+        R = np.concatenate([R,ejak.reshape(nb,1)],axis=1)
+        return Q,R
     Q = np.concatenate([Q,ek.reshape(nparam,1)],axis=1) 
     Rnew = np.zeros((nb+1,ns+1))
     Rnew[:nb,:ns] = R
@@ -219,7 +229,7 @@ class SGD: # stochastic sampling
             v = np.dot(self.Qv,self.Rv)
             print('check v=',np.linalg.norm(self.v-v))
             #print(self.Qv)
-            self.v = None
+            #self.v = None
         if len(self.buf) > ix2:
             print('\tnumber of h basis=',self.Rh.shape[0])
             self.h = np.array(self.h).T
@@ -228,7 +238,11 @@ class SGD: # stochastic sampling
             #print(self.Qh)
             #print(self.h)
             #exit()
-            self.h = None
+            #self.h = None
+        #print('Rv diag')
+        #print(np.diag(self.Rv))
+        #print('Rh diag')
+        #print(np.diag(self.Rh))
     def _fill_buf(self,info,config,fx=1):
         cx,ex,vx,hx,err = info
         ix0,ix1,ix2,ix3 = self.buf_idx
@@ -251,10 +265,22 @@ class SGD: # stochastic sampling
             vx = self.buf[ix1:ix2] 
             self.v.append(vx.copy())
             self.Qv,self.Rv = gram_schmidt(self.Qv,self.Rv,vx,self.gs_thresh)
+            sh = self.Qv.shape
+            if sh[0] < sh[1]:
+                print(self.Rh.shape)
+                print(np.diag(self.Rh))
+                print('Qv shape=',sh)
+                raise ValueError
         if len(self.buf) > ix2:
             hx = self.buf[ix2:] 
             self.h.append(hx.copy())
             self.Qh,self.Rh = gram_schmidt(self.Qh,self.Rh,hx,self.gs_thresh)
+            sh = self.Qh.shape
+            if sh[0] < sh[1]:
+                print(self.Rh.shape)
+                print(np.diag(self.Rh))
+                print('Qh shape=',sh)
+                raise ValueError
         return config
     def _ctr_stochastic(self,samplesize,save_config=True):
         self._init_ctr()
@@ -264,6 +290,8 @@ class SGD: # stochastic sampling
         t0 = time.time()
         terminate = np.array([0]*(SIZE-1))
         #print(f'{RANK},{len(self.buf)}')
+        print('Qv,Rv',self.Qv,self.Rv)
+        print('Qh,Rh',self.Qh,self.Rh)
         while True:
             COMM.Recv(self.buf,tag=0)
             step = int(self.buf[0]+.1)
@@ -435,6 +463,7 @@ class SR(SGD):
             Rsq = np.dot(self.Rv,self.Rv.T)/self.n
         Rsq -= np.outer(self.Rvmean,self.Rvmean)
         u,s,vh = truncated_svd(Rsq,self.eigen_thresh,hermitian=True)
+        print('SR s=',s[0],s[-1])
 
         rhs = s**(-1) * np.dot(u.T,rhs)
         lhs = np.dot(vh,self.Qv.T)
@@ -454,6 +483,17 @@ class SR(SGD):
         lhs,rhs = self.extract_S()
         deltas,res,rank,s = np.linalg.lstsq(lhs,rhs,rcond=self.eigen_thresh)
         print('\tSR lstsq res=',res)
+
+        if self.sampler.exact:
+            S = np.einsum('is,js,s->ij',self.v,self.v,self.f)
+            vmean = np.dot(self.v,self.f)
+        else:
+            S = np.dot(self.v,self.v.T)/self.n
+            vmean = np.sum(self.v,axis=1)/self.n
+        S -= np.outer(vmean,vmean) 
+        S += np.eye(S.shape[0]) * 1e-4 
+        deltas_ = np.linalg.solve(S,self.g)
+        print('check SR deltas=',np.linalg.norm(deltas-deltas_))
         return deltas
 class RGN(SR):
     def __init__(self,sampler,pure_newton=False,solver='lgmres',guess=3,**kwargs):
@@ -489,6 +529,7 @@ class RGN(SR):
         Q = Q1+Q2
 
         u,s,vh = truncated_svd(Q,self.eigen_thresh)
+        print('RGN s=',s[0],s[-1])
         rhs = s**(-1) * np.dot(u.T,rhs)
         lhs = vh 
         fname = 'H' if self.pure_newton else 'H+S/rate'
@@ -505,6 +546,29 @@ class RGN(SR):
 
         dE = .5 * np.dot(np.dot(deltas,self.Qv),np.dot(self.Q,deltas))
         dE -= np.dot(self.g,deltas)
+        print('dE=',dE)
+
+        if self.sampler.exact:
+            S = np.einsum('is,js,s->ij',self.v,self.v,self.f)
+            H = np.einsum('is,js,s->ij',self.v,self.h,self.f)
+            vmean = np.dot(self.v,self.f)
+            hmean = np.dot(self.h,self.f)
+        else:
+            S = np.dot(self.v,self.v.T)/self.n
+            H = np.dot(self.v,self.h.T)/self.n
+            vmean = np.sum(self.v,axis=1)/self.n
+            hmean = np.sum(self.h,axis=1)/self.n
+        S -= np.outer(vmean,vmean) 
+        H -= np.outer(vmean,hmean) 
+        H -= np.outer(self.g,vmean)
+        H -= self.E * S
+        S += np.eye(S.shape[0]) * 1e-4 
+        H += S/self.rate2
+        deltas_ = np.linalg.solve(H,self.g)
+        print('check RGN deltas=',np.linalg.norm(deltas-deltas_))
+        dE_ = .5 * np.dot(np.dot(deltas_,H),deltas)
+        dE_ -= np.dot(self.g,deltas_)
+        print('dE=',dE_)
         return deltas,dE 
     def transform_gradients(self):
         deltas_sr = self._transform_gradients_sr()

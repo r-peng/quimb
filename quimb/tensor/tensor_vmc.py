@@ -538,203 +538,203 @@ class SGD: # stochastic sampling
         else:
             raise NotImplementedError
         return self.update(self.rate1)
-    def measure(self,fname=None):
-        self.sample(compute_v=False,compute_h=False)
-
-        sendbuf = np.array([self.ham.n])
-        recvbuf = np.zeros_like(sendbuf) 
-        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
-        n = recvbuf[0]
-
-        sendbuf = self.ham.data
-        recvbuf = np.zeros_like(sendbuf) 
-        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
-        if RANK>0:
-            return
-        data = recvbuf / n
-        if fname is not None:
-            f = h5py.File(fname,'w')
-            f.create_dataset('data',data=data) 
-            f.close()
-        self.ham._print(fname,data)
-    def debug_torch(self,tmpdir,step,rank=None):
-        if RANK==0:
-            return
-        if rank is not None:
-            if RANK!=rank:
-                return
-        f = h5py.File(tmpdir+f'step{step}RANK{RANK}.hdf5','r')
-        e = f['e'][:]
-        v = f['v'][:]
-        configs = f['config'][:]
-        f.close()
-        e_new = []
-        c_new = []
-        v_new = []
-        h_new = []
-        n = len(e)
-        print(f'RANK={RANK},n={n}')
-        for i in range(n):
-            config = tuple(configs[i,:])
-            cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(
-                config,compute_v=True,compute_h=True)
-            if cx is None or np.fabs(ex) > DISCARD:
-                print(f'RANK={RANK},cx={cx},ex={ex}')
-                ex = 0.
-                err = 0.
-                if compute_v:
-                    vx = np.zeros(self.nparam,dtype=self.dtype)
-                if compute_h:
-                    hx = np.zeros(self.nparam,dtype=self.dtype)
-            e_new.append(ex) 
-            c_new.append(cx) 
-            v_new.append(vx)
-            h_new.append(hx)
-            err_e = np.fabs(ex-e[i])
-            err_v = np.linalg.norm(vx-v[i,:])
-            if err_e > 1e-6 or err_v > 1e-6: 
-                print(f'RANK={RANK},config={config},ex={ex},ex_sr={e[i]},err_e={err_e},err_v={err_v}')
-            #else:
-            #    print(f'RANK={RANK},i={i}')
-        f = h5py.File(f'./step{step}RANK{RANK}.hdf5','w')
-        f.create_dataset('h',data=np.array(h_new))
-        f.create_dataset('v',data=np.array(v_new))
-        f.create_dataset('e',data=np.array(e_new))
-        f.create_dataset('c',data=np.array(c_new))
-        f.close()
-    def load(self,size,tmpdir='./'):
-        if RANK==0:
-            self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
-            self.hsum = np.zeros(self.nparam,dtype=self.dtype_o)
-            self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
-        else:
-            start = 1 + (RANK-1) * size
-            self.e = []
-            self.v = []
-            self.h = []
-            for rank in range(start,start+size):
-                try:
-                    f = h5py.File(tmpdir+f'step{self.step}RANK{rank}.hdf5','r')
-                    e = f['e'][:]
-                    v = f['v'][:]
-                    h = f['h'][:]
-                    f.close()
-                    self.e.append(e.newbyteorder('='))
-                    self.v.append(v.newbyteorder('='))
-                    self.h.append(h.newbyteorder('='))
-                except FileNotFoundError:
-                    break
-            self.e = np.concatenate(self.e)
-            self.v = np.concatenate(self.v,axis=0)
-            self.h = np.concatenate(self.h,axis=0)
-            self.vsum = np.sum(self.v,axis=0)
-            self.hsum = np.sum(self.h,axis=0)
-            self.evsum = np.dot(self.e,self.v)
-        self.err_sum = 0.
-        self.err_max = 0.
-    def _hess(self,solve_dense=None,mode='eig',gen=True,lin=True):
-        solve_dense = self.solve_dense if solve_dense is None else solve_dense
-        self.extract_S(solve_full=True,solve_dense=solve_dense)
-        self.extract_H(solve_full=True,solve_dense=solve_dense)
-        if solve_dense:
-            return self._dense_hess(mode=mode,gen=gen,lin=lin)
-        else:
-            return self._iterative_hessSVD()
-    def _dense_hess(self,mode='eig',gen=True,lin=True):
-        if RANK>0:
-            return 
-        A = self.H - self.E * self.S
-        #A = self.S
-        gen = True if lin else gen
-        if mode=='svd':
-            #A = A + (self.S + self.cond1 * np.eye(self.nparam))/self.rate2
-            #_,w,_ = spla.svds(A,k=1,tol=CG_TOL,maxiter=MAXITER)
-            _,w,_ = np.linalg.svd(A,hermitian=True)
-        elif mode=='eig':
-            M = None if not gen else self.S + self.cond1 * np.eye(self.nparam)
-            if lin:
-                A = np.block([[np.zeros((1,1)),self.g.reshape(1,self.nparam)],
-                              [self.g.reshape(self.nparam,1),A]]) 
-                M = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
-                              [np.zeros((self.nparam,1)),M]]) 
-            #w,_ = spla.eigsh(A,k=1,M=M,tol=CG_TOL,maxiter=MAXITER)
-            w,_ = scipy.linalg.eigh(A,b=M)
-        else:
-            raise NotImplementedError
-        return w
-    def _eig_iterative(self,A,M=None,symm=False):
-        self.terminate = np.array([0])
-        sh = self.nparam
-        deltas = np.zeros(sh,dtype=self.dtype)
-        w = None
-        if RANK==0:
-            t0 = time.time()
-            A = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
-            if M is not None:
-                M = spla.LinearOperator((sh,sh),matvec=M,dtype=self.dtype)
-            eig = spla.eigsh if symm else spla.eigs 
-            w,_ = eig(A,k=1,tol=CG_TOL,maxiter=MAXITER)
-            self.terminate[0] = 1
-            COMM.Bcast(self.terminate,root=0)
-        else:
-            nit = 0
-            while self.terminate[0]==0:
-                nit += 1
-                A(deltas)
-            if RANK==1:
-                print('niter=',nit)
-        return w 
-    def _iterative_hessSVD(self,bare=False):
-        E = self.E if RANK==0 else 0
-        # rmatvec
-        self.xH1 = np.zeros(self.nparam,dtype=self.dtype)
-        if RANK==0:
-            def _rmatvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                COMM.Bcast(x,root=0)
-                xH1 = np.zeros_like(self.xH1)
-                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
-                return self.xH1 / self.n \
-                     - np.dot(x,self.vmean) * self.hmean \
-                     - np.dot(x,self.g) * self.vmean
-        else:
-            def _rmatvec(x):
-                COMM.Bcast(self.terminate,root=0)
-                if self.terminate[0]==1:
-                    return 0 
-                COMM.Bcast(x,root=0)
-                if self.sampler.exact:
-                    xH1 = np.dot(self.f * np.dot(self.v,x),self.h)
-                else:
-                    xH1 = np.dot(np.dot(self.v,x),self.h)
-                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
-                return x 
-
-        def matvec(x):
-            if self.terminate[0]==1:
-                return 0
-            Hx = self.H(x)
-            if self.terminate[0]==1:
-                return 0
-            Sx = self.S(x)
-            if self.terminate[0]==1:
-                return 0
-            return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
-        def rmatvec(x):
-            if self.terminate[0]==1:
-                return 0
-            xH = _rmatvec(x)
-            if self.terminate[0]==1:
-                return 0
-            xS = self.S(x)
-            if self.terminate[0]==1:
-                return 0
-            return xH + (1./self.rate2 - E) * xS + self.cond1 / self.rate2 * x
-        def MM(x):
-            return matvec(rmatvec(x))
-        w = self._eig_iterative(MM,symm=True)
-        if RANK==0:
-            print(w,np.sqrt(w))
+#    def measure(self,fname=None):
+#        self.sample(compute_v=False,compute_h=False)
+#
+#        sendbuf = np.array([self.ham.n])
+#        recvbuf = np.zeros_like(sendbuf) 
+#        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+#        n = recvbuf[0]
+#
+#        sendbuf = self.ham.data
+#        recvbuf = np.zeros_like(sendbuf) 
+#        COMM.Reduce(sendbuf,recvbuf,op=MPI.SUM,root=0)
+#        if RANK>0:
+#            return
+#        data = recvbuf / n
+#        if fname is not None:
+#            f = h5py.File(fname,'w')
+#            f.create_dataset('data',data=data) 
+#            f.close()
+#        self.ham._print(fname,data)
+#    def debug_torch(self,tmpdir,step,rank=None):
+#        if RANK==0:
+#            return
+#        if rank is not None:
+#            if RANK!=rank:
+#                return
+#        f = h5py.File(tmpdir+f'step{step}RANK{RANK}.hdf5','r')
+#        e = f['e'][:]
+#        v = f['v'][:]
+#        configs = f['config'][:]
+#        f.close()
+#        e_new = []
+#        c_new = []
+#        v_new = []
+#        h_new = []
+#        n = len(e)
+#        print(f'RANK={RANK},n={n}')
+#        for i in range(n):
+#            config = tuple(configs[i,:])
+#            cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(
+#                config,compute_v=True,compute_h=True)
+#            if cx is None or np.fabs(ex) > DISCARD:
+#                print(f'RANK={RANK},cx={cx},ex={ex}')
+#                ex = 0.
+#                err = 0.
+#                if compute_v:
+#                    vx = np.zeros(self.nparam,dtype=self.dtype)
+#                if compute_h:
+#                    hx = np.zeros(self.nparam,dtype=self.dtype)
+#            e_new.append(ex) 
+#            c_new.append(cx) 
+#            v_new.append(vx)
+#            h_new.append(hx)
+#            err_e = np.fabs(ex-e[i])
+#            err_v = np.linalg.norm(vx-v[i,:])
+#            if err_e > 1e-6 or err_v > 1e-6: 
+#                print(f'RANK={RANK},config={config},ex={ex},ex_sr={e[i]},err_e={err_e},err_v={err_v}')
+#            #else:
+#            #    print(f'RANK={RANK},i={i}')
+#        f = h5py.File(f'./step{step}RANK{RANK}.hdf5','w')
+#        f.create_dataset('h',data=np.array(h_new))
+#        f.create_dataset('v',data=np.array(v_new))
+#        f.create_dataset('e',data=np.array(e_new))
+#        f.create_dataset('c',data=np.array(c_new))
+#        f.close()
+#    def load(self,size,tmpdir='./'):
+#        if RANK==0:
+#            self.vsum = np.zeros(self.nparam,dtype=self.dtype_o)
+#            self.hsum = np.zeros(self.nparam,dtype=self.dtype_o)
+#            self.evsum = np.zeros(self.nparam,dtype=self.dtype_o)
+#        else:
+#            start = 1 + (RANK-1) * size
+#            self.e = []
+#            self.v = []
+#            self.h = []
+#            for rank in range(start,start+size):
+#                try:
+#                    f = h5py.File(tmpdir+f'step{self.step}RANK{rank}.hdf5','r')
+#                    e = f['e'][:]
+#                    v = f['v'][:]
+#                    h = f['h'][:]
+#                    f.close()
+#                    self.e.append(e.newbyteorder('='))
+#                    self.v.append(v.newbyteorder('='))
+#                    self.h.append(h.newbyteorder('='))
+#                except FileNotFoundError:
+#                    break
+#            self.e = np.concatenate(self.e)
+#            self.v = np.concatenate(self.v,axis=0)
+#            self.h = np.concatenate(self.h,axis=0)
+#            self.vsum = np.sum(self.v,axis=0)
+#            self.hsum = np.sum(self.h,axis=0)
+#            self.evsum = np.dot(self.e,self.v)
+#        self.err_sum = 0.
+#        self.err_max = 0.
+#    def _hess(self,solve_dense=None,mode='eig',gen=True,lin=True):
+#        solve_dense = self.solve_dense if solve_dense is None else solve_dense
+#        self.extract_S(solve_full=True,solve_dense=solve_dense)
+#        self.extract_H(solve_full=True,solve_dense=solve_dense)
+#        if solve_dense:
+#            return self._dense_hess(mode=mode,gen=gen,lin=lin)
+#        else:
+#            return self._iterative_hessSVD()
+#    def _dense_hess(self,mode='eig',gen=True,lin=True):
+#        if RANK>0:
+#            return 
+#        A = self.H - self.E * self.S
+#        #A = self.S
+#        gen = True if lin else gen
+#        if mode=='svd':
+#            #A = A + (self.S + self.cond1 * np.eye(self.nparam))/self.rate2
+#            #_,w,_ = spla.svds(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+#            _,w,_ = np.linalg.svd(A,hermitian=True)
+#        elif mode=='eig':
+#            M = None if not gen else self.S + self.cond1 * np.eye(self.nparam)
+#            if lin:
+#                A = np.block([[np.zeros((1,1)),self.g.reshape(1,self.nparam)],
+#                              [self.g.reshape(self.nparam,1),A]]) 
+#                M = np.block([[np.ones((1,1)),np.zeros((1,self.nparam))],
+#                              [np.zeros((self.nparam,1)),M]]) 
+#            #w,_ = spla.eigsh(A,k=1,M=M,tol=CG_TOL,maxiter=MAXITER)
+#            w,_ = scipy.linalg.eigh(A,b=M)
+#        else:
+#            raise NotImplementedError
+#        return w
+#    def _eig_iterative(self,A,M=None,symm=False):
+#        self.terminate = np.array([0])
+#        sh = self.nparam
+#        deltas = np.zeros(sh,dtype=self.dtype)
+#        w = None
+#        if RANK==0:
+#            t0 = time.time()
+#            A = spla.LinearOperator((sh,sh),matvec=A,dtype=self.dtype)
+#            if M is not None:
+#                M = spla.LinearOperator((sh,sh),matvec=M,dtype=self.dtype)
+#            eig = spla.eigsh if symm else spla.eigs 
+#            w,_ = eig(A,k=1,tol=CG_TOL,maxiter=MAXITER)
+#            self.terminate[0] = 1
+#            COMM.Bcast(self.terminate,root=0)
+#        else:
+#            nit = 0
+#            while self.terminate[0]==0:
+#                nit += 1
+#                A(deltas)
+#            if RANK==1:
+#                print('niter=',nit)
+#        return w 
+#    def _iterative_hessSVD(self,bare=False):
+#        E = self.E if RANK==0 else 0
+#        # rmatvec
+#        self.xH1 = np.zeros(self.nparam,dtype=self.dtype)
+#        if RANK==0:
+#            def _rmatvec(x):
+#                COMM.Bcast(self.terminate,root=0)
+#                COMM.Bcast(x,root=0)
+#                xH1 = np.zeros_like(self.xH1)
+#                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
+#                return self.xH1 / self.n \
+#                     - np.dot(x,self.vmean) * self.hmean \
+#                     - np.dot(x,self.g) * self.vmean
+#        else:
+#            def _rmatvec(x):
+#                COMM.Bcast(self.terminate,root=0)
+#                if self.terminate[0]==1:
+#                    return 0 
+#                COMM.Bcast(x,root=0)
+#                if self.sampler.exact:
+#                    xH1 = np.dot(self.f * np.dot(self.v,x),self.h)
+#                else:
+#                    xH1 = np.dot(np.dot(self.v,x),self.h)
+#                COMM.Reduce(xH1,self.xH1,op=MPI.SUM,root=0)     
+#                return x 
+#
+#        def matvec(x):
+#            if self.terminate[0]==1:
+#                return 0
+#            Hx = self.H(x)
+#            if self.terminate[0]==1:
+#                return 0
+#            Sx = self.S(x)
+#            if self.terminate[0]==1:
+#                return 0
+#            return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
+#        def rmatvec(x):
+#            if self.terminate[0]==1:
+#                return 0
+#            xH = _rmatvec(x)
+#            if self.terminate[0]==1:
+#                return 0
+#            xS = self.S(x)
+#            if self.terminate[0]==1:
+#                return 0
+#            return xH + (1./self.rate2 - E) * xS + self.cond1 / self.rate2 * x
+#        def MM(x):
+#            return matvec(rmatvec(x))
+#        w = self._eig_iterative(MM,symm=True)
+#        if RANK==0:
+#            print(w,np.sqrt(w))
 class SR(SGD):
     def __init__(self,sampler,solve_reduce=False,eigen_thresh=None,**kwargs):
         super().__init__(sampler,**kwargs) 
@@ -753,8 +753,6 @@ class SR(SGD):
             idx = np.triu_indices(sh)
         return to_square(S,sh,idx=idx)
     def _save_grad_hess(self,deltas=None):
-        if not self.save_grad_hess:
-            return
         if RANK>0:
             return
         if self.solve_full:
@@ -915,7 +913,8 @@ class SR(SGD):
                 S = self.S[ix] + self.cond1 * np.eye(stop-start)
                 self.deltas[start:stop] = np.linalg.solve(S,self.g[start:stop])
         print('\tSR solver time=',time.time()-t0)
-        self._save_grad_hess(deltas=self.deltas)
+        if self.save_grad_hess:
+            self._save_grad_hess(deltas=self.deltas)
         return self.deltas
     def _transform_gradients_sr_iterative(self,solve_full):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
@@ -970,13 +969,12 @@ class RGN(SR):
         self.solver = {'lgmres':spla.lgmres,
                        'tfqmr':tfqmr}[solver] 
         self.guess = guess
+        self.solve_symmetric = False
 
         self.rate2 = None # rate for LIN,RGN
         self.cond2 = None
         self.check = [1] 
     def _save_grad_hess(self,deltas=None):
-        if not self.save_grad_hess:
-            return
         if RANK>0:
             return
         if self.solve_full:
@@ -1003,9 +1001,23 @@ class RGN(SR):
         if RANK>0:
             return
         self.hmean = hmean/self.n
+    def _extract_Hcov(self):
+        if RANK==0:
+            hhsum = np.zeros((self.nparam,)*2) 
+        else:
+            if self.sampler.exact:
+                hhsum = np.einsum('s,si,sj->ij',self.f,self.h,self.h)
+            else:
+                hhsum = np.dot(self.h.T,self.h)
+        hhmean = np.zeros_like(hhsum)
+        COMM.Reduce(hhsum,hhmean,op=MPI.SUM,root=0)
+        if RANK>0:
+            return
+        return hhmean/self.n-np.outer(self.hmean,self.hmean)
     def extract_H(self,solve_full,solve_dense):
         fxn = self._get_Hmatrix if solve_dense else self._get_H_iterative
         self.Hx1 = np.zeros(self.nparam,dtype=self.dtype_i)
+        self.Hx1h = np.zeros(self.nparam,dtype=self.dtype_i)
         if solve_full:
             self.H = fxn() 
         else:
@@ -1034,7 +1046,10 @@ class RGN(SR):
         g = self.g[start:stop]
         self.vhmean = vhmean / self.n
         print('\tcollect H matrix time=',time.time()-t0)
-        return self.vhmean - np.outer(vmean,hmean) - np.outer(g,vmean)
+        H = self.vhmean - np.outer(vmean,hmean) - np.outer(g,vmean)
+        if self.solve_symmetric:
+            H = .5*(H+H.T)
+        return H
     def _get_H_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
         if RANK==0:
@@ -1043,9 +1058,26 @@ class RGN(SR):
                 COMM.Bcast(x,root=0)
                 Hx1 = np.zeros_like(self.Hx1[start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
-                return self.Hx1[start:stop] / self.n \
-                     - self.vmean[start:stop] * np.dot(self.hmean[start:stop],x) \
-                     - self.g[start:stop] * np.dot(self.vmean[start:stop],x)
+                Hx = self.Hx1[start:stop] / self.n
+                if self.solve_symmetric:
+                    Hx1h = np.zeros_like(self.Hx1h[start:stop])
+                    COMM.Reduce(Hx1h,self.Hx1h[start:stop],op=MPI.SUM,root=0)     
+                    Hx += self.Hx1h[start:stop] / self.n
+                    Hx /= 2
+ 
+                vdotx = np.dot(self.vmean[start:stop],x)
+                fac = self.vmean[start:stop] * np.dot(self.hmean[start:stop],x)
+                if self.solve_symmetric:
+                    fac += self.hmean[start:stop] * vdotx 
+                    fac /= 2
+                Hx -= fac
+
+                fac = self.g[start:stop] * vdotx 
+                if self.solve_symmetric:
+                    fac += self.vmean[start:stop] * np.dot(self.g[start:stop],x) 
+                    fac /= 2
+                Hx -= fac
+                return Hx 
         else:
             def matvec(x):
                 COMM.Bcast(self.terminate,root=0)
@@ -1057,6 +1089,13 @@ class RGN(SR):
                 else:
                     Hx1 = np.dot(np.dot(self.h[:,start:stop],x),self.v[:,start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
+                if not self.solve_symmetric:
+                    return 0 
+                if self.sampler.exact:
+                    Hx1h = np.dot(self.f * np.dot(self.v[:,start:stop],x),self.h[:,start:stop])
+                else:
+                    Hx1h = np.dot(np.dot(self.v[:,start:stop],x),self.h[:,start:stop])
+                COMM.Reduce(Hx1h,self.Hx1h[start:stop],op=MPI.SUM,root=0)     
                 return 0 
         return matvec
     def transform_gradients(self):
@@ -1157,7 +1196,8 @@ class RGN(SR):
             w = min(np.array(w).real)
             dE = np.sum(dE)
             print(f'\tRGN solver time={time.time()-t0},least eigenvalue={w}')
-        self._save_grad_hess(deltas=self.deltas)
+        if self.save_grad_hess:
+            self._save_grad_hess(deltas=self.deltas)
         return dE
     def _transform_gradients_rgn_iterative(self,solve_full,x0):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
@@ -1178,7 +1218,7 @@ class RGN(SR):
                     return Hx - E * Sx + self.cond2 * x
                 else:
                     return Hx + (1./self.rate2 - E) * Sx + self.cond1 / self.rate2 * x
-            self.deltas = self.solve_iterative(A,g,False,x0=x0)
+            self.deltas = self.solve_iterative(A,g,self.solve_symmetric,x0=x0)
             self.terminate[0] = 0
             hessp = A(self.deltas)
             if RANK==0:
