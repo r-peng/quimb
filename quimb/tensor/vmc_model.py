@@ -3,7 +3,6 @@ import itertools,h5py
 import scipy.linalg
 from .tensor_vmc import (
 #from .tensor_vmc_red import (
-    DISCARD,
     Progbar,
     DenseSampler,
     ExchangeSampler,
@@ -34,11 +33,19 @@ def init(L,fname,eps=1):
     x = np.array(x)
     np.save(fname+'.npy',x)
     print(x)
-def make_matrices(x):
+def make_matrices(x,compute_g=True,compute_ovlp=True,compute_hess=True):
     L = len(x)
-    ovlp = np.zeros((L,2,L,2))
+    e = [np.dot(np.dot(xi,H),xi) for xi in x] 
+    E = sum(e)
+    if not compute_g:
+        return E
     g = [deriv_wf(xi) for xi in x]
+    xHg = [np.dot(np.dot(xi,H),gi) for gi,xi in zip(g,x)]
+    gvec = np.array([xHgi + (E-ei) * xgi for xHgi,ei,xgi in zip(xHg,e,xg)]).flatten()
+    if not compute_ovlp:
+        return E,gvec 
     #g = [deriv_wf2(xi) for xi in x]
+    ovlp = np.zeros((L,2,L,2))
     xg = [np.dot(xi,gi) for gi,xi in zip(g,x)]
     for i in range(L):
         ovlp[i,:,i,:] = np.dot(g[i].T,g[i])
@@ -46,11 +53,10 @@ def make_matrices(x):
             ovlp_ij = np.outer(xg[i],xg[j])
             ovlp[i,:,j,:] = ovlp_ij 
             ovlp[j,:,i,:] = ovlp_ij.T
+    if not compute_hess:
+        return E,gvec,ovlp.reshape(2*L,2*L)
 
     hess = np.zeros((L,2,L,2))
-    xHg = [np.dot(np.dot(xi,H),gi) for gi,xi in zip(g,x)]
-    e = [np.dot(np.dot(xi,H),xi) for xi in x] 
-    E = sum(e)
     for i in range(L):
         hess[i,:,i,:] = np.dot(g[i].T,np.dot(H,g[i]))
         hess[i,:,i,:] += (E-e[i]) * ovlp[i,:,i,:] 
@@ -61,10 +67,9 @@ def make_matrices(x):
             hess[i,:,j,:] = hess_ij
             hess[j,:,i,:] = hess_ij.T
 
-    g = np.array([xHgi + (E-ei) * xgi for xHgi,ei,xgi in zip(xHg,e,xg)]).flatten()
     ovlp = ovlp.reshape(L*2,L*2)
     hess = hess.reshape(L*2,L*2) - E * ovlp
-    return E,g,ovlp,hess
+    return E,gvec,ovlp,hess
 def optimize(x,maxiter,tmpdir,rate1,rate2=.5,eps=.001,save_every=1):
     L,_ = x.shape
     for step in range(maxiter):
@@ -166,19 +171,27 @@ class AmplitudeFactory:
         return cx,ex,vx,hx,0.
     def update(self,x,fname=None,root=0):
         self.x = np.array([wf(xi) for xi in x.reshape(self.nsite,2)])
-        #self.x = x.reshape(self.nsite,2)
+        self.Hx = [np.dot(H,xi) for xi in self.x]
+        if fname is None:
+            return
+        if RANK==root:
+            np.save(fname+'.npy',self.x)
     def parse_config(self,config):
         return config
-    def make_matrices(self,Hcov=False):
+    def make_matrices(self,compute_g=True,compute_ovlp=True,compute_hess=True,compute_Hcov=False):
         L = self.nsite
         e = np.array([np.dot(xi,Hxi) for xi,Hxi in zip(self.x,self.Hx)])
         E = sum(e)
         E2 = L + 2 * sum([e[i]*e[j] for i in range(L) for j in range(i+1,L)]) 
         varE = E2 - E**2
+        if not compute_g:
+            return E,varE
         
         ev = np.array([Hxi+xi*(E-ei) for Hxi,xi,ei in zip(self.Hx,self.x,e)]).flatten()
         v = self.x.flatten()
         g = ev - E * v 
+        if not compute_ovlp:
+            return E,g
 
         S = np.zeros((L,2,L,2))
         for i in range(L):
@@ -189,6 +202,8 @@ class AmplitudeFactory:
                 S[j,:,i,:] = Sij.T
         S = S.reshape(L*2,L*2)
         S -= np.outer(v,v)
+        if not compute_hess:
+            return E,g,S
         
         H1 = np.zeros((L,2,L,2))
         for i in range(L):
@@ -205,7 +220,7 @@ class AmplitudeFactory:
         hvcov = hess.copy()
         hess -= np.outer(g,v)
         hess -= E * S
-        if not Hcov:
+        if not compute_Hcov:
             return E,g,S,hess,hvcov
 
         H2 = np.zeros((L,2,L,2)) 

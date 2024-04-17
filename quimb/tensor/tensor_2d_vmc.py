@@ -32,12 +32,13 @@ def cache_key(config,i,direction,step,Ly):
 # amplitude fxns 
 ####################################################################################
 class AmplitudeFactory2D(AmplitudeFactory):
-    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',from_plq=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=True,from_plq=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly
         self.sites = list(itertools.product(range(self.Lx),range(self.Ly)))
         psi.add_tag('KET')
+        self.normalize = normalize
         self.set_psi(psi) # current state stored in self.psi
 
         self.data_map = self.get_data_map(phys_dim)
@@ -105,7 +106,7 @@ class AmplitudeFactory2D(AmplitudeFactory):
         for key in keys:
             self.cache.pop(key)
     def set_psi(self,psi):
-        self.psi = psi
+        super().set_psi(psi)
         self.cache = dict()
         self.free_ad_cache() 
 ##### compress row methods  #####
