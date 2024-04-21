@@ -87,37 +87,6 @@ RANK = COMM.Get_rank()
 #        if gnorm < CG_TOL:
 #            return xk,0
 #    return xk,1 
-def _rgn_block_solve(H,E,S,g,eta,eps):
-    sh = len(g)
-    # hessian 
-    hess = H - E * S
-    R = S + eta * np.eye(sh)
-
-    w = np.linalg.eigvals(hess+S/eps)
-    print('min eigval=',min(w.real)) 
-
-    deltas = np.linalg.solve(hess + R/eps,g)
-    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess + R/eps,deltas)) 
-    return deltas,dE
-def _newton_block_solve(H,E,S,g,cond,eigen=True,enforce_pos=True):
-    # hessian 
-    hess = H - E * S
-    if eigen:
-        w,v = np.linalg.eig(hess)
-        wmin = np.amin(w.real)
-        tau = max(0.,cond-wmin) if enforce_pos else cond
-        w += tau 
-        deltas = np.dot(v/w.reshape(1,len(g)),np.dot(v.T.conj(),g)).real
-    else:
-        # smallest eigenvalue
-        w = np.linalg.eigvals(hess)
-        wmin = np.amin(w.real)
-        tau = max(0.,cond-wmin) if enforce_pos else cond
-        # solve
-        deltas = np.linalg.solve(hess+tau*np.eye(len(g)),g)
-    # compute model energy
-    dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(hess,deltas))
-    return deltas,dE
 def _lin_block_solve(H,E,S,g,hmean,vmean,cond):
     Hi0 = g
     H0j = hmean - E * vmean
@@ -432,7 +401,8 @@ class SGD: # stochastic sampling
         if RANK==0:
             try:
                 dE = 0 if self.Eold is None else self.E-self.Eold
-                print(f'step={self.step},E={self.E/self.nsite},dE={dE/self.nsite},err={self.Eerr/self.nsite},gmax={np.amax(np.fabs(self.g))}')
+                print(f'step={self.step},E={self.E/self.nsite},dE={dE/self.nsite},err={self.Eerr/self.nsite}')
+                print(f'\tgnorm=',np.linalg.norm(self.g))
             except TypeError:
                 print('E=',self.E)
                 print('Eerr=',self.Eerr)
@@ -966,7 +936,7 @@ class RGN(SR):
         self.solver = {'lgmres':spla.lgmres,
                        'tfqmr':tfqmr}[solver] 
         self.guess = guess
-        self.solve_symmetric = False
+        self.solve_symmetric = 0 
 
         self.rate2 = None # rate for LIN,RGN
         self.cond2 = None
@@ -1018,7 +988,7 @@ class RGN(SR):
         if solve_full:
             self.H = fxn() 
         else:
-            self.H = [None] * self.nsite
+            self.H = [None] * len(self.sampler.af.block_dict)
             for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
                 self.H[ix] = fxn(start=start,stop=stop)
     def _get_Hmatrix(self,start=0,stop=None):
@@ -1044,8 +1014,6 @@ class RGN(SR):
         self.vhmean = vhmean / self.n
         print('\tcollect H matrix time=',time.time()-t0)
         H = self.vhmean - np.outer(vmean,hmean) - np.outer(g,vmean)
-        if self.solve_symmetric:
-            H = .5*(H+H.T)
         return H
     def _get_H_iterative(self,start=0,stop=None):
         stop = self.nparam if stop is None else stop 
@@ -1056,25 +1024,20 @@ class RGN(SR):
                 Hx1 = np.zeros_like(self.Hx1[start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
                 Hx = self.Hx1[start:stop] / self.n
-                if self.solve_symmetric:
-                    Hx1h = np.zeros_like(self.Hx1h[start:stop])
-                    COMM.Reduce(Hx1h,self.Hx1h[start:stop],op=MPI.SUM,root=0)     
-                    Hx += self.Hx1h[start:stop] / self.n
-                    Hx /= 2
- 
-                vdotx = np.dot(self.vmean[start:stop],x)
-                fac = self.vmean[start:stop] * np.dot(self.hmean[start:stop],x)
-                if self.solve_symmetric:
-                    fac += self.hmean[start:stop] * vdotx 
-                    fac /= 2
-                Hx -= fac
 
-                fac = self.g[start:stop] * vdotx 
-                if self.solve_symmetric:
-                    fac += self.vmean[start:stop] * np.dot(self.g[start:stop],x) 
-                    fac /= 2
-                Hx -= fac
-                return Hx 
+                Hx -= self.vmean[start:stop] * np.dot(self.hmean[start:stop],x)
+                Hx -= self.g[start:stop] * np.dot(self.vmean[start:stop],x)
+                return Hx
+            def matvecH(x):
+                COMM.Bcast(self.terminate,root=0)
+                COMM.Bcast(x,root=0)
+                Hx1h = np.zeros_like(self.Hx1h[start:stop])
+                COMM.Reduce(Hx1h,self.Hx1h[start:stop],op=MPI.SUM,root=0)     
+                Hxh = self.Hx1h[start:stop] / self.n
+
+                Hxh -= self.hmean[start:stop] * np.dot(self.vmean[start:stop],x)
+                Hxh -= self.vmean[start:stop] * np.dot(self.g[start:stop],x)
+                return Hxh
         else:
             def matvec(x):
                 COMM.Bcast(self.terminate,root=0)
@@ -1086,30 +1049,22 @@ class RGN(SR):
                 else:
                     Hx1 = np.dot(np.dot(self.h[:,start:stop],x),self.v[:,start:stop])
                 COMM.Reduce(Hx1,self.Hx1[start:stop],op=MPI.SUM,root=0)     
-                if not self.solve_symmetric:
+                return 0
+            def matvecH(x):
+                COMM.Bcast(self.terminate,root=0)
+                if self.terminate[0]==1:
                     return 0 
+                COMM.Bcast(x,root=0)
                 if self.sampler.exact:
                     Hx1h = np.dot(self.f * np.dot(self.v[:,start:stop],x),self.h[:,start:stop])
                 else:
                     Hx1h = np.dot(np.dot(self.v[:,start:stop],x),self.h[:,start:stop])
                 COMM.Reduce(Hx1h,self.Hx1h[start:stop],op=MPI.SUM,root=0)     
                 return 0 
-        return matvec
+        return matvec,matvecH
     def transform_gradients(self):
         return self._transform_gradients_rgn(self.solve_full,self.solve_dense)
     def _transform_gradients_rgn(self,solve_full,solve_dense,sr=None,enforce_pos=True):
-        if RANK==0:
-            E,g,ovlp,hess,_ = self.sampler.af.make_matrices()
-            w = np.linalg.eigvalsh(hess+ovlp/self.rate2)
-            print('exact min eigval=',min(w)) 
-            #print(self.sampler.af.x)
-            #print(self.sampler.af.Hx)
-            #print(self.rate2)
-            #print(E)
-            #print(g)
-            #print(ovlp)
-            #print(hess)
-        
         if sr is None:
             deltas_sr = self._transform_gradients_sr(True,False)
             xnew_sr = self.update(self.rate1*deltas_sr) if RANK==0 else np.zeros_like(deltas_sr)
@@ -1130,16 +1085,17 @@ class RGN(SR):
         #solve_dense = True
         #self.extract_S(solve_full,solve_dense)
         #self.extract_H(solve_full,solve_dense)
-        #dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
-        #deltas_rgn_dense = self.deltas
+        #deltas_rgn_dense,dEm = self._transform_gradients_rgn_dense(solve_full,enforce_pos)
         #solve_dense = False 
         #self.extract_S(solve_full,solve_dense)
         #self.extract_H(solve_full,solve_dense)
         #x0 = deltas_sr * [0,self.rate1,self.rate2,1][self.guess] 
-        #dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
-        #deltas_rgn = self.deltas
+        #deltas_rgn,dEm = self._transform_gradients_rgn_iterative(solve_full,x0)
         #if RANK==0:
+        #    #print(deltas_rgn)
+        #    #print(deltas_rgn_dense)
         #    print('rgn delta error=',np.linalg.norm(deltas_rgn-deltas_rgn_dense))
+        #exit()
 
         rate = self.rate2 if self.pure_newton else 1.
         if self.check is None:
@@ -1171,88 +1127,140 @@ class RGN(SR):
         self.g,self.E,self.Eerr = g,E,Eerr
         dE = np.array(Enew) - E
         Eerr_new = np.array(Eerr_new)
-        print(f'\tpredict={dEm},actual={(dE,Eerr_new)}')
+        print(f'\tpredict={dEm/self.nsite},actual={(dE/self.nsite,Eerr_new/self.nsite)}')
         idx = np.argmin(dE) 
         if dE[idx]<0:
             return xnew_rgn[idx]
         else:
             return xnew_sr
+    def _solve_dense(self,H,S,g):
+        hess = H - self.E * S
+        print('hess norm=',np.linalg.norm(hess))
+        print('ovlp norm=',np.linalg.norm(S))
+        A = hess.copy()
+        b = g.copy()
+        if self.solve_symmetric==1:
+            if not self.pure_newton:
+                A += S/self.rate2 
+            A += self.cond2 * np.eye(len(g))
+            w = np.linalg.eigvals(A)
+            wmin = min(w.real)
+            print('min eigval=',wmin) 
+            M = A
+            b = np.dot(A.T,g)
+            A = np.dot(A.T,A) 
+        else: 
+            if self.solve_symmetric==2:
+                A += A.T
+                A /= 2
+            else:
+                pass
+            if not self.pure_newton:
+                A = hess + S/self.rate2 
+            w = np.linalg.eigvals(A)
+            wmin = min(w.real)
+            print('min eigval=',wmin) 
+            A += (self.cond2 - wmin) * np.eye(len(g))
+            w = np.linalg.eigvals(A)
+            wmin = min(w.real)
+            print('min eigval=',wmin) 
+            M = A 
+        deltas = np.linalg.solve(A,b)
+        dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(M,deltas)) 
+        return deltas,dE
     def _transform_gradients_rgn_dense(self,solve_full,enforce_pos):
         if RANK>0:
             return np.zeros(self.nparam,dtype=self.dtype_i),0. 
         t0 = time.time()
         if solve_full:
-            if self.pure_newton:
-                deltas,dE = _newton_block_solve(self.H,self.E,self.S,self.g,self.cond2,eigen=self.sampler.exact,enforce_pos=enforce_pos) 
-            else:
-                deltas,dE = _rgn_block_solve(self.H,self.E,self.S,self.g,self.cond2,self.rate2) 
+            H,S = [self.H],[self.S]
+            blk_dict = [(0,self.nparam)]
         else:
+            H,S = self.H,self.S
             blk_dict = self.sampler.af.block_dict
-            dE = np.zeros(len(blk_dict))  
-            deltas = np.empty(self.nparam,dtype=self.dtype)
-            for ix,(start,stop) in enumerate(blk_dict):
-                if self.pure_newton:
-                    deltas[start:stop],dE[ix] = _newton_block_solve(
-                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2,enforce_pos=enforce_pos)
-                else:
-                    deltas[start:stop],dE[ix] = _rgn_block_solve(
-                        self.H[ix],self.E,self.S[ix],self.g[start:stop],self.cond2,self.rate2)
-            dE = np.sum(dE)
+        dE = np.zeros(len(blk_dict))  
+        deltas = np.empty(self.nparam,dtype=self.dtype_i)
+        for ix,(start,stop) in enumerate(blk_dict):
+            deltas[start:stop],dE[ix] = self._solve_dense(H[ix],S[ix],self.g[start:stop])
+        dE = np.sum(dE)
         if self.save_grad_hess:
             self._save_grad_hess(deltas=self.deltas)
         return deltas,dE
     def _transform_gradients_rgn_iterative(self,solve_full,x0):
         g = self.g if RANK==0 else np.zeros(self.nparam,dtype=self.dtype_i)
         E = self.E if RANK==0 else 0
+        self.terminate = np.array([0])
         if RANK==0:
             print('pure_newton=',self.pure_newton)
-        if solve_full: 
+        if solve_full:
+            H,S = [self.H],[self.S]
+            blk_dict = [(0,self.nparam)]
+        else:
+            H,S = self.H,self.S
+            blk_dict = self.sampler.af.block_dict
+        def get_A(ix1,ix2): 
             def A(x):
                 if self.terminate[0]==1:
                     return 0
-                Hx = self.H(x)
+                Hx = H[ix1][ix2](x)
                 if self.terminate[0]==1:
                     return 0
-                Sx = self.S(x)
+                Sx = S[ix1](x)
                 if self.terminate[0]==1:
                     return 0
                 if self.pure_newton:
-                    return Hx - E * Sx + self.cond2 * x
+                    return Hx - E * Sx + self.cond2 * x 
                 else:
-                    return Hx + (1./self.rate2 - E) * Sx + self.cond2 / self.rate2 * x
-            deltas = self.solve_iterative(A,g,self.solve_symmetric,x0=x0)
-            self.terminate[0] = 0
-            hessp = A(deltas)
+                    return Hx + (1./self.rate2 - E) * Sx + self.cond2 * x
+            return A
+        def get_Ab(ix):
+            A0 = get_A(ix,0)
+            A1 = get_A(ix,1)
+            if self.solve_symmetric==0:
+               return A0,g
+            if self.solve_symmetric==1:
+               b = A1(g)
+               if RANK>0:
+                   b = g
+               def A(x):
+                    if self.terminate[0]==1:
+                        return 0
+                    Ax = A0(x)
+                    if self.terminate[0]==1:
+                        return 0
+                    AAx = A1(Ax)
+                    return AAx
+               return A,b
+            else:
+               def A(x):
+                    if self.terminate[0]==1:
+                        return 0
+                    A0x = A0(x)
+                    if self.terminate[0]==1:
+                        return 0
+                    A1x = A1(x)
+                    return (A0x+A1x)/2
+               return A,g
+
+        dE = 0.
+        hess_err = 0.
+        deltas = np.empty(self.nparam,dtype=self.dtype_i)
+        symm = (self.solve_symmetric>0)
+        for ix,(start,stop) in enumerate(blk_dict):
             if RANK==0:
-                print('hessian inversion error=',np.linalg.norm(g - hessp))
-                dE = np.dot(deltas,hessp)
-        else:
-            dE = 0.
-            deltas = np.empty(self.nparam,dtype=self.dtype_i)
-            for ix,(start,stop) in enumerate(self.sampler.af.block_dict):
-                if RANK==0:
-                    print(f'ix={ix},sh={stop-start}')
-                def A(x):
-                    if self.terminate[0]==1:
-                        return 0
-                    Hx = self.H[ix](x)
-                    if self.terminate[0]==1:
-                        return 0
-                    Sx = self.S[ix](x)
-                    if self.terminate[0]==1:
-                        return 0
-                    if self.pure_newton:
-                        return Hx - E * Sx + self.cond2 * x
-                    else:
-                        return Hx + (1./self.rate2 - E) * Sx + self.cond2 / self.rate2 * x
-                x0_ = None if x0 is None else x0[start:stop]
-                deltas_ = self.solve_iterative(A,g[start:stop],self.solve_symmetric,x0=x0_)
-                deltas[start:stop] = deltas_
-                self.terminate[0] = 0
-                hessp = A(deltas_)
-                if RANK==0:
-                    dE += np.dot(hessp,deltas_)
+                print(f'ix={ix},sh={stop-start}')
+            x0_ = None if x0 is None else x0[start:stop]
+            A,b = get_Ab(ix)
+            deltas_ = self.solve_iterative(A,b,symm,x0=x0_)
+            deltas[start:stop] = deltas_
+            self.terminate[0] = 0
+            A = get_A(ix,0)
+            hessp = A(deltas_)
+            if RANK==0:
+                hess_err += np.linalg.norm(b-hessp)
+                dE += np.dot(hessp,deltas_)
         if RANK==0:
+            print('hessian inversion error=',hess_err)
             return deltas,- np.dot(self.g,deltas) + .5 * dE
         else:
             return np.zeros(self.nparam,dtype=self.dtype_i),0. 

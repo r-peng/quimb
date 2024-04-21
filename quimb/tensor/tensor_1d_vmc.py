@@ -19,11 +19,12 @@ from .tensor_2d_vmc import (
     ExchangeSampler2D,
 )
 class AmplitudeFactory1D(AmplitudeFactory2D):
-    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',pbc=False,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=True,pbc=False,**compress_opts):
         self.Lx,self.Ly = 1,psi.L
         self.nsite = psi.L
         self.sites = list(range(self.nsite))
         psi.add_tag('KET')
+        self.normalize = normalize
         self.set_psi(psi)
 
         self.data_map = self.get_data_map(phys_dim)
@@ -61,8 +62,6 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         return sites
     def update_cache(self,config=None):
         pass
-    def set_psi(self,psi):
-        self.psi = psi
     def get_mid_env(self,config,append='',psi=None):
         psi = self.psi if psi is None else psi 
         row = psi.copy()
