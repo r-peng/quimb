@@ -1145,7 +1145,8 @@ class RGN(SR):
             A += self.cond2 * np.eye(len(g))
             w = np.linalg.eigvals(A)
             wmin = min(w.real)
-            print('min eigval=',wmin) 
+            wmax = max(w.real)
+            print('min,max eigval=',wmin,wmax) 
             M = A
             b = np.dot(A.T,g)
             A = np.dot(A.T,A) 
@@ -1159,11 +1160,13 @@ class RGN(SR):
                 A = hess + S/self.rate2 
             w = np.linalg.eigvals(A)
             wmin = min(w.real)
-            print('min eigval=',wmin) 
+            wmax = max(w.real)
+            print('min,max eigval=',wmin,wmax) 
             A += (self.cond2 - wmin) * np.eye(len(g))
             w = np.linalg.eigvals(A)
             wmin = min(w.real)
-            print('min eigval=',wmin) 
+            wmax = max(w.real)
+            print('min,max eigval=',wmin,wmax) 
             M = A 
         deltas = np.linalg.solve(A,b)
         dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(M,deltas)) 
