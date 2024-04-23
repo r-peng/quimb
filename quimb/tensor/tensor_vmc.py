@@ -9,7 +9,6 @@ from mpi4py import MPI
 COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
-#MAXITER = 2
 ##################################################################################################
 # VMC utils
 ##################################################################################################
@@ -1132,8 +1131,10 @@ class RGN(SR):
         if dE[idx]<0:
             return xnew_rgn[idx]
         else:
+            self.adjust_rate(1./self.rate_const)
             return xnew_sr
     def _solve_dense(self,H,S,g):
+        print('solve symmetric=',self.solve_symmetric)
         hess = H - self.E * S
         print('hess norm=',np.linalg.norm(hess))
         print('ovlp norm=',np.linalg.norm(S))
