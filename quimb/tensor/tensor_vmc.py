@@ -1131,7 +1131,6 @@ class RGN(SR):
         if dE[idx]<0:
             return xnew_rgn[idx]
         else:
-            self.adjust_rate(1./self.rate_const)
             return xnew_sr
     def _solve_dense(self,H,S,g):
         print('solve symmetric=',self.solve_symmetric)
@@ -1164,10 +1163,10 @@ class RGN(SR):
             wmax = max(w.real)
             print('min,max eigval=',wmin,wmax) 
             A += (self.cond2 - wmin) * np.eye(len(g))
-            w = np.linalg.eigvals(A)
-            wmin = min(w.real)
-            wmax = max(w.real)
-            print('min,max eigval=',wmin,wmax) 
+            #w = np.linalg.eigvals(A)
+            #wmin = min(w.real)
+            #wmax = max(w.real)
+            #print('min,max eigval=',wmin,wmax) 
             M = A 
         deltas = np.linalg.solve(A,b)
         dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(M,deltas)) 
