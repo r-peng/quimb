@@ -32,7 +32,7 @@ def cache_key(config,i,direction,step,Ly):
 # amplitude fxns 
 ####################################################################################
 class AmplitudeFactory2D(AmplitudeFactory):
-    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=True,from_plq=True,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=1.,from_plq=True,**compress_opts):
         # init wfn
         self.Lx,self.Ly = psi.Lx,psi.Ly
         self.nsite = self.Lx * self.Ly

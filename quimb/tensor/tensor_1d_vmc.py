@@ -19,7 +19,7 @@ from .tensor_2d_vmc import (
     ExchangeSampler2D,
 )
 class AmplitudeFactory1D(AmplitudeFactory2D):
-    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=True,pbc=False,**compress_opts):
+    def __init__(self,psi,model,blks=None,phys_dim=2,backend='numpy',normalize=1.,pbc=False,**compress_opts):
         self.Lx,self.Ly = 1,psi.L
         self.nsite = psi.L
         self.sites = list(range(self.nsite))

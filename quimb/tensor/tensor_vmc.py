@@ -1918,11 +1918,11 @@ def write_tn_to_disc(tn, fname, provided_filename=False):
         pickle.dump(tn, f)
     return fname
 import pickle,uuid
-def scale_wfn(psi):
+def scale_wfn(psi,scale=1.):
     for tid in psi.tensor_map:
         tsr = psi.tensor_map[tid]
-        scale = np.amax(np.fabs(tsr.data))
-        tsr.modify(data=tsr.data/scale)
+        s = np.amax(np.fabs(tsr.data))/scale
+        tsr.modify(data=tsr.data/s)
     return psi
 def safe_contract(tn):
     try:
@@ -2093,8 +2093,8 @@ class AmplitudeFactory:
     def write_tn_to_disc(self,tn,fname):
         return write_tn_to_disc(tn,fname)
     def set_psi(self,psi):
-        if self.normalize:
-            psi = scale_wfn(psi)
+        if self.normalize is not None:
+            psi = scale_wfn(psi,scale=self.normalize)
         self.psi = psi
     def update(self,x,fname=None,root=0):
         psi = self.vec2psi(x,inplace=True)
