@@ -362,11 +362,19 @@ class SpinlessGaussianFPEPS: # for quadratic Hamiltonian only
                 D[ix2:ix2+self.M,ix1:ix1+self.M] += Cin[self.M:,:self.M]
                 D[ix2:ix2+self.M,ix2:ix2+self.M] += Cin[self.M:,self.M:]
         return D
-    def get_rho(self,x):
+    def get_rho(self,x,plot=False):
         self.get_K(x)
         A,B,D = self.get_Ct()
+        #print(B.shape)
+        #exit()
         # A,B,D -> Cout 
-        Cout = A - B@torch.linalg.inv(self.add_Cin(D))@B.t() 
+        Cout = self.add_Cin(D)
+        if plot:
+            return A,B,Cout
+
+        Cout = torch.linalg.inv(Cout)@B.t() 
+        Cout = A - B @ Cout
+        #Cout = A - B@torch.linalg.inv(self.add_Cin(D))@B.t() 
         return .5 * (Cout + torch.eye(Cout.size(0)))
     def get_grad(self):
         g1 = [None] * self.nsite

@@ -802,15 +802,16 @@ class J1J2(Model2D): # prototypical next nn model
 # sampler 
 ####################################################################################
 class ExchangeSampler2D(ExchangeSampler):
-    def __init__(self,Lx,Ly,seed=None,burn_in=0,scheme='hv'):
+    def __init__(self,Lx,Ly,seed=None,scheme='hv',beta=1.):
         self.Lx, self.Ly = Lx,Ly
         self.nsite = Lx * Ly
 
         self.rng = np.random.default_rng(seed)
         self.exact = False
         self.dense = False
-        self.burn_in = burn_in 
         self.af = None
+        self.px = None
+        self.beta = beta 
 
         assert scheme in ('hv','blks','random')
         self.scheme = scheme
@@ -849,7 +850,7 @@ class ExchangeSampler2D(ExchangeSampler):
         _,py = self.af._new_log_prob_from_plq(plq,(site1,site2),config_sites,self.af.parse_config(config_new))
         if py is None:
             return cols
-        acceptance = np.exp(py - self.px)
+        acceptance = np.exp(self.beta*(py - self.px))
         if acceptance < self.rng.uniform(): # reject
             return cols
         # accept, update px & config & env_m
@@ -912,7 +913,7 @@ class ExchangeSampler2D(ExchangeSampler):
         py = self.af.log_prob(self.af.parse_config(config_new),i=i)
         if py is None:
             return
-        acceptance = np.exp(py - self.px)
+        acceptance = np.exp(self.beta*(py - self.px))
         if self.rng.uniform() < acceptance: # accept, update px & config & env_m
             self.px = py
             self.config = tuple(config_new) 

@@ -262,14 +262,14 @@ class AmplitudeFactory:
                 H2[j,:,i,:] += 2*hij.T
         H2 = H2.reshape(2*L,2*L) - np.outer(Hv,Hv)
         return E,g,S,hess,hvcov,H2
-class Sampler(ExchangeSampler):
-    def __init__(self,af,burn_in=0,seed=None,every=1):
+class ModelSampler(ExchangeSampler):
+    def __init__(self,af,seed=None,every=1):
         self.af = af
         self.nsite = self.af.nsite
-        self.burn_in = burn_in
         self.rng = np.random.default_rng(seed)
         self.every = every 
         self.exact = False
+        self.px = None
     def sample(self):
         for _ in range(self.every):
             step = self.rng.choice([-1,1])

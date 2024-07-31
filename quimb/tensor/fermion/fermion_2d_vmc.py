@@ -476,15 +476,15 @@ def get_projector_state(Lx,Ly,tsrs,M,site_order=None,spin=None):
         if j>0:
             inds += [f'I{i},{j}_l{mode}_{spin}' for mode in range(M)]  
         tags = f'I{i},{j}',f'ROW{i}',f'COL{j}'
-        print(i,j,inds) 
-        print(tsrs[i,j])
+        #print(i,j,inds) 
+        #print(tsrs[i,j])
         tn.add_tensor(FermionTensor(data=tsrs[i,j],inds=inds,tags=tags),virtual=True) 
     return tn
 def get_fpeps_from_bra_ket(T,I,Lx,Ly):
     from .fermion_2d import FPEPS
-    print(I)
+    #print(I)
     T.add_tensor_network(I.H,virtual=True)
-    print(T)
+    #print(T)
     for i,j in itertools.product(range(Lx),range(Ly)):
         T.contract_tags(f'I{i},{j}',inplace=True)
     T.view_as_(FPEPS,inplace=True,
