@@ -802,7 +802,7 @@ class J1J2(Model2D): # prototypical next nn model
 # sampler 
 ####################################################################################
 class ExchangeSampler2D(ExchangeSampler):
-    def __init__(self,Lx,Ly,seed=None,scheme='hv',beta=1.):
+    def __init__(self,Lx,Ly,seed=None,scheme='hv',beta=1.,burn_in=None):
         self.Lx, self.Ly = Lx,Ly
         self.nsite = Lx * Ly
 
@@ -812,6 +812,7 @@ class ExchangeSampler2D(ExchangeSampler):
         self.af = None
         self.px = None
         self.beta = beta 
+        self.burn_in = burn_in
 
         assert scheme in ('hv','blks','random')
         self.scheme = scheme
@@ -973,6 +974,33 @@ def expand_peps(peps,Dnew,eps=0.):
 
         T.modify(data=data_new)
     return tn
+def get_brickwork_from_peps(peps,typ='h',fname=None):
+    if typ=='v':
+        irange = range(peps.Lx-1)
+        jrange = range(peps.Ly)
+        def get_next(i,j):
+            return i+1,j
+    else:
+        irange = range(peps.Lx)
+        jrange = range(peps.Ly-1)
+        def get_next(i,j):
+            return i,j+1
+    for i,j in itertools.product(irange,jrange):
+        if (i+j)%2==0:
+            continue
+        i2,j2 = get_next(i,j)
+        tag1,tag2 = peps.site_tag(i,j),peps.site_tag(i2,j2)
+        peps.compress_between(tag1,tag2,max_bond=1)
+    if fname is None:
+        return peps
+    import matplotlib.pyplot as plt
+    #plt.rcParams.update({'font.size':16})
+    fig,ax = plt.subplots(nrows=1,ncols=1)
+    fix = {peps.site_tag(i,j):(i,j) for i,j in itertools.product(range(peps.Lx),range(peps.Ly))}
+    peps.draw(show_inds=False,show_tags=False,fix=fix,ax=ax)
+    fig.savefig(fname)
+    return peps 
+
 
 from .tensor_core import Tensor,rand_uuid
 def peps2pbc(peps):
