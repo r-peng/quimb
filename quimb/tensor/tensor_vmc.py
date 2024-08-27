@@ -277,6 +277,8 @@ class SGD: # stochastic sampling
         while True:
             COMM.Recv(self.buf,tag=0)
             if self.buf[-1]>self.step:
+                continue
+                print(f'RANK={RANK},self.buf={self.buf},step={self.step}')
                 raise ValueError
             if self.buf[-1]<self.step:
                 continue
@@ -309,7 +311,7 @@ class SGD: # stochastic sampling
             #if omega > self.omega:
             #    self.config,self.omega = config,omega
             cx,ex,vx,hx,err = self.sampler.af.compute_local_energy(config,compute_v=compute_v,compute_h=compute_h)
-            if cx is None or np.fabs(ex.real) > self.discard:
+            if cx is None or np.fabs(ex.real)/self.nsite > self.discard:
                 print(f'RANK={RANK},cx={cx},ex={ex}')
                 ex = np.zeros(1)[0]
                 err = 0.
@@ -940,7 +942,7 @@ class RGN(SR):
         self.rate2 = None # rate for LIN,RGN
         self.cond2 = None
         self.check = [1] 
-    def _save_grad_hess(self,deltas=None):
+    def _save_grad_hess(self,fname=None,deltas=None):
         if RANK>0:
             return
         if self.solve_full:
@@ -953,7 +955,10 @@ class RGN(SR):
                 H[start:stop,start:stop] = self.H[ix] 
                 S[start:stop,start:stop] = self.S[ix]
         #print(H)
-        f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+        #f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+        if fname is None:
+            return self.E,self.g,S,H
+        f = h5py.File(fname+'.hdf5','w')
         f.create_dataset('H',data=H) 
         f.create_dataset('S',data=S) 
         f.create_dataset('E',data=np.array([self.E])) 

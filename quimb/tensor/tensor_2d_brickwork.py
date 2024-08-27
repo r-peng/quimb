@@ -17,7 +17,7 @@ def _add(T,bd):
     data = np.tensordot(np.ones(1),T.data,axes=0)
     inds = (bd,) + T.inds
     T.modify(data=data,inds=inds)
-def convert(peps,typ='v',fname=None):
+def convert(peps,typ='h',fname=None):
     if typ=='v':
         irange = range(peps.Lx-1)
         jrange = range(peps.Ly)
@@ -57,6 +57,7 @@ def convert(peps,typ='v',fname=None):
 from .tensor_core import Tensor
 from .tensor_2d_tebd import SimpleUpdate as SimpleUpdate_ 
 from autoray import do, dag, conj, reshape
+from .tensor_2d import pairwise
 class SimpleUpdate(SimpleUpdate_):
     def _initialize_gauges(self):
         """Create unit singular values, stored as tensors.
@@ -83,35 +84,80 @@ class SimpleUpdate(SimpleUpdate_):
                 pass
 
         self._old_gauges = {key:val.data for key,val in self._gauges.items()}
+        if ((0,1),(0,2)) in self._gauges: 
+            # currenly only implemented for horizontal break
+            raise NotImplementedError
+    def gen_long_range_path_h(self,ija,ijb):
+        ia,ja = ija
+        ib,jb = ijb
+        if (ia+ja)%2==0:
+            if abs(ib-ia)+abs(jb-ja)==1:# nn
+                return ija,ijb 
+            elif ib-ia==1 and jb-ja==1:
+                return ija,(ia,jb),ijb
+            elif ib-ia==1 and ja-jb==1:
+                return ija,(ib,ja),ijb
+            else:
+                raise NotImplementedError
+        if ib-ia==0 and jb-ja==1:
+            if ia==0:
+                inew = ia+1
+            elif ia==self._psi.Lx-1:
+                inew = ia-1
+            else:
+                inew = ia + np.random.choice([-1,1])
+            return ija,(inew,ja),(inew,jb),ijb
+        elif ib-ia==1 and jb-ja==0:
+            return ija,ijb
+        elif ib-ia==1 and jb-ja==1:
+            return ija,(ib,ja),ijb
+        elif ib-ia==1 and ja-jb==1:
+            return ija,(ia,jb),ijb
+        else:
+            raise NotImplementedError
+    def env_neighbours_h(self,site,string):
+        i,j = site
+        ls = set() 
+        if i>0:
+            ls.add((i-1,j))
+        if j>0 and (i+j)%2==1:
+            ls.add((i,j-1))
+        if j<self._psi.Ly-1 and (i+j)%2==0:
+            ls.add((i,j+1))
+        if i<self._psi.Lx-1:
+            ls.add((i+1,j))
+        return tuple(ls.difference(set(string)))
     def gate(self, U, where):
         """Like ``TEBD2D.gate`` but absorb and extract the relevant gauges
         before and after each gate application.
         """
         ija, ijb = where
 
-        if callable(self.long_range_path_sequence):
-            long_range_path_sequence = self.long_range_path_sequence(ija, ijb)
-        else:
-            long_range_path_sequence = self.long_range_path_sequence
+        #if callable(self.long_range_path_sequence):
+        #    long_range_path_sequence = self.long_range_path_sequence(ija, ijb)
+        #else:
+        #    long_range_path_sequence = self.long_range_path_sequence
 
         if self.long_range_use_swaps:
-            path = tuple(gen_long_range_swap_path(
-                ija, ijb, sequence=long_range_path_sequence))
-            string = swap_path_to_long_range_path(path, ija)
+            #path = tuple(gen_long_range_swap_path(
+            #    ija, ijb, sequence=long_range_path_sequence))
+            #string = swap_path_to_long_range_path(path, ija)
+            raise NotImplementedError
         else:
             # get the string linking the two sites
-            string = path = tuple(gen_long_range_path(
-                ija, ijb, sequence=long_range_path_sequence))
-        print(where,string)
+            #string = path = tuple(gen_long_range_path(
+            #    ija, ijb, sequence=long_range_path_sequence))
+            string = path = self.gen_long_range_path_h(ija,ijb) 
 
-        def env_neighbours(i, j):
-            return tuple(filter(
-                lambda coo: self._psi.valid_coo((coo)) and coo not in string,
-                nearest_neighbors((i, j))
-            ))
+        #def env_neighbours(i, j):
+        #    return tuple(filter(
+        #        lambda coo: self._psi.valid_coo((coo)) and coo not in string,
+        #        nearest_neighbors((i, j))
+        #    ))
 
         # get the relevant neighbours for string of sites
-        neighbours = {site: env_neighbours(*site) for site in string}
+        #neighbours = {site: env_neighbours(*site) for site in string}
+        neighbours = {site: self.env_neighbours_h(site,string) for site in string}
 
         # absorb the 'outer' gauges from these neighbours
         for site in string:
