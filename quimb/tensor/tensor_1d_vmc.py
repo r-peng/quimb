@@ -163,12 +163,13 @@ class J1J2(Model1D):
     def pair_terms(self,i1,i2):
         return [(1-i1,1-i2,.5)]
 class ExchangeSampler1D(ExchangeSampler2D):
-    def __init__(self,L,beta=1.,seed=None,nsweep=1):
+    def __init__(self,L,beta=1.,burn_in=None,seed=None,nsweep=1):
         self.Lx,self.Ly = 1,L
         self.nsite = L
         self.af = None
         self.px = None
         self.beta = beta
+        self.burn_in = burn_in
 
         self.rng = np.random.default_rng(seed)
         self.exact = False
