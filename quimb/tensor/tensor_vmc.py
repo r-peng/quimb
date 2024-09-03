@@ -1070,7 +1070,7 @@ class RGN(SR):
         return self._transform_gradients_rgn(self.solve_full,self.solve_dense)
     def _transform_gradients_rgn(self,solve_full,solve_dense,sr=None,enforce_pos=True):
         if sr is None:
-            deltas_sr = self._transform_gradients_sr(True,False)
+            deltas_sr = self._transform_gradients_sr(self.solve_full,self.solve_dense)
             xnew_sr = self.update(self.rate1*deltas_sr) if RANK==0 else np.zeros_like(deltas_sr)
         else:
             xnew_sr,deltas_sr = sr
@@ -1138,6 +1138,7 @@ class RGN(SR):
         else:
             return xnew_sr
     def _solve_dense(self,H,S,g):
+        t0 = time.time()
         print('solve symmetric=',self.solve_symmetric)
         hess = H - self.E * S
         print('hess norm=',np.linalg.norm(hess))
@@ -1163,11 +1164,12 @@ class RGN(SR):
                 pass
             if not self.pure_newton:
                 A = hess + S/self.rate2 
-            w = np.linalg.eigvals(A)
-            wmin = min(w.real)
-            wmax = max(w.real)
-            print('min,max eigval=',wmin,wmax) 
-            A += (self.cond2 - wmin) * np.eye(len(g))
+            #w = np.linalg.eigvals(A)
+            #wmin = min(w.real)
+            #wmax = max(w.real)
+            #print('min,max eigval=',wmin,wmax) 
+            #A += (self.cond2 - wmin) * np.eye(len(g))
+            A += self.cond2 * np.eye(len(g))
             #w = np.linalg.eigvals(A)
             #wmin = min(w.real)
             #wmax = max(w.real)
@@ -1175,6 +1177,7 @@ class RGN(SR):
             M = A 
         deltas = np.linalg.solve(A,b)
         dE = - np.dot(deltas,g) + .5 * np.dot(deltas,np.dot(M,deltas)) 
+        print('\tRGN solver time=',time.time()-t0)
         return deltas,dE
     def _transform_gradients_rgn_dense(self,solve_full,enforce_pos):
         if RANK>0:
