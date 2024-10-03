@@ -292,11 +292,12 @@ class ModelDenseSampler(DenseSampler):
     def get_all_configs(self,fix_sector=None):
         return list(itertools.product((0,1),repeat=self.nsite))
 class Model:
-    def __init__(self,theta):
+    def __init__(self,theta,ham=None):
         self.nsite = self.nparam = len(theta)
         self.theta = theta
         self.wfn = np.stack([np.sin(theta),np.cos(theta)],axis=1)
         self.prob = self.wfn**2
+        self.ham = np.ones(self.nsite) if ham is None else ham
     def parse_config(self,config):
         return config
     def get_x(self):
@@ -308,14 +309,15 @@ class Model:
         return np.prod(ls)
     def eloc(self,x):
         ls = np.array([self.wfn[i,1-xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
-        return ls.sum()
+        return np.dot(ls,self.ham)
     def nu(self,x):
         ls = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
         return ls
     def h(self,x):
-        ex = np.array([self.wfn[i,1-xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
+        ex = self.ham*np.array([self.wfn[i,1-xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
         vx = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
-        hx = vx * (ex.sum() - ex) - np.power(-np.ones(self.nsite),x)
+        hx2 = self.ham*np.power(-np.ones(self.nsite),x)
+        hx = vx * (ex.sum() - ex) - hx2 
         return hx
     def compute_local_energy(self,config,compute_v=True,compute_h=True):
         cx = self.amplitude(config) 
@@ -336,68 +338,96 @@ class Model:
         if RANK==root:
             np.save(fname+'.npy',self.theta)
     def exact_expectation(self):
-        self.e = np.prod(self.wfn,axis=1)*2
+        self.e = np.prod(self.wfn,axis=1)*2*self.ham
         self.esum = self.e.sum()
         self.eqsum = self.quad_sum0()
 
-        self.g = self.wfn[:,1]**2-self.wfn[:,0]**2
+        self.g = (self.wfn[:,1]**2-self.wfn[:,0]**2)*self.ham
         self.S = np.eye(self.nsite)
         self.H = np.eye(self.nsite)
         np.fill_diagonal(self.H,self.esum-2*self.e)
-
     def exact_variance(self):
         N = self.nsite
         wfn = self.wfn
 
-        self.evar_1 = N + self.eqsum 
-        self.evar = N - (self.e**2).sum()
+        esqsum = (self.e**2).sum()
+        self.evar = N - esqsum 
 
         mu = wfn[:,1]**4/wfn[:,0]**2+wfn[:,0]**4/wfn[:,1]**2 
         xi = wfn[:,1]**3/wfn[:,0]+wfn[:,0]**3/wfn[:,1]
-        self.gvar_1 = mu + N-1 + 2*xi*(self.esum-self.e)
-        for i in range(N):
-            self.gvar_1[i] += self.quad_sum1(i) 
-        self.gvar = self.gvar_1 - self.g**2
+        self.gvar = mu + L - 1 + 2*self.e*(self.e-xi) - esqsum - self.g**2
 
-        self.Svar_1 = np.ones((N,N)) 
-        np.fill_diagonal(self.Svar_1,mu)
-        self.Svar = self.Svar_1 - np.eye(N)
-
-        self.Hvar_1 = np.ones((N,N))
-        
-        tmp = np.zeros((N,N))
-        for i in range(N):
-            for j in range(N):
-                if i==j:
-                    tmp[i,i] = xi[i]*(self.esum-self.e[i])
-                else:
-                    tmp[i,j] = self.e[i]*(xi[j]+self.esum-self.e[i]-self.e[j])
-        self.Hvar_1 -= 2*tmp
-        
-        tmp = np.zeros((N,N))
-        for i in range(N):
-            for j in range(N):
-                if i==j:
-                    tmp[i,i] = mu[i]*(self.quad_sum1(i)+N-1)
-                else:
-                    tmp[i,j] = mu[j] + N-2 + 2*xi[j]*(self.esum-self.e[i]-self.e[j]) + self.quad_sum2(i,j)
-        self.Hvar_1 += tmp
+        self.Svar = np.ones((N,N)) 
+        np.fill_diagonal(self.Svar,mu-np.ones(N))
 
         self.Hvar = np.zeros((N,N))
         for i in range(N):
+            self.Hvar[i,i] = 1-2*xi[i]*(self.esum-self.e[i])+mu[i]*(L-1+self.quad_sum1(i))
+            #self.Hvar[i,i] -= (self.esum-2*self.e[i])**2
             for j in range(N):
                 if i==j:
-                    self.Hvar[i,i] = 1-2*xi[i]*(self.esum-self.e[i])+mu[i]*(N-1)
-                    self.Hvar[i,i] += mu[i]*self.quad_sum1(i)-(self.esum-2*self.e[i])**2
-                else:
-                    self.Hvar[i,j] = mu[j]-2*self.e[i]*xi[j]+N-1
-                    self.Hvar[i,j] += 2*(xi[j]-self.e[i])*(self.esum-self.e[i]-self.e[j])+self.quad_sum2(i,j)
-        assert np.linalg.norm(self.Hvar_1-self.H**2-self.Hvar)<1e-6
+                    continue
+                self.Hvar[i,j] = mu[j]-2*self.e[i]*xi[j]+L-1+2*(xi[j]-self.e[i])*(self.esum-self.e[i]-self.e[j])+self.quad_sum2(i,j)
+#    def exact_variance(self):
+#        N = self.nsite
+#        wfn = self.wfn
+#
+#        ham_sq = self.ham**2
+#        ham_sq_sum = ham_sq.sum()
+#        self.evar_1 = ham_sq_sum + self.eqsum 
+#        self.evar = ham_sq_sum - (self.e**2).sum()
+#
+#        mu = wfn[:,1]**4/wfn[:,0]**2+wfn[:,0]**4/wfn[:,1]**2 
+#        xi = wfn[:,1]**3/wfn[:,0]+wfn[:,0]**3/wfn[:,1]
+#        self.gvar_1 = (mu-1)*ham_sq + ham_sq_sum + 2*self.ham*xi*(self.esum-self.e)
+#        for i in range(N):
+#            self.gvar_1[i] += self.quad_sum1(i) 
+#        self.gvar = self.gvar_1 - self.g**2
+#
+#        self.gvar2 = mu + N - 1 + 2*(self.e-xi)*self.e - (self.e**2).sum()
+#
+#        self.Svar_1 = np.ones((N,N)) 
+#        np.fill_diagonal(self.Svar_1,mu)
+#        self.Svar = self.Svar_1 - np.eye(N)
+#
+#        self.Hvar_1 = np.zeros((N,N))
+#        tmp = np.zeros((N,N))
+#        for i in range(N):
+#            self.Hvar_1[i,:] = ham_sq[i]
+#            for j in range(N):
+#                if i==j:
+#                    tmp[i,i] = self.ham[i]*xi[i]*(self.esum-self.e[i])
+#                else:
+#                    tmp[i,j] = self.e[i]*(self.ham[j]*xi[j]+self.esum-self.e[i]-self.e[j])
+#        self.Hvar_1 -= 2*tmp
+#        
+#        tmp = np.zeros((N,N))
+#        for i in range(N):
+#            for j in range(N):
+#                if i==j:
+#                    tmp[i,i] = mu[i]*(self.quad_sum1(i)+ham_sq_sum-ham_sq[i])
+#                else:
+#                    tmp[i,j] = mu[j]*ham_sq[j] + ham_sq_sum - ham_sq[i] - ham_sq[j] + 2*xi[j]*self.ham[j]*(self.esum-self.e[i]-self.e[j]) + self.quad_sum2(i,j)
+#        self.Hvar_1 += tmp
+#
+#        self.Hvar = np.zeros((N,N))
+#        for i in range(N):
+#            for j in range(N):
+#                if i==j:
+#                    self.Hvar[i,i] = ham_sq[i]*(1-mu[i])-2*self.ham[i]*xi[i]*(self.esum-self.e[i])+mu[i]*ham_sq_sum
+#                    self.Hvar[i,i] += mu[i]*self.quad_sum1(i)-(self.esum-2*self.e[i])**2
+#                else:
+#                    self.Hvar[i,j] = ham_sq[j]*(mu[j]-1)-2*self.e[i]*self.ham[j]*xi[j]+ham_sq_sum
+#                    self.Hvar[i,j] += 2*(self.ham[j]*xi[j]-self.e[i])*(self.esum-self.e[i]-self.e[j])+self.quad_sum2(i,j)
+#        assert np.linalg.norm(self.Hvar_1-self.H**2-self.Hvar)<1e-6
     def hilbert_sum(self,thresh=1e-10):
         evar = 0
         e = 0
         gvar = 0 
         g = 0
+        gvar2 = 0
+        g2 = 0
+        v = 0
         Svar = 0 
         S = 0 
         Hvar = 0
@@ -412,8 +442,9 @@ class Model:
             e += px * ex
         
             vx = self.nu(x)
-            gvar += px * ex**2 * vx**2
-            g += px * ex*vx
+            gvar += px * (ex-self.esum)**2*vx**2
+            g += px * (ex-self.esum)*vx
+            v += px * vx
         
             Svar += px * np.outer(vx**2,vx**2)
             S += px * np.outer(vx,vx)
@@ -422,15 +453,21 @@ class Model:
             Hvar += px * np.outer(hx**2,vx**2)
             H += px * np.outer(hx,vx)
 
-        assert abs(evar-self.evar_1)<thresh 
+        evar -= e**2
+        assert abs(evar-self.evar)<thresh 
         assert abs(e-self.esum)<thresh 
-        assert np.linalg.norm(gvar-self.gvar_1)<thresh
+
+        gvar -= g**2
+        assert np.linalg.norm(gvar-self.gvar)<thresh
         assert np.linalg.norm(g-self.g)<thresh
-        assert np.linalg.norm(Svar-self.Svar_1)<thresh
+
+        Svar -= S
+        assert np.linalg.norm(Svar-self.Svar)<thresh
         assert np.linalg.norm(S-self.S)<thresh
+
         assert np.linalg.norm(Hvar-self.Hvar_1)<thresh
         assert np.linalg.norm(H-self.H)<thresh
-        print('expresion checked')
+        print('expression checked')
     def quad_sum0(self):
         return self.esum**2-(self.e**2).sum()
     def quad_sum1(self,i):
@@ -438,7 +475,6 @@ class Model:
     def quad_sum2(self,i,j):
         eij = self.e[i] + self.e[j]
         return self.eqsum - 2*eij*(self.esum-eij) - 2*self.e[j]*self.e[i]
-
 def init(N,nrun,perr,scale=0.01):
     ei = np.random.normal(loc=perr/100,scale=scale,size=(N,nrun))-1
     assert len(ei[ei<-1])==0
