@@ -347,11 +347,11 @@ class Model:
         self.H = np.eye(self.nsite)
         np.fill_diagonal(self.H,self.esum-2*self.e)
     def exact_variance(self):
-        N = self.nsite
+        N = L = self.nsite
         wfn = self.wfn
 
         esqsum = (self.e**2).sum()
-        self.evar = N - esqsum 
+        self.evar = L - esqsum 
 
         mu = wfn[:,1]**4/wfn[:,0]**2+wfn[:,0]**4/wfn[:,1]**2 
         xi = wfn[:,1]**3/wfn[:,0]+wfn[:,0]**3/wfn[:,1]
@@ -362,12 +362,16 @@ class Model:
 
         self.Hvar = np.zeros((N,N))
         for i in range(N):
-            self.Hvar[i,i] = 1-2*xi[i]*(self.esum-self.e[i])+mu[i]*(L-1+self.quad_sum1(i))
-            #self.Hvar[i,i] -= (self.esum-2*self.e[i])**2
+            esumi = self.esum-self.e[i]
+            self.Hvar[i,i] = 1-2*xi[i]*esumi+mu[i]*(L-1+self.quad_sum1(i))
+
+            self.Hvar[i,i] += 3*self.g[i]**2-2*self.g[i]*(wfn[i,1]**3/wfn[i,0]-wfn[i,0]**3/wfn[i,1])*esumi
+            self.Hvar[i,i] -= (self.esum-2*self.e[i])**2
             for j in range(N):
                 if i==j:
                     continue
-                self.Hvar[i,j] = mu[j]-2*self.e[i]*xi[j]+L-1+2*(xi[j]-self.e[i])*(self.esum-self.e[i]-self.e[j])+self.quad_sum2(i,j)
+                self.Hvar[i,j] = mu[i]-2*xi[i]*self.e[j]+L-1+2*(xi[i]-self.e[j])*(esumi-self.e[j])+self.quad_sum2(i,j)
+                self.Hvar[i,j] -= self.g[j]**2
 #    def exact_variance(self):
 #        N = self.nsite
 #        wfn = self.wfn
@@ -425,13 +429,14 @@ class Model:
         e = 0
         gvar = 0 
         g = 0
-        gvar2 = 0
-        g2 = 0
         v = 0
         Svar = 0 
         S = 0 
         Hvar = 0
+        T2 = 0
+        T3 = 0
         H = 0
+        h = 0
         print('check expresion...')
         for x in itertools.product((0,1),repeat=self.nsite):
             cx = self.amplitude(x)
@@ -450,24 +455,70 @@ class Model:
             S += px * np.outer(vx,vx)
         
             hx = self.h(x)
-            Hvar += px * np.outer(hx**2,vx**2)
-            H += px * np.outer(hx,vx)
+            h += px*hx
+            Hvar += px * np.outer(vx**2,(hx-self.g)**2)
+            H += px * np.outer(vx,hx-self.g)
 
         evar -= e**2
+        print('evar=',evar)
         assert abs(evar-self.evar)<thresh 
         assert abs(e-self.esum)<thresh 
 
         gvar -= g**2
+        print('gvar=',np.linalg.norm(gvar))
         assert np.linalg.norm(gvar-self.gvar)<thresh
         assert np.linalg.norm(g-self.g)<thresh
 
-        Svar -= S
+        Svar -= S**2
+        print('Svar=',np.linalg.norm(Svar))
         assert np.linalg.norm(Svar-self.Svar)<thresh
         assert np.linalg.norm(S-self.S)<thresh
 
-        assert np.linalg.norm(Hvar-self.Hvar_1)<thresh
+        Hvar -= H**2
+        print(Hvar)
+        assert np.linalg.norm(h-g)<thresh
         assert np.linalg.norm(H-self.H)<thresh
+        assert np.linalg.norm(Hvar-self.Hvar)<thresh
         print('expression checked')
+    def hilbert_sum2(self):
+        X = 0
+        Y = 0
+        Xsq = 0
+        Ysq = 0
+        XY = 0
+        h = 0
+
+        Z = 0
+        Zsq = 0
+        for x in itertools.product((0,1),repeat=self.nsite):
+            cx = self.amplitude(x)
+            px = cx**2
+
+            ex = self.eloc(x)-self.esum
+            vx = self.nu(x)
+            hx = self.h(x) - ex*vx
+
+            Xx = ex*np.outer(vx,vx)
+            X += px*Xx
+            Xsq += px*Xx**2
+
+            h += px*hx
+            Yx = np.outer(vx,hx)
+            Y += px*Yx
+            Ysq += px*Yx**2
+
+            XY += px*Xx*Yx
+
+            Zx = Xx + Yx
+            Z += px*Zx
+            Zsq += px*Zx**2
+        H = X+Y
+        varH = Xsq-X**2+Ysq-Y**2+2*(XY-X*Y)
+        print(np.linalg.norm(H-self.H))
+        print(np.linalg.norm(Z-self.H))
+        print(varH)
+        print(Zsq-Z**2)
+        print(h)
     def quad_sum0(self):
         return self.esum**2-(self.e**2).sum()
     def quad_sum1(self,i):
