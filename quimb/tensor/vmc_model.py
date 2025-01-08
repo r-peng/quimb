@@ -14,7 +14,7 @@ COMM = MPI.COMM_WORLD
 SIZE = COMM.Get_size()
 RANK = COMM.Get_rank()
 
-#H = np.array([[0., 1.], [1., 0.]])
+
 #def wf(x):
 #    return x/np.linalg.norm(x)
 #def deriv_wf2(x,eps=1e-4):
@@ -136,131 +136,133 @@ RANK = COMM.Get_rank()
 #    S = to_square(vv,sh=nparam) - np.outer(v,v)
 #    hess = vh.reshape(nparam,nparam) - np.outer(v,h) - np.outer(g,v) - E * S
 #    return E,g,S,hess
-#class AmplitudeFactory:
-#    def __init__(self,x):
-#        self.x = x
-#        self.Hx = [np.dot(H,xi) for xi in x]
-#        self.nsite = len(self.Hx)
-#        self.nparam = 2 * self.nsite
-#    def get_x(self):
-#        return np.array(self.x).flatten()
-#    def log_prob(self,config):
-#        return np.log(np.array([xi[ci] for xi,ci in zip(self.x,config)])**2).sum()
-#    def compute_local_energy(self,config,compute_v=True,compute_h=True):
-#        cx = np.array([xi[ci] for xi,ci in zip(self.x,config)]).prod()
-#        ex = sum([Hxi[ci]/xi[ci] for Hxi,xi,ci in zip(self.Hx,self.x,config)])
-#        vx = None
-#        if compute_v:
-#            vx = np.zeros((self.nsite,2))
-#            for i,(xi,ci) in enumerate(zip(self.x,config)):
-#                vx[i,ci] = 1/xi[ci]
-#        #print(config,vx)
-#
-#        hx = None
-#        if compute_h:
-#            hx = np.zeros((self.nsite,2))
-#            for i,(Hxi,xi,ci) in enumerate(zip(self.Hx,self.x,config)):
-#                hx[i] = np.dot(H,vx[i])
-#                hx[i] += (ex-Hxi[ci]/xi[ci]) * vx[i]
-#
-#        if compute_v:
-#            vx = vx.flatten()
-#        if compute_h:
-#            hx = hx.flatten()
-#        return cx,ex,vx,hx,0.
-#    def update(self,x,fname=None,root=0):
-#        self.x = np.array([wf(xi) for xi in x.reshape(self.nsite,2)])
-#        self.Hx = [np.dot(H,xi) for xi in self.x]
-#        if fname is None:
-#            return
-#        if RANK==root:
-#            np.save(fname+'.npy',self.x)
-#    def parse_config(self,config):
-#        return config
-#    def make_matrices(self,compute_g=True,compute_ovlp=True,compute_hess=True,compute_Hcov=False):
-#        L = self.nsite
-#        e = np.array([np.dot(xi,Hxi) for xi,Hxi in zip(self.x,self.Hx)])
-#        E = sum(e)
-#        E2 = L + 2 * sum([e[i]*e[j] for i in range(L) for j in range(i+1,L)]) 
-#        varE = E2 - E**2
-#        if not compute_g:
-#            return E,varE
-#        
-#        ev = np.array([Hxi+xi*(E-ei) for Hxi,xi,ei in zip(self.Hx,self.x,e)]).flatten()
-#        v = self.x.flatten()
-#        g = ev - E * v 
-#        if not compute_ovlp:
-#            return E,g
-#
-#        S = np.zeros((L,2,L,2))
-#        for i in range(L):
-#            S[i,:,i,:] = np.eye(2)
-#            for j in range(i+1,L):
-#                Sij = np.outer(self.x[i],self.x[j])
-#                S[i,:,j,:] = Sij
-#                S[j,:,i,:] = Sij.T
-#        S = S.reshape(L*2,L*2)
-#        S -= np.outer(v,v)
-#        if not compute_hess:
-#            return E,g,S
-#        
-#        H1 = np.zeros((L,2,L,2))
-#        for i in range(L):
-#            H1[i,:,i,:] = H + np.eye(2)*(E-e[i])           
-#            for j in range(i+1,L):
-#                Hij = np.outer(self.Hx[i],self.x[j]) 
-#                Hij += np.outer(self.x[i],self.Hx[j])
-#                Hij += np.outer(self.x[i],self.x[j]) * (E-e[i]-e[j]) 
-#                H1[i,:,j,:] = Hij
-#                H1[j,:,i,:] = Hij.T
-#        hess = H1.reshape(L*2,L*2)
-#        Hv = ev 
-#        hess -= np.outer(v,Hv)
-#        hvcov = hess.copy()
-#        hess -= np.outer(g,v)
-#        hess -= E * S
-#        if not compute_Hcov:
-#            return E,g,S,hess,hvcov
-#
-#        H2 = np.zeros((L,2,L,2)) 
-#        for i in range(L):
-#            H2[i,:,i,:] = L*np.eye(2)
-#            hii = np.zeros((2,2))
-#            for k in range(L):
-#                for l in range(k+1,L):
-#                    if k==i:
-#                        hii += e[l] * H
-#                    else:
-#                        if l==i:
-#                            hii += e[k] * H
-#                        else:
-#                            hii += e[k] * e[l] *np.eye(2)
-#            H2[i,:,i,:] += 2*hii
-#            for j in range(i+1,L):
-#                hij = np.outer(self.x[i],self.x[j]) * L
-#                H2[i,:,j,:] = hij
-#                H2[j,:,i,:] = hij.T
-#                hij = np.zeros((2,2))
-#                for k in range(L):
-#                    for l in range(k+1,L):
-#                        if k==i:
-#                            if l==j:
-#                                hij += np.outer(self.Hx[i],self.Hx[j])
-#                            else:
-#                                hij += np.outer(self.Hx[i],self.x[j])*e[l]
-#                        elif k==j:
-#                            hij += np.outer(self.x[i],self.Hx[j])*e[l]
-#                        else:
-#                            if l==i:
-#                                hij += np.outer(self.Hx[i],self.x[j])*e[k]
-#                            elif l==j:
-#                                hij += np.outer(self.x[i],self.Hx[j])*e[k]
-#                            else:
-#                                hij += np.outer(self.x[i],self.x[j])*e[k]*e[l]
-#                H2[i,:,j,:] += 2*hij
-#                H2[j,:,i,:] += 2*hij.T
-#        H2 = H2.reshape(2*L,2*L) - np.outer(Hv,Hv)
-#        return E,g,S,hess,hvcov,H2
+class AmplitudeFactory:
+    def __init__(self,x):
+        self.x = x
+        self.prob = self.x**2
+        self.X = np.array([[0., 1.], [1., 0.]])
+        self.Hx = [np.dot(self.X,xi) for xi in x]
+        self.nsite = len(self.Hx)
+        self.nparam = 2 * self.nsite
+    def get_x(self):
+        return np.array(self.x).flatten()
+    def log_prob(self,config):
+        return np.log(np.array([xi[ci] for xi,ci in zip(self.x,config)])**2).sum()
+    def compute_local_energy(self,config,compute_v=True,compute_h=True):
+        cx = np.array([xi[ci] for xi,ci in zip(self.x,config)]).prod()
+        ex = sum([Hxi[ci]/xi[ci] for Hxi,xi,ci in zip(self.Hx,self.x,config)])
+        vx = None
+        if compute_v:
+            vx = np.zeros((self.nsite,2))
+            for i,(xi,ci) in enumerate(zip(self.x,config)):
+                vx[i,ci] = 1/xi[ci]
+        #print(config,vx)
+
+        hx = None
+        if compute_h:
+            hx = np.zeros((self.nsite,2))
+            for i,(Hxi,xi,ci) in enumerate(zip(self.Hx,self.x,config)):
+                hx[i] = np.dot(self.X,vx[i])
+                hx[i] += (ex-Hxi[ci]/xi[ci]) * vx[i]
+
+        if compute_v:
+            vx = vx.flatten()
+        if compute_h:
+            hx = hx.flatten()
+        return cx,ex,vx,hx,0.
+    def update(self,x,fname=None,root=0):
+        self.x = np.array([wf(xi) for xi in x.reshape(self.nsite,2)])
+        self.Hx = [np.dot(self.X,xi) for xi in self.x]
+        if fname is None:
+            return
+        if RANK==root:
+            np.save(fname+'.npy',self.x)
+    def parse_config(self,config):
+        return config
+    def make_matrices(self,compute_g=True,compute_ovlp=True,compute_hess=True,compute_Hcov=False):
+        L = self.nsite
+        e = np.array([np.dot(xi,Hxi) for xi,Hxi in zip(self.x,self.Hx)])
+        E = sum(e)
+        E2 = L + 2 * sum([e[i]*e[j] for i in range(L) for j in range(i+1,L)]) 
+        varE = E2 - E**2
+        if not compute_g:
+            return E,varE
+        
+        ev = np.array([Hxi+xi*(E-ei) for Hxi,xi,ei in zip(self.Hx,self.x,e)]).flatten()
+        v = self.x.flatten()
+        g = ev - E * v 
+        if not compute_ovlp:
+            return E,g
+
+        S = np.zeros((L,2,L,2))
+        for i in range(L):
+            S[i,:,i,:] = np.eye(2)
+            for j in range(i+1,L):
+                Sij = np.outer(self.x[i],self.x[j])
+                S[i,:,j,:] = Sij
+                S[j,:,i,:] = Sij.T
+        S = S.reshape(L*2,L*2)
+        S -= np.outer(v,v)
+        if not compute_hess:
+            return E,g,S
+        
+        H1 = np.zeros((L,2,L,2))
+        for i in range(L):
+            H1[i,:,i,:] = self.X + np.eye(2)*(E-e[i])           
+            for j in range(i+1,L):
+                Hij = np.outer(self.Hx[i],self.x[j]) 
+                Hij += np.outer(self.x[i],self.Hx[j])
+                Hij += np.outer(self.x[i],self.x[j]) * (E-e[i]-e[j]) 
+                H1[i,:,j,:] = Hij
+                H1[j,:,i,:] = Hij.T
+        hess = H1.reshape(L*2,L*2)
+        Hv = ev 
+        hess -= np.outer(v,Hv)
+        hvcov = hess.copy()
+        hess -= np.outer(g,v)
+        hess -= E * S
+        if not compute_Hcov:
+            return E,g,S,hess,hvcov
+
+        H2 = np.zeros((L,2,L,2)) 
+        for i in range(L):
+            H2[i,:,i,:] = L*np.eye(2)
+            hii = np.zeros((2,2))
+            for k in range(L):
+                for l in range(k+1,L):
+                    if k==i:
+                        hii += e[l] * H
+                    else:
+                        if l==i:
+                            hii += e[k] * H
+                        else:
+                            hii += e[k] * e[l] *np.eye(2)
+            H2[i,:,i,:] += 2*hii
+            for j in range(i+1,L):
+                hij = np.outer(self.x[i],self.x[j]) * L
+                H2[i,:,j,:] = hij
+                H2[j,:,i,:] = hij.T
+                hij = np.zeros((2,2))
+                for k in range(L):
+                    for l in range(k+1,L):
+                        if k==i:
+                            if l==j:
+                                hij += np.outer(self.Hx[i],self.Hx[j])
+                            else:
+                                hij += np.outer(self.Hx[i],self.x[j])*e[l]
+                        elif k==j:
+                            hij += np.outer(self.x[i],self.Hx[j])*e[l]
+                        else:
+                            if l==i:
+                                hij += np.outer(self.Hx[i],self.x[j])*e[k]
+                            elif l==j:
+                                hij += np.outer(self.x[i],self.Hx[j])*e[k]
+                            else:
+                                hij += np.outer(self.x[i],self.x[j])*e[k]*e[l]
+                H2[i,:,j,:] += 2*hij
+                H2[j,:,i,:] += 2*hij.T
+        H2 = H2.reshape(2*L,2*L) - np.outer(Hv,Hv)
+        return E,g,S,hess,hvcov,H2
 class ModelSampler(ExchangeSampler):
     def __init__(self,af,seed=None,every=1,burn_in=10):
         self.af = af
@@ -287,8 +289,9 @@ class ModelSampler(ExchangeSampler):
                 self.config = tuple(config_new)
         return self.config,None
 class ModelDenseSampler(DenseSampler):
-    def __init__(self,af,nsite,exact=False,seed=None,thresh=1e-28):
-        super().__init__(nsite,None,exact=exact,seed=seed,thresh=thresh)
+    def __init__(self,af,exact=False,seed=None,thresh=1e-28):
+        self.af = af
+        super().__init__(af.nsite,None,exact=exact,seed=seed,thresh=thresh)
     def get_all_configs(self,fix_sector=None):
         return list(itertools.product((0,1),repeat=self.nsite))
 class Model:
@@ -350,15 +353,19 @@ class Model:
         N = L = self.nsite
         wfn = self.wfn
 
-        esqsum = (self.e**2).sum()
+        esq = self.e**2
+        esqsum = esq.sum()
         self.evar = L - esqsum 
 
-        mu = wfn[:,1]**4/wfn[:,0]**2+wfn[:,0]**4/wfn[:,1]**2 
-        xi = wfn[:,1]**3/wfn[:,0]+wfn[:,0]**3/wfn[:,1]
-        self.gvar = mu + L - 1 + 2*self.e*(self.e-xi) - esqsum - self.g**2
+        #mu = wfn[:,1]**4/wfn[:,0]**2+wfn[:,0]**4/wfn[:,1]**2 
+        mu = 4/self.e**2-3
+        #xi = wfn[:,1]**3/wfn[:,0]+wfn[:,0]**3/wfn[:,1]
+        xi = 2/self.e-self.e
+        #self.gvar = mu + L - 1 + 2*self.e*(self.e-xi) - esqsum - self.g**2
+        self.gvar = 4*(self.e-1/self.e)**2 + L - esqsum - self.g**2
 
         self.Svar = np.ones((N,N)) 
-        np.fill_diagonal(self.Svar,mu-np.ones(N))
+        np.fill_diagonal(self.Svar,4/esq-4)
 
         self.Hvar = np.zeros((N,N))
         for i in range(N):
@@ -372,6 +379,14 @@ class Model:
                     continue
                 self.Hvar[i,j] = mu[i]-2*xi[i]*self.e[j]+L-1+2*(xi[i]-self.e[j])*(esumi-self.e[j])+self.quad_sum2(i,j)
                 self.Hvar[i,j] -= self.g[j]**2
+
+        self.hess_var = np.zeros((N,N))
+        np.fill_diagonal(self.hess_var,9*(1-esq)+(4/esq-3)*(L-1-esqsum+esq))
+        for i in range(N):
+            for j in range(N):
+                if i==j:
+                    continue
+                self.hess_var[i,j] = 4*(self.e[i]+self.e[j]-1/self.e[i])**2+L-esqsum
 #    def exact_variance(self):
 #        N = self.nsite
 #        wfn = self.wfn
@@ -424,101 +439,82 @@ class Model:
 #                    self.Hvar[i,j] = ham_sq[j]*(mu[j]-1)-2*self.e[i]*self.ham[j]*xi[j]+ham_sq_sum
 #                    self.Hvar[i,j] += 2*(self.ham[j]*xi[j]-self.e[i])*(self.esum-self.e[i]-self.e[j])+self.quad_sum2(i,j)
 #        assert np.linalg.norm(self.Hvar_1-self.H**2-self.Hvar)<1e-6
-    def hilbert_sum(self,thresh=1e-10):
-        evar = 0
+    def hilbert_sum(self,thresh=1e-10,gs=False):
         e = 0
-        gvar = 0 
-        g = 0
+        evar = 0
+
         v = 0
-        Svar = 0 
+        g = 0
+        gvar = 0 
+
         S = 0 
-        Hvar = 0
-        T2 = 0
-        T3 = 0
-        H = 0
+        Svar = 0 
+
         h = 0
+        H = 0
+        hess = 0
+        Hvar = 0
+        hess_var = 0
         print('check expresion...')
         for x in itertools.product((0,1),repeat=self.nsite):
             cx = self.amplitude(x)
             px = cx**2
         
             ex = self.eloc(x)
-            evar += px * ex**2
             e += px * ex
+            evar += px * ex**2
         
             vx = self.nu(x)
-            gvar += px * (ex-self.esum)**2*vx**2
-            g += px * (ex-self.esum)*vx
             v += px * vx
+            evx = (ex-self.esum)*vx
+            g += px * evx 
+            gvar += px * evx**2
         
-            Svar += px * np.outer(vx**2,vx**2)
-            S += px * np.outer(vx,vx)
+            Sx = np.outer(vx,vx)
+            S += px * Sx 
+            Svar += px * Sx**2
         
             hx = self.h(x)
             h += px*hx
-            Hvar += px * np.outer(vx**2,(hx-self.g)**2)
-            H += px * np.outer(vx,hx-self.g)
+            Hx = np.outer(vx,hx-self.g)
+            H += px * Hx 
+            Hvar += px * Hx**2 
 
+            hess_x = np.outer(vx,hx) - self.esum*Sx
+            hess += px*hess_x
+            hess_var += px*hess_x**2
+         
         evar -= e**2
-        print('evar=',evar)
+        if gs:
+            print('evar=',evar)
         assert abs(evar-self.evar)<thresh 
         assert abs(e-self.esum)<thresh 
 
         gvar -= g**2
-        print('gvar=',np.linalg.norm(gvar))
+        if gs:
+            print('gvar=',np.linalg.norm(gvar))
         assert np.linalg.norm(gvar-self.gvar)<thresh
         assert np.linalg.norm(g-self.g)<thresh
+        assert np.linalg.norm(v)<thresh
 
         Svar -= S**2
-        print('Svar=',np.linalg.norm(Svar))
+        if gs:
+            print(Svar)
         assert np.linalg.norm(Svar-self.Svar)<thresh
         assert np.linalg.norm(S-self.S)<thresh
 
         Hvar -= H**2
-        print(Hvar)
+        hess_var -= hess**2
+        if gs:
+            print(Hvar)
+            print(hess_var)
         assert np.linalg.norm(h-g)<thresh
         assert np.linalg.norm(H-self.H)<thresh
         assert np.linalg.norm(Hvar-self.Hvar)<thresh
+        hess_ = self.H-self.esum*self.S
+        assert np.linalg.norm(hess-hess_)<thresh
+        assert np.linalg.norm(hess_var-self.hess_var)<thresh
         print('expression checked')
-    def hilbert_sum2(self):
-        X = 0
-        Y = 0
-        Xsq = 0
-        Ysq = 0
-        XY = 0
-        h = 0
-
-        Z = 0
-        Zsq = 0
-        for x in itertools.product((0,1),repeat=self.nsite):
-            cx = self.amplitude(x)
-            px = cx**2
-
-            ex = self.eloc(x)-self.esum
-            vx = self.nu(x)
-            hx = self.h(x) - ex*vx
-
-            Xx = ex*np.outer(vx,vx)
-            X += px*Xx
-            Xsq += px*Xx**2
-
-            h += px*hx
-            Yx = np.outer(vx,hx)
-            Y += px*Yx
-            Ysq += px*Yx**2
-
-            XY += px*Xx*Yx
-
-            Zx = Xx + Yx
-            Z += px*Zx
-            Zsq += px*Zx**2
-        H = X+Y
-        varH = Xsq-X**2+Ysq-Y**2+2*(XY-X*Y)
-        print(np.linalg.norm(H-self.H))
-        print(np.linalg.norm(Z-self.H))
-        print(varH)
-        print(Zsq-Z**2)
-        print(h)
     def quad_sum0(self):
         return self.esum**2-(self.e**2).sum()
     def quad_sum1(self,i):

@@ -89,6 +89,7 @@ class AmplitudeFactory1D(AmplitudeFactory2D):
         return plq 
     def unsigned_amplitude(self,config,i=None,to_numpy=True):
         tn = self.get_mid_env(config)
+        tn = self.contract_mid_env(tn)
         cx = safe_contract(tn)
         if cx is None:
             return None

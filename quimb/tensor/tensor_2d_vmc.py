@@ -887,6 +887,7 @@ class ExchangeSampler2D(ExchangeSampler):
         self.af._get_all_benvs(self.af.parse_config(self.config),-step,stop=stop)
         sweep = range(self.Lx-x_bsz+1) if step==1 else range(self.Lx-x_bsz-1,-1)
         for i in sweep:
+            #print(f'RANK={RANK},i={i}')
             if self.af.from_plq:
                 tn = self.af.build_3row_tn(self.af.parse_config(self.config),i,x_bsz)
                 self.sweep_col_from_plq(i,tn,x_bsz,y_bsz)

@@ -1275,6 +1275,198 @@ class RGN(SR):
             return deltas,- np.dot(self.g,deltas) + .5 * dE
         else:
             return np.zeros(self.nparam,dtype=self.dtype_i),0. 
+class ExactVariance(SGD):
+    def __init__(self,sampler):
+        # parse sampler
+        self.sampler = sampler
+        self.nsite = self.sampler.af.nsite
+        self.nparam = self.sampler.af.nparam
+
+        self.dtype_o = float 
+        self.save_local = False
+        self.discard = 1e3
+        self.progbar = False
+        self.free_g = True
+        self.ctr_update = None
+        self.maxiter = 500 
+        self.tol = 1e-4
+    def compute(self,step):
+        self.step = step
+        self.sample(compute_v=True,compute_h=True)
+        self.extract()
+    def run(self,start,stop):
+        for step in range(start,stop):
+            self.step = step
+            self.sample(compute_v=True,compute_h=True)
+            self.extract()
+            x = self.transform_gradients(update=self.method)
+            self.free_quantities()
+            COMM.Bcast(x,root=0) 
+            psi = self.sampler.af.update(x,fname=f'psi{step+1}',root=0)
+    def transform_gradients(self,update):
+        if RANK>0:
+            return np.zeros(self.nparam)
+        if update=='SR':
+            A = self.S
+            cond = self.cond1
+            rate = self.rate1
+        elif update=='RGN':
+            A = self.H + self.S/self.rate2 
+            cond = self.cond2
+            rate = 1.
+        else:
+            raise NotImplementedError
+        if self.dense:
+            u,s,v = np.linalg.svd(A)
+            #print(s)
+            s = s[s>cond]
+            u = u[:,:len(s)]
+            v = v[:len(s)]
+            deltas = np.dot(v.T,np.dot(u.T,self.g)/s)
+        else:
+            def matvec(x):
+                return np.dot(A,x) + cond*x 
+            sh = self.nparam
+            LinOp = spla.LinearOperator((sh,sh),matvec=matvec,dtype=A.dtype)
+            x0 = self.g*self.rate1
+            deltas,_ = spla.lgmres(LinOp,self.g,x0=x0,tol=self.tol,maxiter=self.maxiter)
+        return self.update(deltas*rate)
+    def extract(self,energy_only=False):
+        E = np.zeros(1)
+        if RANK==0:
+            Ei = np.zeros(1)
+        else:
+            Ei = np.ones(1)*np.dot(self.f,self.e)
+        COMM.Allreduce(Ei,E,op=MPI.SUM)
+        Esq = np.zeros(1)
+        if RANK==0: 
+            print(f'step={self.step},E={E[0]/self.nsite}')
+            Esqi = np.zeros(1)
+        else:
+            Esqi = np.ones(1)*np.dot(self.f,self.e**2) 
+        COMM.Reduce(Esqi,Esq,op=MPI.SUM,root=0)
+        if energy_only:
+            return
+
+        vmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Allreduce(self.vsum,vmean,op=MPI.SUM)
+        evmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Reduce(self.evsum,evmean,op=MPI.SUM,root=0)
+        g2 = np.zeros(self.nparam,dtype=self.dtype_o)
+        g3 = np.zeros(self.nparam,dtype=self.dtype_o)
+        g2sq = np.zeros(self.nparam,dtype=self.dtype_o)
+        g3sq = np.zeros(self.nparam,dtype=self.dtype_o)
+        if RANK==0:
+            #print(vmean)
+            #print(np.amax(vmean))
+            g1 = evmean - E*vmean
+            g2i = np.zeros(self.nparam,dtype=self.dtype_o)
+            g2sqi = np.zeros(self.nparam,dtype=self.dtype_o)
+            g3i = np.zeros(self.nparam,dtype=self.dtype_o)
+            g3sqi = np.zeros(self.nparam,dtype=self.dtype_o)
+        else:
+            ei = self.e - E[0]
+            fe = self.f*ei
+            fesq = self.f*ei**2
+            g2i = np.dot(fe,self.v)
+            g2sqi = np.dot(fesq,self.v**2)
+            vi = self.v - vmean.reshape(1,self.nparam)
+
+            #print(vi.shape)
+            #arr = np.fabs(vi)
+            #idx = np.argmax(arr.flatten())
+            #x,y = idx // vi.shape[1], idx % vi.shape[1]
+            #print('maxvi=',x,y,np.amax(arr),arr[x,y],vmean[y])
+            #print('f,e,fe=',self.f[x],np.amin(self.f),ei[x],fesq[x])
+            #print(ei)
+            #print(np.log10(self.f))
+            
+            vsqi = vi**2
+            g3i = np.dot(fe,vi)
+            g3sqi = np.dot(fesq,vsqi) 
+            #print(max(g2sqi))
+            idx = np.argmax(g3sqi)
+            #print('g=',idx,g3sqi[idx])
+
+            #v_ = np.dot(self.f,vsqi)
+            #idx = np.argmax(v_)
+            #print('v=',idx,v_[idx])
+        COMM.Reduce(g2i,g2,op=MPI.SUM,root=0)
+        COMM.Reduce(g3i,g3,op=MPI.SUM,root=0)
+        COMM.Reduce(g2sqi,g2sq,op=MPI.SUM,root=0)
+        COMM.Reduce(g3sqi,g3sq,op=MPI.SUM,root=0)
+
+        S1 = np.zeros((self.nparam,)*2)
+        S2 = np.zeros((self.nparam,)*2)
+        Ssq = np.zeros((self.nparam,)*2)
+        if RANK==0:
+            assert np.linalg.norm(g1-g2)/self.nparam < 1e-6
+            assert np.linalg.norm(g1-g3)/self.nparam < 1e-6
+            S1i = np.zeros((self.nparam,)*2)
+            S2i = np.zeros((self.nparam,)*2)
+            Ssqi = np.zeros((self.nparam,)*2)
+        else:
+            S1i = np.einsum('s,si,sj->ij',self.f,self.v,self.v)
+            S2i = np.einsum('s,si,sj->ij',self.f,vi,vi)
+            Ssqi = np.einsum('s,si,sj->ij',self.f,vsqi,vsqi)
+        COMM.Reduce(S1i,S1,op=MPI.SUM,root=0)
+        COMM.Reduce(S2i,S2,op=MPI.SUM,root=0)
+        COMM.Reduce(Ssqi,Ssq,op=MPI.SUM,root=0)
+
+        hmean = np.zeros(self.nparam,dtype=self.dtype_o)
+        COMM.Allreduce(self.hsum,hmean,op=MPI.SUM)
+        H1 = np.zeros((self.nparam,)*2)
+        H2 = np.zeros((self.nparam,)*2)
+        Hsq = np.zeros((self.nparam,)*2)
+        H2i = np.zeros((self.nparam,)*2)
+        Hsqi = np.zeros((self.nparam,)*2)
+        if RANK==0:
+            S1 -= np.outer(vmean,vmean) 
+            assert np.linalg.norm(S1-S2)/self.nparam < 1e-6
+            H1i = np.zeros((self.nparam,)*2)
+        else:
+            H1i = np.einsum('s,si,sj->ij',self.f,self.v,self.h)
+            h2i = self.h-self.e.reshape(len(self.e),1)*self.v
+            for x,fx in enumerate(self.f):
+                Hx = np.outer(vi[x],vi[x])*ei[x]
+                Hx += np.outer(self.v[x],h2i[x])
+                H2i += fx*Hx
+                Hsqi += fx*Hx**2
+        COMM.Reduce(H1i,H1,op=MPI.SUM,root=0)
+        COMM.Reduce(H2i,H2,op=MPI.SUM,root=0)
+        COMM.Reduce(Hsqi,Hsq,op=MPI.SUM,root=0)
+        #return
+        if RANK>0:
+            return
+        H1 -= np.outer(vmean,hmean) 
+        H1 -= np.outer(g1,vmean)
+        H1 -= E*S1
+        assert np.linalg.norm(H1-H2)/self.nparam < 1e-6
+        f = h5py.File(self.tmpdir+f'step{self.step}.hdf5','w')
+        f.create_dataset('H',data=H1) 
+        Hvar = Hsq-H1**2
+        assert np.linalg.norm(Hvar-np.fabs(Hvar))/self.nparam<1e-6
+        f.create_dataset('Hvar',data=Hvar) 
+        f.create_dataset('S',data=S1) 
+        Svar = Ssq-S1**2
+        assert np.linalg.norm(Svar-np.fabs(Svar))/self.nparam<1e-6
+        f.create_dataset('Svar',data=Svar) 
+        f.create_dataset('g',data=g1) 
+        gvar = g2sq-g1**2
+        assert np.linalg.norm(gvar-np.fabs(gvar))/self.nparam<1e-6
+        f.create_dataset('gvar1',data=gvar) 
+        gvar = g3sq-g1**2
+        assert np.linalg.norm(gvar-np.fabs(gvar))/self.nparam<1e-6
+        f.create_dataset('gvar2',data=gvar) 
+        f.create_dataset('E',data=E) 
+        Evar = Esq-E**2
+        assert Evar[0]>0
+        f.create_dataset('Evar',data=Evar) 
+        f.close()
+        self.H = H1
+        self.S = S1
+        self.g = g1
+        self.E = E
 class lBFGS(SR):
     def __init__(self,sampler,npairs=(5,50),gamma_method=1,**kwargs):
         super().__init__(sampler,**kwargs) 
@@ -1875,14 +2067,18 @@ class ExchangeSampler:
 
         if exclude_root and RANK==0:
             print('\tlog prob=',self.px)
+            #exit()
             return 
         t0 = time.time()
         burn_in = self.burn_in if burn_in is None else burn_in
         pg = None
         if progbar and RANK==SIZE-1:
             pg = Progbar(total=burn_in)
+        t0 = time.time()
         for n in range(burn_in):
             self.config,self.omega = self.sample()
+            #print(f'RANK={RANK},time={time.time()-t0}')
+            #exit()
             if pg is not None:
                 pg.update()
         if RANK==SIZE-1:
@@ -2207,6 +2403,8 @@ class AmplitudeFactory:
     def _new_log_prob_from_plq(self,plq,sites,config_sites,config_new):
         plq_new,cx = self._new_amp_from_plq(plq,sites,config_sites,config_new)
         if cx is None:
+            return plq_new,None
+        if abs(cx)<1e-28:
             return plq_new,None
         return plq_new,np.log(cx**2)
     def tensor_grad(self,tsr,set_zero=True):
