@@ -522,7 +522,202 @@ class Model:
     def quad_sum2(self,i,j):
         eij = self.e[i] + self.e[j]
         return self.eqsum - 2*eij*(self.esum-eij) - 2*self.e[j]*self.e[i]
+class ModelShift(Model):
+    def __init__(self,theta,shift,ham=None):
+        self.shift = shift
+        super().__init__(theta,ham=ham)
+        self.wfn += self.shift 
+        self.prob = self.wfn**2
 def init(N,nrun,perr,scale=0.01):
     ei = np.random.normal(loc=perr/100,scale=scale,size=(N,nrun))-1
     assert len(ei[ei<-1])==0
     return np.arcsin(ei)/2
+def get_MG_state(theta,shift=None):
+    ls = []
+    for i,theta_i in enumerate(theta):
+        sin,cos = np.sin(theta_i),np.cos(theta_i)
+        if shift is None: # derivative
+            ls.append(np.array([[0,-sin],[cos,0]]))
+        else:
+            ls.append(np.array([[0,cos],[sin,0]])+shift*np.eye(2))
+    return ls
+class MG:
+    def __init__(self,theta,shift=0.,pbc=False,J1=1,J2=0.5):
+        self.theta = theta
+        self.shift = shift
+        self.wfn = get_MG_state(theta,shift=shift)
+        self.dwfn = get_MG_state(theta)
+        self.J1 = J1
+        self.J2 = J2
+        self.pbc = False
+        self.nsite = len(theta)*2
+        self.nparam = len(theta)
+    def parse_config(self,config):
+        return config
+    def get_x(self):
+        return self.theta
+    def amplitude(self,config):
+        amp = 1
+        for i,M in enumerate(self.wfn):
+            s1,s2 = config[2*i],config[2*i+1] 
+            amp *= M[s1,s2]
+        return amp
+    def log_prob(self,config):
+        return np.log(self.amplitude(config)**2)
+    def eloc_term(self,i,j,config):
+        s1,s2 = config[i],config[j] 
+        if s1==s2:
+            return 0
+        s1_new,s2_new = 1-s1,1-s2
+        if i%2==0 and i+1==j:
+            # oo ** oo
+            M = self.wfn[i//2]
+            return M[s1_new,s2_new]/M[s1,s2]
+        if i%2==1 and i+1==j:
+            # o* *o
+            s0,s3 = config[i-1],config[j+1]
+            M1,M2 = self.wfn[i//2],self.wfn[j//2]
+            return M1[s0,s1_new]*M2[s2_new,s3]/M1[s0,s1]/M2[s2,s3]
+        if i%2==0 and i+2==j:
+            # *o *o
+            s0,s3 = config[i+1],config[j+1]
+            M1,M2 = self.wfn[i//2],self.wfn[j//2]
+            return M1[s1_new,s0]*M2[s2_new,s3]/M1[s1,s0]/M2[s2,s3]
+        if i%2==1 and i+2==j:
+            # o* o*
+            s0,s3 = config[i-1],config[j-1]
+            M1,M2 = self.wfn[i//2],self.wfn[j//2]
+            return M1[s0,s1_new]*M2[s3,s2_new]/M1[s0,s1]/M2[s3,s2]
+    def nu(self,config):
+        nu = np.zeros(len(self.wfn))
+        for i,M in enumerate(self.wfn):
+            s1,s2 = config[2*i],config[2*i+1] 
+            nu[i] = self.dwfn[i][s1,s2]/M[s1,s2]
+        return nu
+    def compute_local_energy_eigen(self,config):
+        e = np.zeros(2) 
+        for d in (1,2):
+            for i in range(self.nsite):
+                s1 = (-1) ** config[i]
+                if i+d<self.nsite:
+                    e[d-1] += s1 * (-1)**config[i+d]
+                else:
+                    if self.pbc:
+                        e[d-1] += s1 * (-1)**config[(i+d)%self.nsite]
+        return .25 * (e[0]*self.J1 + e[1]*self.J2) 
+    def hterm(self,i,j,k,config):
+        s1,s2 = config[i],config[j] 
+        if s1==s2:
+            return 0
+        s1_new,s2_new = 1-s1,1-s2
+        idx = i//2
+        k1,k2 = config[2*k],config[2*k+1]    
+        D,Mk = self.dwfn[k],self.wfn[k]
+        if i%2==0 and i+1==j:
+            # oo ** oo
+            if k==idx:
+                return D[s1_new,s2_new]/Mk[s1,s2]
+            else:
+                M = self.wfn[idx]
+                return M[s1_new,s2_new]*D[k1,k2]/M[s1,s2]/Mk[k1,k2]
+        if i%2==1 and i+1==j:
+            # o* *o
+            s0,s3 = config[i-1],config[j+1]
+            if k==idx:
+                M = self.wfn[idx+1]
+                return D[s0,s1_new]*M[s2_new,s3]/Mk[s0,s1]/M[s2,s3]
+            elif k==idx+1:
+                M = self.wfn[idx]
+                return M[s0,s1_new]*D[s2_new,s3]/M[s0,s1]/Mk[s2,s3]
+            else:
+                M1,M2 = self.wfn[idx],self.wfn[idx+1]
+                return M1[s0,s1_new]*M2[s2_new,s3]*D[k1,k2]/M1[s0,s1]/M2[s2,s3]/Mk[k1,k2]
+        if i%2==0 and i+2==j:
+            # *o *o
+            s0,s3 = config[i+1],config[j+1]
+            if k==idx:
+                M = self.wfn[idx+1]
+                return D[s1_new,s0]*M[s2_new,s3]/Mk[s1,s0]/M[s2,s3]
+            elif k==idx+1:
+                M = self.wfn[idx]
+                return M[s1_new,s0]*D[s2_new,s3]/M[s1,s0]/Mk[s2,s3]
+            else:
+                M1,M2 = self.wfn[idx],self.wfn[idx+1]
+                return M1[s1_new,s0]*M2[s2_new,s3]*D[k1,k2]/M1[s1,s0]/M2[s2,s3]/Mk[k1,k2]
+        if i%2==1 and i+2==j:
+            # o* o*
+            s0,s3 = config[i-1],config[j-1]
+            if k==idx:
+                M = self.wfn[idx+1]
+                return D[s0,s1_new]*M[s3,s2_new]/Mk[s0,s1]/M[s3,s2]
+            elif k==idx+1:
+                M = self.wfn[idx]
+                return M[s0,s1_new]*D[s3,s2_new]/M[s0,s1]/Mk[s3,s2]
+            else:
+                M1,M2 = self.wfn[idx],self.wfn[idx+1]
+                return M1[s0,s1_new]*M2[s3,s2_new]*D[k1,k2]/M1[s0,s1]/M2[s3,s2]/D[k1,k2]
+    def compute_local_energy(self,config,compute_v=True,compute_h=True):
+        cx = self.amplitude(config) 
+        ex = 0 
+        for d,J in zip((1,2),(self.J1,self.J2)):
+            for i in range(len(config)-d):
+                if config[i]==config[i+d]:
+                    continue
+                ex += J*self.eloc_term(i,i+d,config)
+        u = self.compute_local_energy_eigen(config)
+        ex = ex*.5 + u 
+        vx = None
+        if compute_v:
+            vx = self.nu(config)
+        hx = None
+        if not compute_h:
+            return cx,ex,vx,hx,0.
+        hx = np.zeros(len(self.wfn))
+        for d,J in zip((1,2),(self.J1,self.J2)):
+            for i in range(len(config)-d):
+                if config[i]==config[i+d]:
+                    continue
+                for k in range(len(hx)):
+                    hx[k] += J*self.hterm(i,i+d,k,config)
+        hx = hx*.5 + u*vx 
+        return cx,ex,vx,hx,0.
+    def update(self,theta,fname=None,root=0):
+        self.theta = theta 
+        self.wfn = get_MG_state(theta,shift=self.shift)
+        self.dwfn = get_MG_state(theta)
+        if fname is None:
+            return
+        if RANK==root:
+            np.save(fname+'.npy',self.theta)
+
+class MGSampler(ExchangeSampler):
+    def __init__(self,af,seed=None,every=1,burn_in=10):
+        self.af = af
+        self.nsite = self.af.nsite
+        self.rng = np.random.default_rng(seed)
+        self.every = every 
+        self.exact = False
+        self.px = None
+        self.burn_in = burn_in
+    def sample(self):
+        for _ in range(self.every):
+            step = self.rng.choice([-1,1])
+            sweep = range(self.nsite-1) if step==1 else range(self.nsite-2,-1,-1)
+            for i in sweep:
+                i1,i2 = self.config[i],self.config[i+1]
+                if i1==i2:
+                    continue
+                if i%2==0:
+                    M = self.af.wfn[i//2]
+                    acceptance = (M[i2,i1]/M[i1,i2])**2
+                else:
+                    M1,M2 = self.af.wfn[i//2],self.af.wfn[i//2+1]
+                    i0,i3 = self.config[i-1],self.config[i+2]
+                    acceptance = (M1[i0,i2]*M2[i1,i3]/M1[i0,i1]/M2[i2,i3])**2
+                if acceptance < self.rng.uniform(): # reject
+                    continue
+
+                config_new = list(self.config)
+                config_new[i],config_new[i+1] = i2,i1 
+                self.config = tuple(config_new)
+        return self.config,None
