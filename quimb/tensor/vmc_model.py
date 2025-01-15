@@ -299,6 +299,7 @@ class Model:
         self.nsite = self.nparam = len(theta)
         self.theta = theta
         self.wfn = np.stack([np.sin(theta),np.cos(theta)],axis=1)
+        self.dwfn = np.stack([np.cos(theta),-np.sin(theta)],axis=1)
         self.prob = self.wfn**2
         self.ham = np.ones(self.nsite) if ham is None else ham
     def parse_config(self,config):
@@ -314,13 +315,14 @@ class Model:
         ls = np.array([self.wfn[i,1-xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
         return np.dot(ls,self.ham)
     def nu(self,x):
-        ls = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
+        #ls = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
+        ls = np.array([self.dwfn[i,xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
         return ls
     def h(self,x):
         ex = self.ham*np.array([self.wfn[i,1-xi]/self.wfn[i,xi] for i,xi in enumerate(x)])
-        vx = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
+        #vx = np.array([self.wfn[i,1-xi]/self.wfn[i,xi]*(-1)**xi for i,xi in enumerate(x)])
         hx2 = self.ham*np.power(-np.ones(self.nsite),x)
-        hx = vx * (ex.sum() - ex) - hx2 
+        hx = self.nu(x) * (ex.sum() - ex) - hx2 
         return hx
     def compute_local_energy(self,config,compute_v=True,compute_h=True):
         cx = self.amplitude(config) 
@@ -524,10 +526,112 @@ class Model:
         return self.eqsum - 2*eij*(self.esum-eij) - 2*self.e[j]*self.e[i]
 class ModelShift(Model):
     def __init__(self,theta,shift,ham=None):
-        self.shift = shift
         super().__init__(theta,ham=ham)
+        self.shift = shift
         self.wfn += self.shift 
         self.prob = self.wfn**2
+    def exact_expectation(self):
+        self.e = np.prod(self.wfn,axis=1)*2*self.ham
+        self.n = np.sum(self.prob,axis=1)
+        self.norm_sq = np.prod(self.n)
+        self.ehat = self.e/self.n
+        self.esum = self.ehat.sum()
+
+        self.v = self.shift *(self.dwfn[:,0]+self.dwfn[:,1])
+        self.g = (self.dwfn[:,0]**2-self.dwfn[:,1]**2)*self.ham 
+        self.g += (1-self.ehat)*self.v
+        self.g /= self.n
+        self.v /= self.n
+
+        self.S = 1/self.n-self.v**2
+        self.S = np.diag(self.S)
+        self.H = np.eye(self.nsite)
+        np.fill_diagonal(self.H,self.esum-2*self.e)
+    def exact_variance(self):
+        N = L = self.nsite
+        wfn = self.wfn
+        esqsum = (self.ehat**2).sum()
+
+        self.evar = L - esqsum 
+        
+        mu = self.prob[:,1]*self.dwfn[:,0]**2/self.prob[:,0]
+        mu += self.prob[:,0]*self.dwfn[:,1]**2/self.prob[:,1]
+        xi = self.wfn[:,1]*self.dwfn[:,0]**2/self.wfn[:,0]
+        xi += self.wfn[:,0]*self.dwfn[:,1]**2/self.wfn[:,1]
+        self.gvar = mu + L-1 + 2*(self.ehat-xi)*self.ehat - esqsum
+        self.gvar = self.gvar/self.n -self.g**2
+
+        self.Svar = np.outer(1/self.n,1/self.n)
+        #self.Svar -= np.outer(self.v**2,1/self.n)
+        #self.Svar -= np.outer(1/self.n,self.v**2)
+        #self.Svar += np.outer(self.v**2,self.v**2)
+        self.Svar -= np.outer(self.v**2,self.v**2)
+
+        Sdiag = self.dwfn[:,0]**4/self.prob[:,0]+self.dwfn[:,1]**4/self.prob[:,1]
+        Sdiag -= 4*self.v*(self.dwfn[:,0]**3/self.wfn[:,0]+self.dwfn[:,1]**3/self.wfn[:,1])
+        Sdiag += 6*self.v**2
+        Sdiag /= self.n
+        Sdiag -= 3*self.v**4
+        Sdiag -= np.diag(self.S)**2
+        np.fill_diagonal(self.Svar,Sdiag)
+
+    def hilbert_sum(self,thresh=1e-10,gs=False):
+        e = 0
+        evar = 0
+
+        v = 0
+        g = 0
+        gvar = 0 
+
+        S = 0 
+        Svar = 0 
+
+        h = 0
+        H = 0
+        hess = 0
+        Hvar = 0
+        hess_var = 0
+        print('check expresion...')
+        nsq = 0
+        for x in itertools.product((0,1),repeat=self.nsite):
+            cx = self.amplitude(x)
+            px = cx**2/self.norm_sq
+            nsq += px
+        
+            ex = self.eloc(x)
+            e += px * ex
+            evar += px * ex**2
+
+            vx = self.nu(x)
+            v += px * vx
+            evx = (ex-self.esum)*vx
+            g += px * evx 
+            gvar += px * evx**2
+
+            #Sx = np.outer(vx-self.v,vx-self.v)
+            Sx = np.outer(vx,vx)-np.outer(self.v,self.v)
+            S += px * Sx 
+            Svar += px * Sx**2
+        assert abs(nsq-1)<thresh 
+
+        evar -= e**2
+        if gs:
+            print('evar=',evar)
+        assert abs(evar-self.evar)<thresh 
+        assert abs(e-self.esum)<thresh 
+
+        gvar -= g**2
+        if gs:
+            print('gvar=',np.linalg.norm(gvar))
+        assert np.linalg.norm(gvar-self.gvar)<thresh
+        assert np.linalg.norm(g-self.g)<thresh
+        assert np.linalg.norm(v-self.v)<thresh
+
+        Svar -= S**2
+        print(Svar)
+        print(self.Svar)
+        #assert np.linalg.norm(Svar-self.Svar)<thresh
+        #assert np.linalg.norm(S-self.S)<thresh
 def init(N,nrun,perr,scale=0.01):
     ei = np.random.normal(loc=perr/100,scale=scale,size=(N,nrun))-1
     assert len(ei[ei<-1])==0
@@ -563,7 +667,10 @@ class MG:
             amp *= M[s1,s2]
         return amp
     def log_prob(self,config):
-        return np.log(self.amplitude(config)**2)
+        amp = abs(self.amplitude(config))
+        if amp<1e-28: 
+            return None
+        return np.log(amp)*2
     def eloc_term(self,i,j,config):
         s1,s2 = config[i],config[j] 
         if s1==s2:
@@ -655,7 +762,7 @@ class MG:
                 return M[s0,s1_new]*D[s3,s2_new]/M[s0,s1]/Mk[s3,s2]
             else:
                 M1,M2 = self.wfn[idx],self.wfn[idx+1]
-                return M1[s0,s1_new]*M2[s3,s2_new]*D[k1,k2]/M1[s0,s1]/M2[s3,s2]/D[k1,k2]
+                return M1[s0,s1_new]*M2[s3,s2_new]*D[k1,k2]/M1[s0,s1]/M2[s3,s2]/Mk[k1,k2]
     def compute_local_energy(self,config,compute_v=True,compute_h=True):
         cx = self.amplitude(config) 
         ex = 0 
