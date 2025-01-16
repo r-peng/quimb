@@ -558,21 +558,17 @@ class ModelShift(Model):
         mu += self.prob[:,0]*self.dwfn[:,1]**2/self.prob[:,1]
         xi = self.wfn[:,1]*self.dwfn[:,0]**2/self.wfn[:,0]
         xi += self.wfn[:,0]*self.dwfn[:,1]**2/self.wfn[:,1]
-        self.gvar = mu + L-1 + 2*(self.ehat-xi)*self.ehat - esqsum
-        self.gvar = self.gvar/self.n -self.g**2
+        self.gvar = mu + L-1 + 2*xi*(self.esum-self.ehat)
+        self.gvar += self.esum**2 - esqsum - 2*(self.esum-self.ehat)*self.ehat
+        self.gvar /= self.n
+        self.gvar -= (self.g+self.esum*self.v)**2
 
         self.Svar = np.outer(1/self.n,1/self.n)
-        #self.Svar -= np.outer(self.v**2,1/self.n)
-        #self.Svar -= np.outer(1/self.n,self.v**2)
-        #self.Svar += np.outer(self.v**2,self.v**2)
         self.Svar -= np.outer(self.v**2,self.v**2)
 
         Sdiag = self.dwfn[:,0]**4/self.prob[:,0]+self.dwfn[:,1]**4/self.prob[:,1]
-        Sdiag -= 4*self.v*(self.dwfn[:,0]**3/self.wfn[:,0]+self.dwfn[:,1]**3/self.wfn[:,1])
-        Sdiag += 6*self.v**2
         Sdiag /= self.n
-        Sdiag -= 3*self.v**4
-        Sdiag -= np.diag(self.S)**2
+        Sdiag -= 1/self.n**2
         np.fill_diagonal(self.Svar,Sdiag)
 
     def hilbert_sum(self,thresh=1e-10,gs=False):
@@ -604,11 +600,10 @@ class ModelShift(Model):
 
             vx = self.nu(x)
             v += px * vx
-            evx = (ex-self.esum)*vx
+            evx = ex*vx-self.esum*self.v
             g += px * evx 
             gvar += px * evx**2
 
-            #Sx = np.outer(vx-self.v,vx-self.v)
             Sx = np.outer(vx,vx)-np.outer(self.v,self.v)
             S += px * Sx 
             Svar += px * Sx**2
@@ -628,10 +623,8 @@ class ModelShift(Model):
         assert np.linalg.norm(v-self.v)<thresh
 
         Svar -= S**2
-        print(Svar)
-        print(self.Svar)
-        #assert np.linalg.norm(Svar-self.Svar)<thresh
-        #assert np.linalg.norm(S-self.S)<thresh
+        assert np.linalg.norm(Svar-self.Svar)<thresh
+        assert np.linalg.norm(S-self.S)<thresh
 def init(N,nrun,perr,scale=0.01):
     ei = np.random.normal(loc=perr/100,scale=scale,size=(N,nrun))-1
     assert len(ei[ei<-1])==0
